@@ -3,26 +3,43 @@
 > 轻量级 **Flutter 应用启动器与发布管理器** —— 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
 > 界面参考 **WindTerm**：高信息密度、多标签终端、层级树导航。
 
-![界面截图](docs/screenshot-m0.png)
+![界面截图](docs/shot-m1.png)
 
 ---
 
 ## 当前状态
 
-**M0：界面骨架完成**（纯 UI，数据全部为 Mock）
+**M1：项目管理 + 项目树 + 持久化**（真实数据，尚未接入 PTY）
 
-界面上能看到、点到的都已在位；但**没有任何真实能力接入** —— 没有 PTY、没有 `flutter` 进程、没有设备探测、没有持久化。这些分别在 M1–M7 落地。
+界面已跑通真实链路：`state.json` → Rust → 前端渲染。终端区仍为占位，等待 M2 接入 ConPTY。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | Tauri 骨架 + WindTerm 风格界面 | ✅ 完成 |
-| M1 | 项目管理 + 项目树 + 持久化 | 待做 |
+| M1 | 项目管理 + 项目树 + 持久化 | ✅ 完成 |
 | M2 | ConPTY 会话 + 真实终端 + 进程树回收 | 待做 |
 | M3 | 设备/模拟器（`flutter daemon`） | 待做 |
 | M4 | 热重载 / 热重启 / 停止 / DevTools | 待做 |
 | M5 | 发布构建 + 通知 | 待做 |
-| M6 | `launch.json` 导入 | 待做 |
+| M6 | `launch.json` 高级导入（手动添加命令等） | 待做 |
 | M7 | 会话恢复 + 打磨 | 待做 |
+
+### M1 已实现
+
+- **项目管理**：目录选择器添加；自动区分「单应用」（含 `pubspec.yaml`）与「工作区」（monorepo，靠 `.vscode/launch.json` + `cwd` 定位子应用）；支持移除与重复校验
+- **`launch.json` 导入**：手写 JSONC 状态机（行注释 / 块注释 / 尾逗号）；按 `type == "dart" && request == "launch"` 过滤；`cwd` 相对**工作区根**解析（VS Code 的真实语义，不是相对 `.vscode`）
+- **项目树**：真实数据渲染，展示 Flutter 来源（`FVM` / `自定义` / `PATH`）、版本号、`release` 模式标记
+- **持久化**：`%APPDATA%\com.flutterlauncher.app\state.json`，`schemaVersion: 2`，原子写入；损坏时备份为 `state.corrupt.json` 后重建
+- **Flutter 探测**：解析可执行文件并执行 `--version`。Windows 上 `.bat` 必须经 `cmd.exe`，且 Rust 的 `Command` 会把引号转义为 `\"`（cmd 不认），因此改用 `raw_arg` 拼接命令尾
+
+### 测试
+
+```bash
+cd src-tauri && cargo test
+```
+
+9 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复。
+
 
 ---
 
@@ -68,15 +85,22 @@ npm run tauri build  # 打包安装程序
 
 ```
 ├── src/                        前端
-│   ├── main.ts                 应用入口（界面渲染 + Mock 数据）
+│   ├── main.ts                 应用入口（项目管理 / 项目树 / 持久化）
 │   ├── styles.css              WindTerm 风格深色主题
 │   └── vite-env.d.ts
 ├── src-tauri/                  Rust 后端
-│   ├── src/lib.rs              Tauri 入口
+│   ├── src/lib.rs              Tauri 命令注册
+│   ├── src/ops.rs              业务操作（添加项目 / 导入），纯函数便于测试
+│   ├── src/store.rs            状态读写（原子落盘 / 损坏恢复）
+│   ├── src/launch.rs           launch.json 解析
+│   ├── src/jsonc.rs            JSONC 状态机（注释 / 尾逗号）
+│   ├── src/flutter.rs          Flutter 可执行文件解析与版本探测
+│   ├── src/model.rs            数据模型（schemaVersion 2）
 │   ├── tauri.conf.json         窗口与应用配置
 │   └── Cargo.toml
 ├── docs/
-│   └── screenshot-m0.png       M0 界面截图
+│   ├── shot-m1.png             M1 界面截图
+│   └── shot-m1-tree.png        项目树细节
 ├── readme_md_for_ai_agents.md  ★ 权威规格 v2（AI 助手必读）
 ├── ARCHITECTURE_V2.md          设计推导与源码级证据
 └── PROJECT_ANALYSIS.md         v1 需求评估（历史文档）

@@ -24,6 +24,7 @@
 | D-9 | **v1 只做最简终端**：搜索/高亮/会话日志落盘/同步输入/分屏/时间戳/快捷命令栏**全部不做** | ✅ 已定（范围冻结） |
 | D-10 | 重启后**恢复 tab 壳 + 历史输出**，但**不自动重启进程**，需用户手动"重跑" | ✅ 已定 |
 | D-11 | release 构建结束：**保留 tab + 系统通知** | ✅ 已定 |
+| D-12 | 项目支持**两种形态**：单应用（含 `pubspec.yaml`）与**工作区/monorepo**（无 pubspec，命令靠 `cwd` 定位子应用） | ✅ 已定（M1 实测补充） |
 
 **D-6 是本规格最关键的一条**：它把架构从「JSON 事件驱动」切换为「伪终端 + 文本状态机」。详见 §5、§8。
 
@@ -90,7 +91,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| 项目管理 | 添加/移除项目，校验 `pubspec.yaml` |
+| 项目管理 | 添加/移除项目；支持**单应用**（自身含 `pubspec.yaml`）与**工作区**（自身无 pubspec，靠 `.vscode/launch.json` + 各命令 `cwd` 定位子应用） |
 | 项目树 | 右侧两级树：项目 → 命令；右键选设备 |
 | 命令执行 | 每条命令一个独立 ConPTY 终端 tab |
 | 终端 | 基础 xterm.js：彩色 ANSI、滚动、选中复制、粘贴、Ctrl+C 中断 |
@@ -123,7 +124,7 @@
 
 | 概念 | 说明 | 生命周期 |
 |---|---|---|
-| **Project** | 一个含 `pubspec.yaml` 的目录 | 持久化 |
+| **Project** | 一个目录，两种形态：**single**（自身含 `pubspec.yaml`）或 **workspace**（monorepo，自身无 pubspec，含 `.vscode/launch.json`，各命令用 `cwd` 指向子应用） | 持久化 |
 | **Command** | 项目下的一条可执行配置（`kind: run` / `build`） | 持久化 |
 | **Session** | 一次命令执行 = 一个 tab = **一个 PTY + 一个进程** | 运行期 |
 | **Device** | 来自 daemon 的设备/模拟器 | 动态 |
@@ -404,6 +405,7 @@ cmd.exe /d /s /c ""<flutter.bat 绝对路径>" <args...>"
       "id": "uuid",
       "name": "MyFlutterApp",
       "path": "D:\\projects\\my_flutter_app",
+      "kind": "workspace",                       // single | workspace
       "flutterTool": { "mode": "fvm" },          // 可选，项目级覆盖
       "commands": [
         {
@@ -449,7 +451,8 @@ cmd.exe /d /s /c ""<flutter.bat 绝对路径>" <args...>"
 1. **解析**：使用成熟 JSONC 解析器（`json5` / `strip-json-comments` + 去尾逗号）。
    **禁止用正则剥离注释** —— `"args": ["--dart-define=HOST=http://api.example.com"]` 会被 `//` 规则截断。
 2. **过滤**：仅接受 `type == "dart"` **且** `request == "launch"` 的配置项。`request == "attach"` 单独标记为 `kind: "attach"`（v1.1 支持）。
-3. **路径**：`cwd` 相对 **`launch.json` 所在目录**解析，不是相对项目根。
+3. **路径**：`cwd` 相对 **工作区根**（即 `.vscode` 的**父目录**）解析，**不是**相对 `.vscode` 目录本身。
+   > 实测样例：`D:\demo\code\flutter\library\.vscode\launch.json` 中的 `"cwd": "projects/days"`，实际目录为 `D:\demo\code\flutter\library\projects\days`。
 4. **字段映射**：`name→name`、`program→program`、`args→args`、`env→env`、`flutterMode→flutterMode`、`toolArgs→toolArgs`、`deviceId→deviceId`、`emulatorId→emulatorId`、`noDebug→noDebug`。
 5. **兼容**：`customTool` / `customToolReplacesArgs` 存在时提示用户"该命令使用自定义 Flutter 工具"，并映射到项目级 `flutterTool`（FVM 用户常见）。
 6. **导入前预览**：列出将被导入的配置，允许用户勾选。
@@ -589,6 +592,10 @@ per-project semaphore
 | A14 | release 构建结束弹出系统通知 | 通知含项目名与成功/失败 |
 | A15 | 终端中文与英文混排对齐（CJK 宽字符） | 目视无错位 |
 | A16 | v1 中不存在搜索框、分屏、同步输入入口 | 与 §3.1 一致 |
+| A17 | 导入 monorepo 工作区（根目录**无** `pubspec.yaml`） | 9 条命令全部导入、`cwd` 解析正确、零告警 |
+| A18 | 状态持久化往返 | 重启后项目与命令完整保留，`state.json` 的 `schemaVersion = 2` |
+| A19 | 重复添加同一目录 | 被拒绝，提示"该项目已在列表中" |
+| A20 | 状态文件损坏 | 备份为 `state.corrupt.json` 并重置，不静默丢失 |
 
 ---
 
