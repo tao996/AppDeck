@@ -1,5 +1,7 @@
+mod android;
 mod daemon;
 mod detect;
+mod doctor;
 mod flutter;
 mod harmony;
 mod logs;
@@ -137,7 +139,8 @@ fn start_session(
     let plan = ops::build_plan(&state, &project_id, &command_id, device_id.as_deref())?;
 
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let id = format!("sess-{seq}");
+    // 带时间戳：恢复自磁盘的旧会话可能已占用 sess-N，纯序号会撞号
+    let id = format!("sess-{}-{seq}", logs::now_ms());
 
     let session = pty::spawn(
         app.clone(),
@@ -193,7 +196,8 @@ fn start_template_session(
     let plan = ops::build_plan_for(&state, project, template, device_id.as_deref())?;
 
     let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
-    let id = format!("sess-{seq}");
+    // 带时间戳：恢复自磁盘的旧会话可能已占用 sess-N，纯序号会撞号
+    let id = format!("sess-{}-{seq}", logs::now_ms());
 
     let session = pty::spawn(
         app.clone(),
@@ -318,6 +322,13 @@ fn launch_emulator(
     emulator_id: String,
 ) -> Result<(), String> {
     let state = store::load(&app)?;
+
+    // 优先直接用 emulator.exe：它会带上设置里的 SDK / AVD 目录
+    if let Some(r) = android::resolve(&effective_android(&state)) {
+        return android::start_avd(&r, &emulator_id);
+    }
+
+    // 退回 flutter daemon（只认得默认 AVD 目录）
     let exe = flutter_exe_for(&state, &project_id)?;
     let d = daemon::get_or_start(&reg, &exe, device_sink(&app))?;
     d.request(
@@ -582,6 +593,103 @@ fn clear_session_logs(app: AppHandle) -> Result<(), String> {
     logs::save_to(&path, Vec::new())
 }
 
+/* ---------------- 体检（§14 / §6.6） ---------------- */
+
+#[tauri::command]
+fn flutter_doctor(
+    app: AppHandle,
+    cache: tauri::State<'_, doctor::Cache>,
+    project_id: Option<String>,
+    force: Option<bool>,
+) -> Result<doctor::DoctorReport, String> {
+    let state = store::load(&app)?;
+
+    let exe = match project_id {
+        Some(pid) => flutter_exe_for(&state, &pid)?,
+        None => {
+            let custom = state.settings.flutter_tool.custom_path.clone();
+            flutter::resolve(std::path::Path::new("."), custom.as_deref())
+                .0
+                .ok_or_else(|| "未找到 flutter 可执行文件".to_string())?
+        }
+    };
+
+    let key = exe.display().to_string();
+    if let Some(hit) = doctor::cached(&cache, &key, force.unwrap_or(false)) {
+        return Ok(hit);
+    }
+
+    let rep = doctor::report(&exe);
+    doctor::store(&cache, &key, &rep);
+    Ok(rep)
+}
+
+/// 在终端里执行体检给出的修复动作。
+/// **白名单**：只认预定义字符串，绝不执行 doctor 输出里的任意命令。
+#[tauri::command]
+fn start_doctor_fix(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    fix: String,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let args: Vec<String> = match fix.as_str() {
+        "flutter doctor --android-licenses" => {
+            vec!["doctor".to_string(), "--android-licenses".to_string()]
+        }
+        other => {
+            return Err(format!("「{other}」需要手动处理，启动器不代为执行"));
+        }
+    };
+
+    let plan = ops::flutter_adhoc_plan(
+        &state,
+        project,
+        args,
+        format!("{}:Android 许可证", project.name),
+    )?;
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    // 带时间戳：恢复自磁盘的旧会话可能已占用 sess-N，纯序号会撞号
+    let id = format!("sess-{}-{seq}", logs::now_ms());
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    let pid = session.pid;
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session);
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title: plan.title,
+        device: plan.device,
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+    })
+}
+
 /* ---------------- 设置与工具链 ---------------- */
 
 #[tauri::command]
@@ -630,7 +738,19 @@ fn effective_harmony(state: &State) -> model::HarmonySettings {
     }
 }
 
-/// 聚合两个来源：Android（flutter daemon）+ HarmonyOS（Emulator.exe -list）
+/// 未显式配置时回退到自动探测结果，保证开箱即用
+fn effective_android(state: &State) -> model::AndroidSettings {
+    let s = &state.settings.android;
+    let has = |v: &Option<String>| v.as_ref().is_some_and(|p| !p.trim().is_empty());
+
+    if has(&s.emulator_path) || has(&s.sdk_path) {
+        s.clone()
+    } else {
+        detect::detect().android
+    }
+}
+
+/// 聚合两个来源：Android（emulator.exe，退化时用 flutter daemon）+ HarmonyOS（Emulator.exe -list）
 #[tauri::command]
 fn list_all_emulators(
     app: AppHandle,
@@ -647,6 +767,77 @@ fn list_all_emulators(
         }
     };
 
+    /* ---- Android：优先直接驱动 emulator.exe ---- */
+    let android_settings = effective_android(&state);
+    let mut android_resolved = false;
+
+    if let Some(r) = android::resolve(&android_settings) {
+        match android::list_avds(&r) {
+            Ok(list) => {
+                android_resolved = true; // 查到了就不再退回 daemon，避免两套结果互相矛盾
+                out.android = list
+                    .into_iter()
+                    .map(|a| EmulatorEntry {
+                        id: a.name.clone(),
+                        name: a.name,
+                        detail: a.detail,
+                        kind: "android".into(),
+                    })
+                    .collect();
+            }
+            Err(e) => out.notes.push(format!("Android: {e}")),
+        }
+    }
+
+    if android_resolved && out.android.is_empty() {
+        // 明确指出用的是哪个目录——"改了设置还是没 AVD"多半是目录填错
+        out.notes.push(format!(
+            "未发现 Android AVD；当前 AVD 目录：{}",
+            android_settings
+                .avd_path
+                .clone()
+                .unwrap_or_else(|| "默认（%USERPROFILE%\\.android\\avd）".to_string())
+        ));
+    }
+
+    if !android_resolved {
+        let target = project_id.or_else(|| state.projects.first().map(|p| p.id.clone()));
+        match target {
+            Some(pid) => match flutter_exe_for(&state, &pid) {
+                Ok(exe) => match daemon::get_or_start(&reg, &exe, device_sink(&app)) {
+                    Ok(d) => match d.request("emulator.getEmulators", None) {
+                        Ok(v) => {
+                            if let Ok(list) =
+                                serde_json::from_value::<Vec<daemon::EmulatorInfo>>(v)
+                            {
+                                out.android = list
+                                    .into_iter()
+                                    .map(|m| EmulatorEntry {
+                                        detail: format!(
+                                            "{} · {}",
+                                            m.id,
+                                            m.category.unwrap_or_else(|| "android".into())
+                                        ),
+                                        id: m.id,
+                                        name: m.name,
+                                        kind: "android".into(),
+                                    })
+                                    .collect();
+                            }
+                        }
+                        Err(e) => out.notes.push(format!("Android: {e}")),
+                    },
+                    Err(e) => out.notes.push(format!("Android: {e}")),
+                },
+                Err(e) => out.notes.push(format!("Android: {e}")),
+            },
+            None => out
+                .notes
+                .push("Android 模拟器需要先添加至少一个 Flutter 项目".into()),
+        }
+    }
+
+    /* ---- HarmonyOS ---- */
     match harmony::list(&effective_harmony(&state)) {
         Ok(list) => {
             out.harmony = list
@@ -660,39 +851,6 @@ fn list_all_emulators(
                 .collect()
         }
         Err(e) => out.notes.push(e),
-    }
-
-    let target = project_id.or_else(|| state.projects.first().map(|p| p.id.clone()));
-    match target {
-        Some(pid) => match flutter_exe_for(&state, &pid) {
-            Ok(exe) => match daemon::get_or_start(&reg, &exe, device_sink(&app)) {
-                Ok(d) => match d.request("emulator.getEmulators", None) {
-                    Ok(v) => {
-                        if let Ok(list) = serde_json::from_value::<Vec<daemon::EmulatorInfo>>(v) {
-                            out.android = list
-                                .into_iter()
-                                .map(|m| EmulatorEntry {
-                                    detail: format!(
-                                        "{} · {}",
-                                        m.id,
-                                        m.category.unwrap_or_else(|| "android".into())
-                                    ),
-                                    id: m.id,
-                                    name: m.name,
-                                    kind: "android".into(),
-                                })
-                                .collect();
-                        }
-                    }
-                    Err(e) => out.notes.push(format!("Android: {e}")),
-                },
-                Err(e) => out.notes.push(format!("Android: {e}")),
-            },
-            Err(e) => out.notes.push(format!("Android: {e}")),
-        },
-        None => out
-            .notes
-            .push("Android 模拟器需要先添加至少一个 Flutter 项目".into()),
     }
 
     out
@@ -754,6 +912,7 @@ pub fn run() {
         .manage(pty::Registry::default())
         .manage(daemon::Daemons::default())
         .manage(TargetCache::default())
+        .manage(doctor::Cache::default())
         .invoke_handler(tauri::generate_handler![
             load_state,
             state_location,
@@ -777,6 +936,8 @@ pub fn run() {
             import_templates,
             save_settings,
             detect_toolchains,
+            flutter_doctor,
+            start_doctor_fix,
             save_session_logs,
             load_session_logs,
             clear_session_logs,
@@ -788,3 +949,5 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+

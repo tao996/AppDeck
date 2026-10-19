@@ -300,6 +300,32 @@ pub fn build_plan_for(
 }
 
 
+/// 供体检修复等场景使用：用该项目解析出的 flutter 执行给定参数。
+/// 参数由调用方**白名单**产生，不接受 doctor 输出里的任意字符串。
+pub fn flutter_adhoc_plan(
+    state: &State,
+    project: &Project,
+    args: Vec<String>,
+    title: String,
+) -> Result<Plan, String> {
+    let cwd = PathBuf::from(&project.path);
+    if !cwd.is_dir() {
+        return Err(format!("工作目录不存在：{}", cwd.display()));
+    }
+
+    let exe = resolve_flutter_exe(state, project, &cwd)?;
+    let (program, args) = wrap_batch(exe.display().to_string(), args);
+
+    Ok(Plan {
+        program,
+        args,
+        cwd,
+        title,
+        device: "—".to_string(),
+        env: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

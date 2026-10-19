@@ -175,7 +175,13 @@ bool get supportsAnsiEscapes => hasTerminal && stdout.supportsAnsiEscapes;
 |---|---|---|---|
 | 终端会话 | `flutter run` / `build` / 自定义命令 | 否，但会派生子进程 | 必须挂 Job |
 | **常驻 helper** | `flutter daemon`、模拟器启动器、文件监听 | **是** | 必须挂 Job |
+| **用户显式启动的外部工具** | Android / HarmonyOS 模拟器 | 是 | **刻意脱离** Job（见下） |
 | 一次性查询 | `flutter --version`、`Emulator.exe -list` | 否 | 同步 `output()` 等待即可 |
+
+**唯一的例外**：用户主动点击「启动模拟器」拉起的模拟器进程**不进 Job**——
+用户期望关掉启动器后模拟器继续跑。这条例外必须显式登记（即本表），
+并在代码处写明理由（参照 `android::start_avd` / `harmony::start` 的注释）。
+**除此之外任何长驻进程都不得脱离 Job。**
 
 **判据（必须实测，不能靠推理）**：用 `TerminateProcess` **强杀**应用后，
 上表进程及其子树必须全部消失。不允许依赖 `Drop`、`atexit`、`RunEvent::Exit` 等
@@ -623,6 +629,7 @@ per-project semaphore
 4. **任何**由本应用启动的外部进程都必须挂 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）——
    包括常驻 helper（`flutter daemon`、模拟器启动器），**不只是终端会话**。
    判据：强杀应用后无残留（见 §5.3、A35）。
+   唯一例外是「用户显式启动的模拟器」，且必须登记在 §5.3 的例外表中。
 5. 命令一律 argv 数组。
 6. Flutter 工具解析走统一 `FlutterLocator`，三个 mode 全覆盖，`env` 透传。
 
@@ -698,6 +705,8 @@ per-project semaphore
 | A34 | 会话日志预算 | 单会话 ≤ 2 MB、全局 ≤ 20 MB、最多 20 个；损坏时备份 `sessions.corrupt.json` |
 | A35 | 无残留外部进程 | `TerminateProcess` 强杀应用后，`flutter daemon` 与子进程全部消失（实测 0 残留） |
 | A36 | 原子写不互相覆盖 | 并发生成不同目标文件的写入不串数据（临时名按目标派生） |
+| A37 | Android AVD 目录生效 | 设置里的自定义 AVD 目录（经 `ANDROID_AVD_HOME` 注入）能列出该目录下的实例 |
+| A38 | 模拟器列表缓存 | 首次打开查询并缓存；再次打开直接用缓存；点 ⟳ 才重新查询 |
 
 ---
 

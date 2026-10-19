@@ -806,6 +806,235 @@ function targetProjectId(): string | null {
 
 /* ---------------- PTY 事件 ---------------- */
 
+/* ---------------- 体检横幅（§14 / §6.6） ---------------- */
+
+interface DoctorCheck {
+  key: string;
+  name: string;
+  summary: string;
+  status: string;
+  details: string[];
+  fix: string | null;
+  canRun: boolean;
+}
+
+interface DoctorReport {
+  checks: DoctorCheck[];
+  issues: number;
+  summary: string | null;
+  raw: string;
+  error: string | null;
+  ranAt: number;
+}
+
+let doctorReport: DoctorReport | null = null;
+let doctorTimer: number | null = null;
+
+const DOCTOR_ICON: Record<string, string> = {
+  ok: "√",
+  warn: "!",
+  error: "✗",
+};
+
+function doctorIssues(): DoctorCheck[] {
+  return (doctorReport?.checks ?? []).filter((c) => c.status !== "ok");
+}
+
+async function refreshDoctor(force = false): Promise<void> {
+  const bar = req<HTMLDivElement>("#health-bar");
+  bar.hidden = false;
+  bar.className = "health-bar checking";
+  bar.innerHTML = `<span class="hb-icon">⏳</span><span class="hb-text">正在运行 flutter doctor…</span>`;
+
+  if (doctorTimer !== null) window.clearTimeout(doctorTimer);
+
+  try {
+    const rep = await invoke<DoctorReport>("flutter_doctor", {
+      projectId: state.projects[0]?.id ?? null,
+      force,
+    });
+    doctorReport = rep;
+    renderHealthBar();
+  } catch (e) {
+    doctorReport = null;
+    bar.className = "health-bar error";
+    bar.innerHTML = `<span class="hb-icon">✗</span><span class="hb-text">体检未执行：${esc(String(e))}</span>`;
+  }
+}
+
+function renderHealthBar(): void {
+  const bar = req<HTMLDivElement>("#health-bar");
+  const rep = doctorReport;
+
+  if (!rep) {
+    bar.hidden = true;
+    return;
+  }
+
+  bar.hidden = false;
+  bar.innerHTML = "";
+
+  const icon = document.createElement("span");
+  icon.className = "hb-icon";
+  const text = document.createElement("span");
+  text.className = "hb-text";
+
+  const actions = document.createElement("span");
+  actions.className = "hb-actions";
+
+  const btn = (label: string, fn: () => void, cls = ""): HTMLButtonElement => {
+    const b = document.createElement("button");
+    b.className = `hb-btn ${cls}`.trim();
+    b.textContent = label;
+    b.addEventListener("click", fn);
+    actions.appendChild(b);
+    return b;
+  };
+
+  if (rep.error) {
+    // §6.6：失败时把原始报错原样呈现，而不是"未知错误"
+    bar.className = "health-bar error";
+    icon.textContent = "✗";
+    text.textContent = `体检未能完成：${rep.error}`;
+    btn("详情", () => openDoctorReport());
+    btn("重新体检", () => void refreshDoctor(true));
+    btn("关闭", () => {
+      bar.hidden = true;
+    });
+  } else {
+    const bad = doctorIssues();
+
+    if (bad.length === 0) {
+      bar.className = "health-bar ok";
+      icon.textContent = "√";
+      text.textContent = `体检通过 · ${rep.checks.length} 项检查全部正常`;
+      btn("查看", () => openDoctorReport());
+      btn("关闭", () => {
+        bar.hidden = true;
+      });
+      // 通过时自动收起，不长期占位
+      doctorTimer = window.setTimeout(() => {
+        if (doctorReport === rep) bar.hidden = true;
+      }, 6000);
+    } else {
+      bar.className = "health-bar warn";
+      icon.textContent = "!";
+      text.textContent = `体检发现 ${bad.length} 项问题：${bad.map((c) => c.name).join("、")}`;
+      btn("详情", () => openDoctorReport());
+      btn("重新体检", () => void refreshDoctor(true));
+      btn("关闭", () => {
+        bar.hidden = true;
+      });
+    }
+  }
+
+  bar.append(icon, text, actions);
+}
+
+function openDoctorReport(): void {
+  const rep = doctorReport;
+  if (!rep) return;
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+
+  const body = rep.error
+    ? `<div class="dr-raw">${esc(rep.error)}</div>`
+    : rep.checks
+        .map((c) => {
+          const details = c.details.length
+            ? `<div class="dr-details">${c.details.map((d) => esc(d)).join("<br>")}</div>`
+            : "";
+          const fix = c.fix
+            ? `<div class="dr-fix">
+                 <span class="dr-fix-label">修复：</span>
+                 <code>${esc(c.fix)}</code>
+                 <button class="btn dr-copy" data-copy="${esc(c.fix)}">复制</button>
+                 ${c.canRun ? `<button class="btn primary dr-run" data-fix="${esc(c.fix)}">在终端执行</button>` : ""}
+               </div>`
+            : "";
+          return `
+            <div class="dr-check ${c.status}">
+              <div class="dr-head">
+                <span class="dr-icon">${DOCTOR_ICON[c.status] ?? "?"}</span>
+                <span class="dr-name">${esc(c.name)}</span>
+                <span class="dr-summary">${esc(c.summary)}</span>
+              </div>
+              ${details}
+              ${fix}
+            </div>`;
+        })
+        .join("");
+
+  overlay.innerHTML = `
+    <div class="modal" style="width: 780px">
+      <div class="modal-head">
+        <span>flutter doctor 体检报告</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="dr-body">${body}</div>
+      <div class="modal-foot">
+        <span class="modal-hint">${esc(rep.summary ?? "")}</span>
+        <span class="flex1"></span>
+        <button class="btn" id="dr-copy-raw">复制原始输出</button>
+        <button class="btn" id="dr-rerun">重新体检</button>
+        <button class="btn primary" id="dr-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = (): void => overlay.remove();
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#dr-close") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  (overlay.querySelector("#dr-rerun") as HTMLButtonElement).addEventListener("click", () => {
+    close();
+    void refreshDoctor(true);
+  });
+
+  (overlay.querySelector("#dr-copy-raw") as HTMLButtonElement).addEventListener("click", () => {
+    void navigator.clipboard
+      .writeText(rep.raw || rep.error || "")
+      .then(() => toast("原始输出已复制"))
+      .catch((e) => toast(String(e), "error"));
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>(".dr-copy").forEach((b) => {
+    b.addEventListener("click", () => {
+      void navigator.clipboard
+        .writeText(b.dataset.copy ?? "")
+        .then(() => toast("命令已复制"))
+        .catch((e) => toast(String(e), "error"));
+    });
+  });
+
+  overlay.querySelectorAll<HTMLButtonElement>(".dr-run").forEach((b) => {
+    b.addEventListener("click", () => {
+      const project = state.projects[0];
+      if (!project) {
+        toast("需要先添加一个项目", "error");
+        return;
+      }
+      close();
+      void invoke<StartResponse>("start_doctor_fix", {
+        projectId: project.id,
+        fix: b.dataset.fix ?? "",
+        rows: 30,
+        cols: 100,
+      })
+        .then((res) => {
+          mountSession(res, "custom", "debug", { projectId: project.id });
+          toast("已在终端启动修复流程，按提示输入 y 确认");
+        })
+        .catch((e) => toast(String(e), "error"));
+    });
+  });
+}
+
 /* ---------------- 会话恢复（D-10） ---------------- */
 
 interface SessionLog {
@@ -1775,10 +2004,107 @@ function openTemplateImport(p: Proj): void {
 /* ---------------- 模拟器菜单（工具栏） ---------------- */
 
 let emuMenuEl: HTMLDivElement | null = null;
+/** 模拟器列表缓存：模拟器不常变，没点刷新就直接用缓存，避免每次打开都重新查询 */
+let emulatorCache: AllEmulators | null = null;
 
 function closeEmuMenu(): void {
   emuMenuEl?.remove();
   emuMenuEl = null;
+}
+
+function renderEmulatorBody(data: AllEmulators, error: string | null): void {
+  const menu = emuMenuEl;
+  if (!menu) return;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+  body.innerHTML = "";
+
+  const group = (t: string): void => {
+    const g = document.createElement("div");
+    g.className = "dm-group";
+    g.textContent = t;
+    body.appendChild(g);
+  };
+  const note = (t: string, cls = "dm-empty"): void => {
+    const d = document.createElement("div");
+    d.className = cls;
+    d.textContent = t;
+    body.appendChild(d);
+  };
+  const item = (name: string, detail: string, onClick: () => void): void => {
+    const el = document.createElement("div");
+    el.className = "dm-item emulator";
+    el.innerHTML = `<span class="dm-name">${esc(name)}</span>${detail ? `<span class="dm-sub">${esc(detail)}</span>` : ""}`;
+    el.addEventListener("click", () => {
+      closeEmuMenu();
+      onClick();
+    });
+    body.appendChild(el);
+  };
+
+  if (error) {
+    note(error, "dm-error");
+    return;
+  }
+
+  group(`Android 模拟器 (${data.android.length})`);
+  if (data.android.length === 0) note("无可用 AVD");
+  for (const a of data.android) {
+    item(a.name, a.detail, () => {
+      const pid = state.projects[0]?.id;
+      if (!pid) {
+        toast("启动 Android 模拟器需要先添加一个 Flutter 项目", "error");
+        return;
+      }
+      toast(`正在启动：${a.name}`);
+      void invoke("launch_emulator", { projectId: pid, emulatorId: a.id }).catch((e2) =>
+        toast(String(e2), "error"),
+      );
+    });
+  }
+
+  group(`HarmonyOS 模拟器 (${data.harmony.length})`);
+  if (data.harmony.length === 0) note("未发现鸿蒙模拟器（可在设置里指定 DevEco 目录）");
+  for (const h of data.harmony) {
+    item(h.name, h.detail, () => {
+      toast(`正在启动：${h.name}`);
+      void invoke("launch_harmony_emulator", { name: h.id }).catch((e2) =>
+        toast(String(e2), "error"),
+      );
+    });
+  }
+
+  if (data.notes.length > 0) {
+    group("提示");
+    for (const n of data.notes) note(n);
+  }
+}
+
+/** 真正去查一次（首次打开或点刷新时） */
+async function loadEmulators(): Promise<void> {
+  const menu = emuMenuEl;
+  if (!menu) return;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+  const refresh = menu.querySelector<HTMLButtonElement>(".dm-refresh");
+  body.innerHTML = `<div class="dm-loading">正在检查电脑上的模拟器…</div>`;
+  if (refresh) refresh.disabled = true;
+
+  let data: AllEmulators | null = null;
+  let error: string | null = null;
+  try {
+    data = await invoke<AllEmulators>("list_all_emulators", {
+      projectId: state.projects[0]?.id ?? null,
+    });
+  } catch (e) {
+    error = String(e);
+  }
+
+  if (emuMenuEl !== menu) return;
+  if (refresh) refresh.disabled = false;
+
+  if (data) emulatorCache = data;
+  renderEmulatorBody(data ?? { android: [], harmony: [], notes: [] }, error);
 }
 
 function openEmulatorMenu(anchor: HTMLElement): void {
@@ -1793,89 +2119,25 @@ function openEmulatorMenu(anchor: HTMLElement): void {
   menu.style.left = `${Math.max(8, Math.min(rect.right - 320, window.innerWidth - 336))}px`;
   menu.style.top = `${rect.bottom + 4}px`;
   menu.innerHTML = `
-    <div class="dm-head">可启动的模拟器</div>
-    <div class="dm-body"><div class="dm-loading">正在查询…</div></div>
+    <div class="dm-head">
+      <span>可启动的模拟器</span>
+      <button class="dm-refresh" title="重新检查电脑上的模拟器（结果会缓存）">⟳</button>
+    </div>
+    <div class="dm-body"></div>
   `;
   document.body.appendChild(menu);
   emuMenuEl = menu;
 
-  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+  menu.querySelector(".dm-refresh")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void loadEmulators();
+  });
 
-  void (async () => {
-    let data: AllEmulators | null = null;
-    let error: string | null = null;
-    try {
-      data = await invoke<AllEmulators>("list_all_emulators", {
-        projectId: state.projects[0]?.id ?? null,
-      });
-    } catch (e) {
-      error = String(e);
-    }
-    if (emuMenuEl !== menu) return;
-    body.innerHTML = "";
-
-    const group = (t: string): void => {
-      const g = document.createElement("div");
-      g.className = "dm-group";
-      g.textContent = t;
-      body.appendChild(g);
-    };
-    const note = (t: string, cls = "dm-empty"): void => {
-      const d = document.createElement("div");
-      d.className = cls;
-      d.textContent = t;
-      body.appendChild(d);
-    };
-    const item = (name: string, detail: string, onClick: () => void): void => {
-      const el = document.createElement("div");
-      el.className = "dm-item emulator";
-      el.innerHTML = `<span class="dm-name">${esc(name)}</span>${detail ? `<span class="dm-sub">${esc(detail)}</span>` : ""}`;
-      el.addEventListener("click", () => {
-        closeEmuMenu();
-        onClick();
-      });
-      body.appendChild(el);
-    };
-
-    if (error) {
-      note(error, "dm-error");
-      return;
-    }
-    if (!data) return;
-
-    group(`Android 模拟器 (${data.android.length})`);
-    if (data.android.length === 0) note("无可用 AVD");
-    for (const a of data.android) {
-      item(a.name, a.detail, () => {
-        const pid = state.projects[0]?.id;
-        if (!pid) {
-          toast("启动 Android 模拟器需要先添加一个 Flutter 项目", "error");
-          return;
-        }
-        toast(`正在启动：${a.name}`);
-        void invoke("launch_emulator", { projectId: pid, emulatorId: a.id }).catch((e2) =>
-          toast(String(e2), "error"),
-        );
-      });
-    }
-
-    group(`HarmonyOS 模拟器 (${data.harmony.length})`);
-    if (data.harmony.length === 0) note("未发现鸿蒙模拟器（可在设置里指定 DevEco 目录）");
-    for (const h of data.harmony) {
-      item(h.name, h.detail, () => {
-        toast(`正在启动：${h.name}`);
-        void invoke("launch_harmony_emulator", { name: h.id }).catch((e2) =>
-          toast(String(e2), "error"),
-        );
-      });
-    }
-
-    if (data.notes.length > 0) {
-      group("提示");
-      for (const n of data.notes) note(n);
-    }
-  })();
+  // 有缓存就直接渲染，不再查询
+  if (emulatorCache) renderEmulatorBody(emulatorCache, null);
+  else void loadEmulators();
 }
+
 
 /* ---------------- 设置页 ---------------- */
 
@@ -2141,6 +2403,8 @@ async function boot(): Promise<void> {
         </div>
       </header>
 
+      <div class="health-bar" id="health-bar" hidden></div>
+
       <div class="tabstrip" id="tabstrip"></div>
 
       <div class="main">
@@ -2258,6 +2522,13 @@ async function boot(): Promise<void> {
 
   // D-10：恢复上次的 tab 壳与历史输出（进程不拉起）
   await restoreSessions();
+
+  // §14 体检：后台跑，不阻塞界面
+  void refreshDoctor().then(async () => {
+    if (await invoke<string | null>("dev_env", { name: "FLA_DOCTOR_DETAIL" })) {
+      openDoctorReport();
+    }
+  });
 
   // 开发期自动启动（FLA_AUTOSTART 环境变量）
   try {
