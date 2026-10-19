@@ -620,6 +620,8 @@ per-project semaphore
 | A20 | 状态文件损坏 | 备份为 `state.corrupt.json` 并重置，不静默丢失 |
 | A21 | 点 `▶` 后终端出现真实 `flutter run` 输出 | 有 ANSI 颜色、可滚动、状态灯转 🟢、DevTools 可点 |
 | A22 | 会话结束 | 标签转 🔴、可查退出码、进程树无残留 |
+| A23 | 右键命令弹出设备菜单 | 列出在线设备 **且** 列出未启动的模拟器（如 `Pixel_5`） |
+| A24 | 从菜单选设备后运行 | 命令带 `-d <id>` 启动；选模拟器则先 `emulator.launch` |
 
 ---
 

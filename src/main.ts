@@ -79,6 +79,27 @@ interface DevAutostart {
   deviceId: string | null;
 }
 
+interface DeviceInfo {
+  id: string;
+  name: string;
+  platform?: string | null;
+  category?: string | null;
+  emulator: boolean;
+  sdk?: string | null;
+  isConnected?: boolean | null;
+}
+
+interface EmulatorInfo {
+  id: string;
+  name: string;
+  category?: string | null;
+}
+
+interface DevicesPayload {
+  devices: DeviceInfo[];
+  emulators: EmulatorInfo[];
+}
+
 interface TermSession {
   id: string;
   title: string;
@@ -443,10 +464,7 @@ function renderTree(): void {
           e.stopPropagation();
           void runCommand(p, c);
         });
-        row.addEventListener("contextmenu", (e) => {
-          e.preventDefault();
-          toast("M3：设备菜单将接入 flutter daemon");
-        });
+        row.addEventListener("contextmenu", (e) => openDeviceMenu(e, p, c));
         list.appendChild(row);
       }
 
@@ -666,6 +684,106 @@ function handleExit(id: string, code: number | null): void {
   updateControls();
 }
 
+/* ---------------- 设备菜单（M3） ---------------- */
+
+let deviceMenuEl: HTMLDivElement | null = null;
+
+function closeDeviceMenu(): void {
+  deviceMenuEl?.remove();
+  deviceMenuEl = null;
+}
+
+function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
+  ev.preventDefault();
+  closeDeviceMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.max(8, Math.min(ev.clientX, window.innerWidth - 320))}px`;
+  menu.style.top = `${Math.max(8, Math.min(ev.clientY, window.innerHeight - 360))}px`;
+  menu.innerHTML = `
+    <div class="dm-head">为「${esc(c.name)}」选择设备</div>
+    <div class="dm-body"><div class="dm-loading">正在查询设备…</div></div>
+  `;
+  document.body.appendChild(menu);
+  deviceMenuEl = menu;
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+
+  void (async () => {
+    let payload: DevicesPayload | null = null;
+    let error: string | null = null;
+    try {
+      payload = await invoke<DevicesPayload>("list_devices", { projectId: p.id });
+    } catch (e) {
+      error = String(e);
+    }
+    if (deviceMenuEl !== menu) return; // 期间已被关闭
+    body.innerHTML = "";
+
+    const addGroup = (title: string): void => {
+      const g = document.createElement("div");
+      g.className = "dm-group";
+      g.textContent = title;
+      body.appendChild(g);
+    };
+
+    const addItem = (name: string, sub: string, onClick: () => void, cls = ""): void => {
+      const item = document.createElement("div");
+      item.className = `dm-item ${cls}`.trim();
+      item.innerHTML = `<span class="dm-name">${esc(name)}</span>${sub ? `<span class="dm-sub">${esc(sub)}</span>` : ""}`;
+      item.addEventListener("click", () => {
+        closeDeviceMenu();
+        onClick();
+      });
+      body.appendChild(item);
+    };
+
+    addItem("自动选择", "不传 -d，由 flutter 自行决定", () => void runCommand(p, c));
+
+    if (error) {
+      const e = document.createElement("div");
+      e.className = "dm-error";
+      e.textContent = error;
+      body.appendChild(e);
+      return;
+    }
+
+    const devices = payload?.devices ?? [];
+    const emulators = payload?.emulators ?? [];
+
+    addGroup(`在线设备 (${devices.length})`);
+    if (devices.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "dm-empty";
+      empty.textContent = "暂无在线设备";
+      body.appendChild(empty);
+    } else {
+      for (const d of devices) {
+        addItem(d.name, `${d.id} · ${d.platform ?? d.category ?? ""}`, () =>
+          void runCommand(p, c, d.id),
+        );
+      }
+    }
+
+    if (emulators.length > 0) {
+      addGroup(`可启动模拟器 (${emulators.length})`);
+      for (const m of emulators) {
+        addItem(
+          m.name,
+          `${m.id} · ${m.category ?? ""}`,
+          () => {
+            toast(`正在启动模拟器：${m.name}`);
+            void invoke("launch_emulator", { projectId: p.id, emulatorId: m.id }).catch((e2) =>
+              toast(String(e2), "error"),
+            );
+          },
+          "emulator",
+        );
+      }
+    }
+  })();
+}
+
 /* ---------------- 启动 ---------------- */
 
 async function boot(): Promise<void> {
@@ -677,7 +795,7 @@ async function boot(): Promise<void> {
         <div class="brand">
           <span class="logo">◆</span>
           <span class="title">Flutter Launcher</span>
-          <span class="badge-m0">M2 · 终端</span>
+          <span class="badge-m0">M3 · 设备</span>
         </div>
         <div class="tb-center">
           <button class="btn primary" id="btn-add">＋ 添加 Flutter 项目</button>
@@ -748,6 +866,15 @@ async function boot(): Promise<void> {
     handleExit(e.payload.id, e.payload.code);
   });
 
+  // 设备菜单：点击外部 / Esc 关闭
+  document.addEventListener("mousedown", (e) => {
+    if (deviceMenuEl && !deviceMenuEl.contains(e.target as Node)) closeDeviceMenu();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeDeviceMenu();
+  });
+  window.addEventListener("blur", closeDeviceMenu);
+
   req<HTMLButtonElement>("#btn-add").addEventListener("click", () => void addProject());
   req<HTMLButtonElement>("#btn-import").addEventListener("click", () => {
     const id = targetProjectId();
@@ -791,6 +918,17 @@ async function boot(): Promise<void> {
       const cmd = proj?.commands.find((x) => x.id === auto.commandId);
       if (proj && cmd) void runCommand(proj, cmd, auto.deviceId ?? undefined);
       else console.warn("[autostart] 未找到项目或命令", auto);
+    }
+
+    // 开发期：自动弹出设备菜单（FLA_DEVICE_MENU=<项目ID>），便于无人值守截图
+    const menuProject = await invoke<string | null>("dev_env", { name: "FLA_DEVICE_MENU" });
+    if (menuProject) {
+      const proj = state.projects.find((x) => x.id === menuProject) ?? state.projects[0];
+      const cmd = proj?.commands[0];
+      if (proj && cmd) {
+        const ev = new MouseEvent("contextmenu", { clientX: 1180, clientY: 210 });
+        openDeviceMenu(ev, proj, cmd);
+      }
     }
   } catch {
     /* 无钩子 */

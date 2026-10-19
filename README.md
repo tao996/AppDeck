@@ -3,24 +3,32 @@
 > 轻量级 **Flutter 应用启动器与发布管理器** —— 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
 > 界面参考 **WindTerm**：高信息密度、多标签终端、层级树导航。
 
-![界面截图](docs/shot-m2.png)
+![界面截图](docs/shot-m3.png)
 
 ---
 
 ## 当前状态
 
-**M2：ConPTY 终端已打通** —— 点 `▶` 即可在应用内启动真实的 `flutter run`，输出、热重载、DevTools 全部可用。
+**M3：设备与模拟器已接入** —— 右键命令即可看到在线设备与**未启动的模拟器**，选中设备直接开跑。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | Tauri 骨架 + WindTerm 风格界面 | ✅ 完成 |
 | M1 | 项目管理 + 项目树 + 持久化 | ✅ 完成 |
 | M2 | ConPTY 会话 + 真实终端 + 进程树回收 | ✅ 完成 |
-| M3 | 设备/模拟器（`flutter daemon`） | 待做 |
-| M4 | 热重载 / 热重启 / 停止 / DevTools | 部分（按钮已可用，设备选择属 M3） |
+| M3 | 设备/模拟器（`flutter daemon`） | ✅ 完成 |
+| M4 | 热重载 / 热重启 / 停止 / DevTools | ✅ 完成（随 M2 一并落地） |
 | M5 | 发布构建 + 通知 | 待做 |
 | M6 | `launch.json` 高级导入（手动添加命令等） | 待做 |
 | M7 | 会话恢复 + 打磨 | 待做 |
+
+### M3 已实现
+
+- **常驻 `flutter daemon`**：按 Flutter 可执行文件复用，`device.getDevices` + `emulator.getEmulators`
+- **能看到未启动的模拟器**：`flutter devices` 只列在线设备，`flutter emulators --machine` 根本不存在；daemon 协议才拿得到 `Pixel_5` 这类待启动项
+- **设备菜单**：右键命令弹出，分「自动选择 / 在线设备 / 可启动模拟器」；选中设备即带 `-d` 启动，选模拟器则先 `emulator.launch`
+- **热插拔**：监听 `device.added` / `device.removed` 事件推送，无需轮询
+- **健壮性**：daemon 超时自动杀掉重建；stderr 独立消费避免管道写满阻塞
 
 ### M2 已实现
 
@@ -46,14 +54,16 @@
 cd src-tauri && cargo test
 ```
 
-17 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装。
+18 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、**真实 daemon 查询设备与模拟器**。
 
-诊断 ConPTY 可用：
+诊断工具：
 ```bash
-cd src-tauri && cargo run --bin pty_probe
+cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 ```
 
-> **开发期钩子**：设置 `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID>"` 后，应用启动会自动运行该命令，便于无人值守验证终端链路。
+> **开发期钩子**（用于无人值守验证）：
+> - `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID>"` 启动即运行指定命令
+> - `FLA_DEVICE_MENU="<项目ID>"` 启动即弹出设备菜单
 
 ---
 
@@ -110,11 +120,14 @@ npm run tauri build  # 打包安装程序
 │   ├── src/jsonc.rs            JSONC 状态机（注释 / 尾逗号）
 │   ├── src/flutter.rs          Flutter 可执行文件解析与版本探测
 │   ├── src/pty.rs              ConPTY 会话（UTF-8 流解码 / DSR 应答 / Job Object）
+│   ├── src/daemon.rs           flutter daemon 客户端（设备 / 模拟器 / 热插拔）
 │   ├── src/bin/pty_probe.rs    ConPTY 诊断探针
 │   ├── src/model.rs            数据模型（schemaVersion 2）
 │   ├── tauri.conf.json         窗口与应用配置
 │   └── Cargo.toml
 ├── docs/
+│   ├── shot-m3.png             M3 界面截图（设备菜单）
+│   ├── shot-m3-menu.png        设备菜单细节
 │   ├── shot-m2.png             M2 界面截图（真实终端）
 │   ├── shot-m1.png             M1 界面截图
 │   └── shot-m1-tree.png        项目树细节

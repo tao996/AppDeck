@@ -1,3 +1,4 @@
+mod daemon;
 mod flutter;
 mod jsonc;
 mod launch;
@@ -194,6 +195,78 @@ fn kill_session(app: AppHandle, reg: tauri::State<'_, pty::Registry>, id: String
     killed
 }
 
+/* ---------------- 设备与模拟器 ---------------- */
+
+fn flutter_exe_for(state: &State, project_id: &str) -> Result<PathBuf, String> {
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let custom = project
+        .flutter_tool
+        .as_ref()
+        .and_then(|f| f.custom_path.clone())
+        .or_else(|| state.settings.flutter_tool.custom_path.clone());
+
+    let root = PathBuf::from(&project.path);
+    let (exe, _) = flutter::resolve(&root, custom.as_deref());
+    exe.ok_or_else(|| "未找到 flutter 可执行文件".to_string())
+}
+
+fn device_sink(app: &AppHandle) -> daemon::EventSink {
+    let app = app.clone();
+    std::sync::Arc::new(move |p: daemon::DevicesPayload| {
+        let _ = app.emit("devices://changed", p);
+    })
+}
+
+#[tauri::command]
+fn list_devices(
+    app: AppHandle,
+    reg: tauri::State<'_, daemon::Daemons>,
+    project_id: String,
+) -> Result<daemon::DevicesPayload, String> {
+    let state = store::load(&app)?;
+    let exe = flutter_exe_for(&state, &project_id)?;
+    let d = daemon::get_or_start(&reg, &exe, device_sink(&app))?;
+
+    match d.request("device.getDevices", None) {
+        Ok(v) => match serde_json::from_value::<Vec<daemon::DeviceInfo>>(v) {
+            Ok(list) => d.set_devices(list),
+            Err(e) => return Err(format!("解析设备列表失败: {e}")),
+        },
+        Err(e) => return Err(e),
+    }
+
+    // 模拟器不可用（如未装 Android SDK）不算致命
+    if let Ok(v) = d.request("emulator.getEmulators", None) {
+        if let Ok(list) = serde_json::from_value::<Vec<daemon::EmulatorInfo>>(v) {
+            d.set_emulators(list);
+        }
+    }
+
+    Ok(d.snapshot())
+}
+
+#[tauri::command]
+fn launch_emulator(
+    app: AppHandle,
+    reg: tauri::State<'_, daemon::Daemons>,
+    project_id: String,
+    emulator_id: String,
+) -> Result<(), String> {
+    let state = store::load(&app)?;
+    let exe = flutter_exe_for(&state, &project_id)?;
+    let d = daemon::get_or_start(&reg, &exe, device_sink(&app))?;
+    d.request(
+        "emulator.launch",
+        Some(serde_json::json!({ "emulatorId": emulator_id })),
+    )?;
+    Ok(())
+}
+
 /* ---------------- 开发期钩子 ---------------- */
 
 /// 自动化/调试用：设置 `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID?>"` 后，
@@ -204,6 +277,11 @@ struct DevAutostart {
     project_id: String,
     command_id: String,
     device_id: Option<String>,
+}
+
+#[tauri::command]
+fn dev_env(name: String) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty())
 }
 
 #[tauri::command]
@@ -236,6 +314,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(pty::Registry::default())
+        .manage(daemon::Daemons::default())
         .invoke_handler(tauri::generate_handler![
             load_state,
             state_location,
@@ -247,7 +326,10 @@ pub fn run() {
             write_session,
             resize_session,
             kill_session,
-            dev_autostart
+            list_devices,
+            launch_emulator,
+            dev_autostart,
+            dev_env
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
