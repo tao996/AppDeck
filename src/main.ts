@@ -48,7 +48,13 @@ interface Proj {
 
 interface SettingsModel {
   flutterTool: { mode: string; customPath: string | null };
-  android: { sdkPath: string | null; emulatorPath: string | null; avdPath: string | null };
+  android: {
+    sdkPath: string | null;
+    emulatorPath: string | null;
+    avdPath: string | null;
+    buildToolsPath: string | null;
+    keytoolPath: string | null;
+  };
   harmony: {
     emulatorPath: string | null;
     instancePath: string | null;
@@ -73,6 +79,46 @@ interface EmulatorEntry {
   kind: string;
 }
 
+interface PlatformAction {
+  action: string;
+  label: string;
+  target?: string | null;
+  enabled: boolean;
+  reason?: string | null;
+}
+
+interface PlatformEntry {
+  id: string;
+  label: string;
+  enabled: boolean;
+  reason?: string | null;
+  actions: PlatformAction[];
+}
+
+interface PlatformMatrix {
+  platforms: PlatformEntry[];
+  supported: boolean;
+  note?: string | null;
+}
+
+interface FilingInfo {
+  apk: string;
+  appLabel?: string | null;
+  package?: string | null;
+  versionName?: string | null;
+  versionCode?: string | null;
+  minSdk?: string | null;
+  targetSdk?: string | null;
+  md5?: string | null;
+  sha1?: string | null;
+  sha256?: string | null;
+  dn?: string | null;
+  scheme?: string | null;
+  publicKey?: string | null;
+  warnings: string[];
+  error?: string | null;
+}
+
 interface AllEmulators {
   android: EmulatorEntry[];
   harmony: EmulatorEntry[];
@@ -89,7 +135,13 @@ interface State {
 function defaultSettings(): SettingsModel {
   return {
     flutterTool: { mode: "auto", customPath: null },
-    android: { sdkPath: null, emulatorPath: null, avdPath: null },
+    android: {
+      sdkPath: null,
+      emulatorPath: null,
+      avdPath: null,
+      buildToolsPath: null,
+      keytoolPath: null,
+    },
     harmony: {
       emulatorPath: null,
       instancePath: null,
@@ -173,6 +225,10 @@ interface TermSession {
   projectId?: string;
   commandId?: string;
   templateId?: string;
+  /** 派生动作来源（平台菜单）：重跑时按平台重新解析设备 */
+  platform?: string;
+  action?: string;
+  target?: string;
   term?: Terminal;
   fit?: FitAddon;
   serialize?: SerializeAddon;
@@ -366,10 +422,11 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-restart").disabled = !isRun;
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
-  req<HTMLButtonElement>("#btn-rerun").disabled = !(
+  const rerun = req<HTMLButtonElement>("#btn-rerun");
+  rerun.disabled = !(
     s &&
     (s.restored || s.status === "stopped") &&
-    (s.commandId || s.templateId)
+    (s.commandId || s.templateId || (s.platform && s.action))
   );
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
@@ -640,7 +697,14 @@ function mountSession(
   res: StartResponse,
   kind: string,
   mode: string,
-  origin?: { projectId?: string; commandId?: string; templateId?: string },
+  origin?: {
+    projectId?: string;
+    commandId?: string;
+    templateId?: string;
+    platform?: string;
+    action?: string;
+    target?: string;
+  },
 ): void {
   const session: TermSession = {
     id: res.id,
@@ -655,6 +719,9 @@ function mountSession(
     projectId: origin?.projectId,
     commandId: origin?.commandId,
     templateId: origin?.templateId,
+    platform: origin?.platform,
+    action: origin?.action,
+    target: origin?.target,
   };
   sessions.push(session);
   activateSession(session.id);
@@ -805,6 +872,157 @@ function targetProjectId(): string | null {
 }
 
 /* ---------------- PTY 事件 ---------------- */
+
+/* ---------------- 备案信息（安卓） ---------------- */
+
+let lastApkDir: string | null = null;
+let lastFiling: FilingInfo | null = null;
+
+async function pickApkAndInspect(): Promise<void> {
+  try {
+    const picked = await open({
+      multiple: false,
+      directory: false,
+      title: "选择要查看的 APK",
+      defaultPath: lastApkDir ?? undefined,
+      filters: [{ name: "Android 安装包", extensions: ["apk"] }],
+    });
+    if (typeof picked !== "string") return;
+    lastApkDir = picked.replace(/[\\/][^\\/]+$/, "");
+    await showFilingInfo(picked);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+function filingField(label: string, value: string | null | undefined, big = false): string {
+  const v = value?.trim() || "";
+  return `
+    <div class="fl-row${big ? " big" : ""}">
+      <span class="fl-label">${esc(label)}</span>
+      <code class="fl-value">${v ? esc(v) : '<span class="fl-empty">—</span>'}</code>
+      ${v ? `<button class="btn fl-copy" data-copy="${esc(v)}">复制</button>` : ""}
+    </div>`;
+}
+
+async function showFilingInfo(apk: string): Promise<void> {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 820px">
+      <div class="modal-head">
+        <span>安卓备案信息</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="fl-body">
+        <div class="dm-loading">正在读取 APK 签名与清单…</div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="fl-hint">${esc(apk)}</span>
+        <span class="flex1"></span>
+        <button class="btn" id="fl-copy-all">复制全部</button>
+        <button class="btn" id="fl-repick">换一个 APK</button>
+        <button class="btn primary" id="fl-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#fl-body") as HTMLDivElement;
+  const close = (): void => overlay.remove();
+
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#fl-close") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+  (overlay.querySelector("#fl-copy-all") as HTMLButtonElement).addEventListener("click", () =>
+    copyAllFiling(),
+  );
+  (overlay.querySelector("#fl-repick") as HTMLButtonElement).addEventListener("click", () => {
+    close();
+    void pickApkAndInspect();
+  });
+
+  let info: FilingInfo;
+  try {
+    info = await invoke<FilingInfo>("filing_info", { apk });
+  } catch (e) {
+    body.innerHTML = `<div class="dr-raw">${esc(String(e))}</div>`;
+    return;
+  }
+  lastFiling = info;
+
+  if (info.error) {
+    body.innerHTML = `<div class="dr-raw">${esc(info.error)}</div>`;
+    return;
+  }
+
+  const debugSigned = (info.dn ?? "").toLowerCase().includes("android debug");
+
+  body.innerHTML = `
+    ${debugSigned ? '<div class="fl-banner">当前为调试签名，请勿用于备案</div>' : ""}
+    <div class="fl-section">备案三要素</div>
+    ${filingField("应用名称", info.appLabel, true)}
+    ${filingField("应用包名", info.package, true)}
+    ${filingField("应用 MD5", info.md5, true)}
+    ${
+      info.publicKey
+        ? filingField("应用公钥", info.publicKey, true)
+        : `<div class="fl-row big">
+             <span class="fl-label">应用公钥</span>
+             <code class="fl-value"><span class="fl-empty">待解析（第二期提供：解析 APK 签名块）</span></code>
+           </div>`
+    }
+
+    <div class="fl-section">附加信息</div>
+    ${filingField("版本", [info.versionName, info.versionCode ? `(${info.versionCode})` : ""].filter(Boolean).join(" "))}
+    ${filingField("SDK", [info.minSdk ? `min ${info.minSdk}` : "", info.targetSdk ? `target ${info.targetSdk}` : ""].filter(Boolean).join(" · "))}
+    ${filingField("签名方案", info.scheme ? `V${info.scheme}` : null)}
+    ${filingField("证书 DN", info.dn)}
+    ${filingField("SHA-1", info.sha1)}
+    ${filingField("SHA-256", info.sha256)}
+
+    ${
+      info.warnings.length
+        ? `<div class="fl-section">提示</div>${info.warnings
+            .map((w) => `<div class="fl-warn">${esc(w)}</div>`)
+            .join("")}`
+        : ""
+    }
+  `;
+
+  body.querySelectorAll<HTMLButtonElement>(".fl-copy").forEach((b) => {
+    b.addEventListener("click", () => {
+      void navigator.clipboard
+        .writeText(b.dataset.copy ?? "")
+        .then(() => toast("已复制"))
+        .catch((e) => toast(String(e), "error"));
+    });
+  });
+}
+
+function copyAllFiling(): void {
+  const i = lastFiling;
+  if (!i) return;
+
+  const lines = [
+    `应用名称：${i.appLabel ?? ""}`,
+    `应用包名：${i.package ?? ""}`,
+    `应用公钥：${i.publicKey ?? "（待解析）"}`,
+    `应用MD5：${i.md5 ?? ""}`,
+    `版本：${i.versionName ?? ""} (${i.versionCode ?? ""})`,
+    `SHA1：${i.sha1 ?? ""}`,
+    `SHA256：${i.sha256 ?? ""}`,
+    `证书DN：${i.dn ?? ""}`,
+    `签名方案：${i.scheme ? `V${i.scheme}` : ""}`,
+  ];
+
+  void navigator.clipboard
+    .writeText(lines.join("\n"))
+    .then(() => toast("备案信息已复制"))
+    .catch((e) => toast(String(e), "error"));
+}
 
 /* ---------------- 体检（§14 / §6.6）：工具栏按钮 ---------------- */
 
@@ -1009,6 +1227,9 @@ interface SessionLog {
   projectId: string | null;
   commandId: string | null;
   templateId: string | null;
+  platform: string | null;
+  action: string | null;
+  target: string | null;
   device: string;
   mode: string;
   kind: string;
@@ -1038,6 +1259,9 @@ async function persistSessions(): Promise<void> {
     projectId: s.projectId ?? null,
     commandId: s.commandId ?? null,
     templateId: s.templateId ?? null,
+    platform: s.platform ?? null,
+    action: s.action ?? null,
+    target: s.target ?? null,
     device: s.device,
     mode: s.mode,
     kind: s.kind,
@@ -1080,6 +1304,9 @@ async function restoreSessions(): Promise<void> {
       projectId: log.projectId ?? undefined,
       commandId: log.commandId ?? undefined,
       templateId: log.templateId ?? undefined,
+      platform: log.platform ?? undefined,
+      action: log.action ?? undefined,
+      target: log.target ?? undefined,
       restored: true,
     };
     sessions.push(s);
@@ -1114,6 +1341,18 @@ async function rerunSession(s: TermSession): Promise<void> {
       await runTemplate(project, tpl);
       return;
     }
+  }
+
+  // 派生动作（平台菜单）：按平台重新走一遍，设备会重新解析
+  if (s.platform && s.action) {
+    await runPlatformAction(project, s.platform, {
+      action: s.action,
+      label: s.title,
+      target: s.target ?? null,
+      enabled: true,
+      reason: null,
+    });
+    return;
   }
 
   toast("找不到原命令（可能已被删除），请重新选择", "error");
@@ -1694,59 +1933,267 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
   });
 }
 
-/* ---------------- 项目右键：全局命令 ---------------- */
+/* ---------------- 通用菜单（支持二级） ---------------- */
 
-let projMenuEl: HTMLDivElement | null = null;
+type MenuRow =
+  | { kind: "group"; text: string }
+  | { kind: "sep" }
+  | {
+      kind: "item";
+      name: string;
+      detail?: string;
+      disabled?: boolean;
+      onClick?: () => void;
+      children?: MenuRow[];
+    };
 
-function closeProjMenu(): void {
+/** 二级子菜单（本项目最多两层：右键菜单 → 平台 → 动作） */
+let subMenuEl: HTMLDivElement | null = null;
+
+function closeSubMenu(): void {
+  subMenuEl?.remove();
+  subMenuEl = null;
+}
+
+function closeAllMenus(): void {
+  closeSubMenu();
   projMenuEl?.remove();
   projMenuEl = null;
 }
 
-function openProjectMenu(ev: MouseEvent, p: Proj): void {
-  closeProjMenu();
+function renderMenuRows(parent: HTMLDivElement, rows: MenuRow[]): void {
+  for (const r of rows) {
+    if (r.kind === "group") {
+      const g = document.createElement("div");
+      g.className = "dm-group";
+      g.textContent = r.text;
+      parent.appendChild(g);
+      continue;
+    }
 
-  const globals = state.commandTemplates.filter((t) => t.scope === "global");
+    if (r.kind === "sep") {
+      const s = document.createElement("div");
+      s.className = "dm-sep";
+      parent.appendChild(s);
+      continue;
+    }
+
+    const el = document.createElement("div");
+    el.className =
+      "dm-item" + (r.disabled ? " disabled" : "") + (r.children ? " has-sub" : "");
+    el.innerHTML = `
+      <span class="dm-name">${esc(r.name)}</span>
+      ${r.detail ? `<span class="dm-sub">${esc(r.detail)}</span>` : ""}
+      ${r.children ? '<span class="dm-caret">▸</span>' : ""}
+    `;
+
+    if (r.disabled) {
+      el.title = r.detail ?? "";
+    } else if (r.children) {
+      el.addEventListener("mouseenter", () => {
+        closeSubMenu();
+        openSubMenu(el, r.children!);
+      });
+    } else {
+      el.addEventListener("click", () => {
+        closeAllMenus();
+        r.onClick?.();
+      });
+    }
+
+    parent.appendChild(el);
+  }
+}
+
+function openSubMenu(anchor: HTMLElement, rows: MenuRow[]): void {
+  const sub = document.createElement("div");
+  sub.className = "device-menu sub";
+  sub.innerHTML = `<div class="dm-body"></div>`;
+  document.body.appendChild(sub);
+  renderMenuRows(sub.querySelector(".dm-body") as HTMLDivElement, rows);
+
+  const r = anchor.getBoundingClientRect();
+  const w = sub.offsetWidth || 240;
+  const h = sub.offsetHeight || 200;
+
+  // 右侧放不下就翻到左边
+  let left = r.right + 2;
+  if (left + w > window.innerWidth - 8) left = Math.max(8, r.left - w - 2);
+
+  let top = r.top;
+  if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 8);
+
+  sub.style.left = `${left}px`;
+  sub.style.top = `${top}px`;
+  subMenuEl = sub;
+
+  sub.addEventListener("mouseleave", () => {
+    window.setTimeout(() => {
+      if (subMenuEl === sub && !sub.matches(":hover")) closeSubMenu();
+    }, 180);
+  });
+}
+
+/* ---------------- 项目右键：平台 / 全局命令 / 项目命令 ---------------- */
+
+let projMenuEl: HTMLDivElement | null = null;
+/** 开发期：自动展开指定平台子菜单，便于无人值守截图 */
+let devSubmenu: string | null = null;
+
+function openProjectMenu(ev: MouseEvent, p: Proj): void {
+  closeAllMenus();
+
   const menu = document.createElement("div");
   menu.className = "device-menu";
-  menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 340)}px`;
-  menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 320)}px`;
+  menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 360)}px`;
+  menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 420)}px`;
   menu.innerHTML = `<div class="dm-head">${esc(p.name)}</div><div class="dm-body"></div>`;
   document.body.appendChild(menu);
   projMenuEl = menu;
 
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
 
-  const addGroup = (text: string): void => {
-    const g = document.createElement("div");
-    g.className = "dm-group";
-    g.textContent = text;
-    body.appendChild(g);
-  };
+  // 1) 平台（异步填充，先占位）
+  const platformBox = document.createElement("div");
+  platformBox.innerHTML = `<div class="dm-group">平台 · 正在分析…</div>`;
+  body.appendChild(platformBox);
 
-  const addItem = (name: string, detail: string, onClick: () => void): void => {
-    const el = document.createElement("div");
-    el.className = "dm-item";
-    el.innerHTML = `<span class="dm-name">${esc(name)}</span>${detail ? `<span class="dm-sub">${esc(detail)}</span>` : ""}`;
-    el.addEventListener("click", () => {
-      closeProjMenu();
-      onClick();
-    });
-    body.appendChild(el);
-  };
+  void (async () => {
+    if (p.kind !== "single") {
+      platformBox.innerHTML = "";
+      renderMenuRows(platformBox, [
+        { kind: "group", text: "平台" },
+        {
+          kind: "item",
+          name: "工作区项目不支持平台菜单",
+          detail: "请用命令右侧的设备菜单，或把子应用单独添加为项目",
+          disabled: true,
+        },
+      ]);
+      return;
+    }
 
-  addGroup(`全局命令 (${globals.length})`);
+    try {
+      const m = await invoke<PlatformMatrix>("platform_matrix", { projectId: p.id });
+      if (projMenuEl !== menu) return;
+      platformBox.innerHTML = "";
+
+      const rows: MenuRow[] = [{ kind: "group", text: "平台" }];
+      for (const pf of m.platforms) {
+        if (!pf.enabled) {
+          rows.push({
+            kind: "item",
+            name: pf.label,
+            detail: pf.reason ?? "当前不可用",
+            disabled: true,
+          });
+          continue;
+        }
+        const usable = pf.actions.filter((a) => a.enabled);
+        rows.push({
+          kind: "item",
+          name: pf.label,
+          detail: `${usable.length} 个动作`,
+          children: pf.actions.map((a) => ({
+            kind: "item" as const,
+            name: a.label,
+            detail: a.enabled ? undefined : (a.reason ?? "不可用"),
+            disabled: !a.enabled,
+            onClick: () => void runPlatformAction(p, pf.id, a),
+          })),
+        });
+      }
+      renderMenuRows(platformBox, rows);
+
+      // 开发期：自动展开某个平台，便于截图
+      if (devSubmenu) {
+        const el = Array.from(
+          platformBox.querySelectorAll<HTMLDivElement>(".dm-item.has-sub"),
+        ).find((x) => x.querySelector(".dm-name")?.textContent === devSubmenu);
+        if (el) el.dispatchEvent(new MouseEvent("mouseenter"));
+      }
+    } catch (e) {
+      platformBox.innerHTML = "";
+      renderMenuRows(platformBox, [{ kind: "group", text: "平台" }]);
+      const err = document.createElement("div");
+      err.className = "dm-error";
+      err.textContent = String(e);
+      platformBox.appendChild(err);
+    }
+  })();
+
+  // 2) 全局命令
+  const globals = state.commandTemplates.filter((t) => t.scope === "global");
+  const globalRows: MenuRow[] = [{ kind: "group", text: `全局命令 (${globals.length})` }];
   if (globals.length === 0) {
-    addItem("（暂无全局模板）", "设置 → 命令模板 → 作用域选「全局」", () => {});
+    globalRows.push({
+      kind: "item",
+      name: "（暂无全局模板）",
+      detail: "设置 → 命令模板 → 作用域选「全局」",
+      disabled: true,
+    });
   }
   for (const t of globals) {
-    const detail = [t.kind, t.buildType, t.args.join(" ")].filter(Boolean).join(" · ");
-    addItem(t.name, detail, () => void runTemplate(p, t));
+    globalRows.push({
+      kind: "item",
+      name: t.name,
+      detail: [t.kind, t.buildType, t.args.join(" ")].filter(Boolean).join(" · "),
+      onClick: () => void runTemplate(p, t),
+    });
   }
+  const globalBox = document.createElement("div");
+  body.appendChild(globalBox);
+  renderMenuRows(globalBox, globalRows);
 
-  addGroup("项目");
-  addItem("从模板导入…", "把模板加入本项目", () => openTemplateImport(p));
-  addItem("添加命令…", "新建 run / build / custom 命令", () => void openCommandDialog(p));
+  // 3) 项目级操作
+  const tailBox = document.createElement("div");
+  body.appendChild(tailBox);
+  renderMenuRows(tailBox, [
+    { kind: "sep" },
+    {
+      kind: "item",
+      name: "选择设备…",
+      detail: "手动指定设备（含未启动的模拟器）",
+      onClick: () => toast("在命令行上右键可选择设备"),
+    },
+    { kind: "item", name: "从模板导入…", detail: "把模板加入本项目", onClick: () => openTemplateImport(p) },
+    {
+      kind: "item",
+      name: "添加命令…",
+      detail: "新建 run / build / custom 命令",
+      onClick: () => void openCommandDialog(p),
+    },
+  ]);
+}
+
+async function runPlatformAction(
+  p: Proj,
+  platform: string,
+  a: PlatformAction,
+): Promise<void> {
+  try {
+    const res = await invoke<StartResponse>("start_platform_action", {
+      projectId: p.id,
+      platform,
+      action: a.action,
+      target: a.target ?? null,
+      rows: 30,
+      cols: 100,
+    });
+    mountSession(
+      res,
+      a.action === "build" ? "build" : "run",
+      a.action === "profile" ? "profile" : "debug",
+      {
+        projectId: p.id,
+        platform,
+        action: a.action,
+        target: a.target ?? undefined,
+      },
+    );
+  } catch (e) {
+    toast(String(e), "error");
+  }
 }
 
 /* ---------------- 命令模板库 ---------------- */
@@ -2279,6 +2726,17 @@ function openSettings(): void {
       field(s, "AVD 目录", draft.android.avdPath, (v) => {
         draft.android.avdPath = v;
       });
+      field(s, "build-tools", draft.android.buildToolsPath, (v) => {
+        draft.android.buildToolsPath = v;
+      });
+      field(s, "keytool", draft.android.keytoolPath, (v) => {
+        draft.android.keytoolPath = v;
+      });
+      const note = document.createElement("div");
+      note.className = "set-desc";
+      note.textContent =
+        "build-tools（aapt2 / apksigner）留空则取 SDK 下最高版本；keytool 留空则自动探测。备案只用到这两个。";
+      s.appendChild(note);
     }
 
     // HarmonyOS
@@ -2363,6 +2821,7 @@ async function boot(): Promise<void> {
           <button class="btn" id="btn-import">📂 导入 launch.json</button>
         </div>
         <div class="tb-right">
+          <button class="btn" id="btn-filing" title="安卓备案信息：选择 APK 查看包名 / MD5 / 公钥">📋 备案</button>
           <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
           <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
           <span class="tb-meta" id="tb-meta">—</span>
@@ -2435,13 +2894,19 @@ async function boot(): Promise<void> {
   document.addEventListener("mousedown", (e) => {
     if (deviceMenuEl && !deviceMenuEl.contains(e.target as Node)) closeDeviceMenu();
     if (emuMenuEl && !emuMenuEl.contains(e.target as Node)) closeEmuMenu();
-    if (projMenuEl && !projMenuEl.contains(e.target as Node)) closeProjMenu();
+    if (
+      projMenuEl &&
+      !projMenuEl.contains(e.target as Node) &&
+      !(subMenuEl && subMenuEl.contains(e.target as Node))
+    ) {
+      closeAllMenus();
+    }
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     closeDeviceMenu();
     closeEmuMenu();
-    closeProjMenu();
+    closeAllMenus();
   });
   window.addEventListener("blur", closeDeviceMenu);
 
@@ -2459,6 +2924,8 @@ async function boot(): Promise<void> {
     const s = activeSession();
     if (s) void rerunSession(s);
   });
+  req<HTMLButtonElement>("#btn-filing").addEventListener("click", () => void pickApkAndInspect());
+
   req<HTMLButtonElement>("#btn-doctor").addEventListener("click", () => {
     if (doctorBusy) {
       toast("体检进行中…");
@@ -2545,6 +3012,10 @@ async function boot(): Promise<void> {
       const t = state.commandTemplates.find((x) => x.id === editTpl);
       if (t) void openCommandDialog(null, t);
     }
+    devSubmenu = await invoke<string | null>("dev_env", { name: "FLA_SUBMENU" });
+    const filingHook = await invoke<string | null>("dev_env", { name: "FLA_FILING" });
+    if (filingHook) void showFilingInfo(filingHook);
+
     const projMenu = await invoke<string | null>("dev_env", { name: "FLA_PROJ_MENU" });
     if (projMenu) {
       const proj = state.projects.find((x) => x.id === projMenu) ?? state.projects[0];
@@ -2586,5 +3057,11 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
 
 

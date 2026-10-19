@@ -1,96 +1,45 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// 内置命令模板：新项目会自动套用，也可在设置里增删改
+/// 内置命令模板。
+///
+/// **v5 起只保留 Pub Get**：`Debug` / `Build APK` / `Build Windows` / `Build Web`
+/// 已退役——它们的能力改由「项目右键 → 平台 → 动作」动态派生，
+/// 不再需要在每个项目里存一条命令。
 pub fn default_templates() -> Vec<Command> {
-    vec![
-        Command {
-            id: "tpl-debug".into(),
-            name: "Debug".into(),
-            kind: "run".into(),
-            program: None,
-            cwd: None,
-            flutter_mode: Some("debug".into()),
-            args: vec![],
-            env: HashMap::new(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: None,
-            source: Some("template".into()),
-            scope: Some("project".into()),
-        },
-        Command {
-            id: "tpl-build-apk".into(),
-            name: "Build APK".into(),
-            kind: "build".into(),
-            program: None,
-            cwd: None,
-            flutter_mode: None,
-            args: vec![],
-            env: HashMap::new(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: Some("apk".into()),
-            source: Some("template".into()),
-            scope: Some("project".into()),
-        },
-        Command {
-            id: "tpl-build-windows".into(),
-            name: "Build Windows".into(),
-            kind: "build".into(),
-            program: None,
-            cwd: None,
-            flutter_mode: None,
-            args: vec![],
-            env: HashMap::new(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: Some("windows".into()),
-            source: Some("template".into()),
-            scope: Some("project".into()),
-        },
-        Command {
-            id: "tpl-build-web".into(),
-            name: "Build Web".into(),
-            kind: "build".into(),
-            program: None,
-            cwd: None,
-            flutter_mode: None,
-            args: vec![],
-            env: HashMap::new(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: Some("web".into()),
-            source: Some("template".into()),
-            scope: Some("project".into()),
-        },
-        // 自定义 + 全局：项目右键直接执行，无需加入项目
-        Command {
-            id: "tpl-pub-get".into(),
-            name: "Pub Get".into(),
-            kind: "custom".into(),
-            program: Some("%FLUTTER%".into()),
-            cwd: None,
-            flutter_mode: None,
-            args: vec!["pub".into(), "get".into()],
-            env: HashMap::new(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: None,
-            source: Some("template".into()),
-            scope: Some("global".into()),
-        },
-    ]
+    vec![Command {
+        id: "tpl-pub-get".into(),
+        name: "Pub Get".into(),
+        kind: "custom".into(),
+        program: Some("%FLUTTER%".into()),
+        cwd: None,
+        flutter_mode: None,
+        args: vec!["pub".into(), "get".into()],
+        env: HashMap::new(),
+        tool_args: vec![],
+        device_id: None,
+        emulator_id: None,
+        build_type: None,
+        source: Some("template".into()),
+        scope: Some("global".into()),
+    }]
 }
 
-/// 由模板实例化出属于某个项目的命令（换新 id，标记来源）
+/// v5 退役的内置模板 id（迁移时从旧状态文件里清掉）
+pub const RETIRED_TEMPLATE_IDS: [&str; 4] = [
+    "tpl-debug",
+    "tpl-build-apk",
+    "tpl-build-windows",
+    "tpl-build-web",
+];
+
+/// 这些名字 + 类型的模板实例化命令也要一并清理
+pub const RETIRED_COMMAND_NAMES: [&str; 4] =
+    ["Debug", "Build APK", "Build Windows", "Build Web"];
+
 pub fn instantiate_template(tpl: &Command, project_id: &str) -> Command {
     let mut c = tpl.clone();
     c.id = make_id("cmd", &format!("{}|{}|{}", project_id, tpl.name, tpl.kind));
@@ -161,6 +110,12 @@ pub struct AndroidSettings {
     /// AVD 目录（通常 %USERPROFILE%\.android\avd）
     #[serde(rename = "avdPath", default)]
     pub avd_path: Option<String>,
+    /// build-tools 目录（含 aapt2 / apksigner）；留空则取 <sdk>/build-tools 下最高版本
+    #[serde(rename = "buildToolsPath", default)]
+    pub build_tools_path: Option<String>,
+    /// keytool 路径；留空则自动探测
+    #[serde(rename = "keytoolPath", default)]
+    pub keytool_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -253,4 +208,5 @@ impl Default for State {
         }
     }
 }
+
 

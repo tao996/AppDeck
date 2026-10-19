@@ -47,11 +47,12 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
 
     let id = make_id("proj", &p.to_lowercase());
 
-    // 单应用项目：自动套用全局命令模板，避免"导入后命令为空"
+    // 单应用项目：只套用**项目作用域**的模板；全局模板（如 Pub Get）不自动加入项目
     let commands: Vec<Command> = if has_pubspec {
         state
             .command_templates
             .iter()
+            .filter(|t| t.scope.as_deref() != Some("global"))
             .map(|t| instantiate_template(t, &id))
             .collect()
     } else {
@@ -495,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn single_project_gets_template_commands() {
+    fn single_project_does_not_auto_apply_global_templates() {
         let path = r"D:\demo\code\flutter\library\projects\today";
         if !std::path::Path::new(path).join("pubspec.yaml").exists() {
             eprintln!("跳过：单应用测试素材不存在");
@@ -506,9 +507,20 @@ mod tests {
         let project = add_project_to(&mut state, path).unwrap();
 
         assert_eq!(project.kind, "single");
-        assert!(!project.commands.is_empty(), "单应用项目应自动套用模板");
-        assert!(project.commands.iter().any(|c| c.kind == "run"));
-        assert!(project.commands.iter().any(|c| c.kind == "build"));
+        // v5：内置的 Debug / Build * 模板已退役，只剩全局模板（Pub Get），
+        // 而全局模板不进项目 → 新项目命令为空，能力改由「平台 → 动作」派生
+        assert!(
+            state
+                .command_templates
+                .iter()
+                .all(|t| t.scope.as_deref() == Some("global")),
+            "默认模板库现在只应包含全局模板"
+        );
+        assert!(
+            project.commands.is_empty(),
+            "不应再把全局模板塞进项目：{:?}",
+            project.commands.iter().map(|c| &c.name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

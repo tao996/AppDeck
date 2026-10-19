@@ -144,6 +144,7 @@ mod tests {
             sdk_path: Some(r"D:\apps\Android\SDK".into()),
             emulator_path: Some(r"D:\apps\Android\SDK\emulator\emulator.exe".into()),
             avd_path: Some(r"D:\mydata\.android\avd".into()),
+            ..Default::default()
         };
 
         let r = resolve(&s).expect("本机应能解析出 emulator.exe");

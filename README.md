@@ -22,6 +22,52 @@
 | M5 | 发布构建 + 通知 | ✅ 完成 |
 | M6 | `launch.json` 高级导入（手动添加命令等） | ✅ 完成（命令增删改 + 模板库） |
 | M7 | 会话恢复 + 打磨 | ✅ 完成 |
+| P1 | 平台菜单派生 + 备案信息 | ✅ 完成 |
+| P2 | 备案公钥（解析 APK 签名块） | 待做 |
+
+### 平台菜单 + 备案信息（第一期）
+
+**导入了 Flutter 项目后命令为空？这是有意的。** 平台/模式组合不再存成命令，而是从
+「项目 + 宿主 + 设备」动态派生：
+
+```
+右键项目
+├─ 平台
+│   ├─ Android ▸  调试运行 / 性能分析运行 / 构建 APK / 构建 AAB / 构建 AAR
+│   ├─ Web     ▸  调试运行 / 性能分析运行 / 构建 Web
+│   ├─ Windows ▸  …
+│   ├─ iOS     ▸  （灰：当前宿主的 flutter 不支持该平台）
+│   ├─ Linux   ▸  （灰：…）
+│   └─ macOS   ▸  （灰：…）
+├─ 全局命令    Pub Get
+└─ 从模板导入 / 添加命令
+```
+
+- **可用性三条件**：项目有该平台目录 ∧ 宿主 `flutter build` 支持 ∧（运行类）有该平台设备
+- **宿主支持度**由 `flutter build --help` 的目标列表推导，**不硬编码**——
+  换到 macOS 自动出现 iOS/macOS，不需要重新配
+- **运行类置灰会说明原因**："没有可用设备（可先启动模拟器）"
+- **工作区项目不显示平台菜单**（根目录没有平台，跑哪个子应用是歧义的）
+- 派生动作**不落盘**；恢复后「⟳ 重跑」按平台重新解析设备
+
+**迁移（schema v4 → v5）**：`Debug` / `Build APK` / `Build Windows` / `Build Web`
+四条内置模板退役，已实例化且未改名的命令一并清理；模板库只保留 `Pub Get`。
+清理是**幂等**的，不依赖版本号。
+
+**备案信息**：工具栏「📋 备案」→ 选 APK →
+
+- 取数链路经实测选定：包名/版本用 `aapt2 dump badging`，指纹用 `apksigner verify --print-certs`
+  （`keytool -printcert -jarfile` 对只有 V2 签名的 APK **直接失败**；JDK 17 的
+  `keytool -list -v` **不再输出 MD5**）
+- 三要素：应用名称 / 包名 / MD5，各带复制；MD5 统一成大写冒号分隔
+- 附加：版本、SDK、签名方案、DN、SHA-1、SHA-256，可「复制全部」
+- 调试签名会显著提示"请勿用于备案"
+- 公钥需解析 APK 签名块，**第二期提供**（见下）
+- 设置里可覆盖 `build-tools` 目录与 `keytool` 路径，留空自动探测
+
+![平台菜单](docs/shot-platform-menu.png)
+
+![备案信息](docs/shot-filing.png)
 
 ### 体检（§6.6 / §14）· 工具栏按钮
 
@@ -147,7 +193,7 @@
 cd src-tauri && cargo test
 ```
 
-31 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析。
+40 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析。
 
 诊断工具：
 ```bash
@@ -270,3 +316,4 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+

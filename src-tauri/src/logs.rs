@@ -33,6 +33,13 @@ pub struct SessionLog {
     pub exit_code: Option<i32>,
     pub status: String,
     pub artifacts: Vec<String>,
+    /// 派生动作（平台菜单）的来源：没有 commandId / templateId 时靠它支持「重跑」
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+    #[serde(default)]
+    pub target: Option<String>,
     /// xterm 序列化缓冲（含 ANSI，按原始字节保存，不转纯文本）
     pub ansi: String,
     pub saved_at: u64,

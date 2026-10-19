@@ -24,6 +24,9 @@ pub struct DeviceInfo {
     pub id: String,
     pub name: String,
     pub platform: Option<String>,
+    /// flutter daemon 的真实字段（如 android-arm / web-javascript / windows-x64）
+    #[serde(rename = "platformType", default)]
+    pub platform_type: Option<String>,
     pub category: Option<String>,
     pub emulator: bool,
     pub sdk: Option<String>,

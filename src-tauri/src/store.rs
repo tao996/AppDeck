@@ -27,16 +27,46 @@ pub fn load_from(path: &Path) -> State {
         Ok(raw) => match serde_json::from_str::<State>(&raw) {
             Ok(mut s) => {
                 let mut migrated = false;
+                let from = s.schema_version;
 
-                // v4：新增命令模板库，老版本状态文件补一次默认模板
-                if s.schema_version < crate::model::SCHEMA_VERSION {
-                    if s.command_templates.is_empty() {
-                        s.command_templates = crate::model::default_templates();
-                    }
+                // v4：老文件补默认模板库（当前默认只剩 Pub Get）
+                if from < 4 && s.command_templates.is_empty() {
+                    s.command_templates = crate::model::default_templates();
                     migrated = true;
                 }
 
-                // 新增字段由 serde default 兜底，版本号归一
+                // v5：Debug / Build APK / Build Windows / Build Web 退役——
+                // 它们改由「项目右键 → 平台 → 动作」动态派生，不再占项目命令。
+                //
+                // **幂等**：只要还残留就清理，不依赖版本号。实测踩过坑：开发期
+                // `tauri dev` 自动重启，用"已升版本但还没写清理逻辑"的中间版本
+                // 写过一次 state.json，导致按版本号判断的迁移永久跳过。
+                let before_tpl = s.command_templates.len();
+                s.command_templates
+                    .retain(|t| !crate::model::RETIRED_TEMPLATE_IDS.contains(&t.id.as_str()));
+
+                let mut pruned_cmds = 0usize;
+                for p in s.projects.iter_mut() {
+                    let before = p.commands.len();
+                    p.commands.retain(|c| {
+                        let auto = c.source.as_deref() == Some("template");
+                        let retired =
+                            crate::model::RETIRED_COMMAND_NAMES.contains(&c.name.as_str());
+                        // 只清理由模板生成且未改名的命令；用户自己建的不受影响
+                        !(auto && retired)
+                    });
+                    pruned_cmds += before - p.commands.len();
+                }
+
+                if s.command_templates.len() != before_tpl || pruned_cmds > 0 {
+                    migrated = true;
+                    eprintln!(
+                        "[migrate] 退役模板 {} 条，清理项目命令 {} 条",
+                        before_tpl - s.command_templates.len(),
+                        pruned_cmds
+                    );
+                }
+
                 s.schema_version = crate::model::SCHEMA_VERSION;
 
                 // 迁移结果落盘，避免每次启动都重新推断（也让 state.json 版本号如实反映）

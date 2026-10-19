@@ -2,9 +2,11 @@ mod android;
 mod daemon;
 mod detect;
 mod doctor;
+mod filing;
 mod flutter;
 mod harmony;
 mod logs;
+mod platforms;
 mod jsonc;
 mod launch;
 mod model;
@@ -458,6 +460,151 @@ fn build_targets(
         map.insert(key, list.clone());
     }
     Ok(list)
+}
+
+/* ---------------- 平台动作（派生，不落盘） ---------------- */
+
+/// 宿主能构建哪些目标（复用 TargetCache）
+fn host_target_names(
+    app: &AppHandle,
+    cache: &TargetCache,
+    project_id: &str,
+) -> Result<Vec<String>, String> {
+    let state = store::load(app)?;
+    let exe = flutter_exe_for(&state, project_id)?;
+    let key = exe.display().to_string();
+
+    if let Ok(map) = cache.0.lock() {
+        if let Some(list) = map.get(&key) {
+            return Ok(list.iter().map(|t| t.name.clone()).collect());
+        }
+    }
+
+    let list = detect_targets(&exe)?;
+    if let Ok(mut map) = cache.0.lock() {
+        map.insert(key, list.clone());
+    }
+    Ok(list.into_iter().map(|t| t.name).collect())
+}
+
+fn devices_snapshot(
+    app: &AppHandle,
+    reg: &daemon::Daemons,
+    project_id: &str,
+) -> Result<Vec<daemon::DeviceInfo>, String> {
+    let state = store::load(app)?;
+    let exe = flutter_exe_for(&state, project_id)?;
+    let d = daemon::get_or_start(reg, &exe, device_sink(app))?;
+    let v = d.request("device.getDevices", None)?;
+    serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
+}
+
+#[tauri::command]
+fn platform_matrix(
+    app: AppHandle,
+    reg: tauri::State<'_, daemon::Daemons>,
+    cache: tauri::State<'_, TargetCache>,
+    project_id: String,
+) -> Result<platforms::PlatformMatrix, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    // 工作区项目没有平台菜单
+    if project.kind != "single" {
+        return Ok(platforms::matrix(project, &[], &[], None));
+    }
+
+    let targets = host_target_names(&app, &cache, &project_id)?;
+
+    let (devices, device_error) = match devices_snapshot(&app, &reg, &project_id) {
+        Ok(list) => (list, None),
+        Err(e) => (Vec::new(), Some(e)),
+    };
+
+    Ok(platforms::matrix(project, &targets, &devices, device_error))
+}
+
+/// 派生动作：平台 + 动作（+ 构建目标）→ 起一个会话，**不写入项目命令**
+#[tauri::command]
+fn start_platform_action(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    dreg: tauri::State<'_, daemon::Daemons>,
+    project_id: String,
+    platform: String,
+    action: String,
+    target: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    // 运行类要具体设备；构建类不需要
+    let device_id = if action == "build" {
+        None
+    } else {
+        let devices = devices_snapshot(&app, &dreg, &project_id)?;
+        platforms::device_for(&devices, &platform).map(|d| d.id.clone())
+    };
+
+    let (args, label, _kind) =
+        platforms::args_for(&platform, &action, target.as_deref(), device_id.as_deref())?;
+
+    let title = format!(
+        "{}:{} {}",
+        project.name,
+        platforms::label_of(&platform),
+        label
+    );
+    let plan = ops::flutter_adhoc_plan(&state, project, args, title)?;
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    // 带时间戳：恢复自磁盘的旧会话可能已占用 sess-N，纯序号会撞号
+    let id = format!("sess-{}-{seq}", logs::now_ms());
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    let pid = session.pid;
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session);
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title: plan.title,
+        device: device_id.unwrap_or_else(|| "—".to_string()),
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+    })
+}
+
+/* ---------------- 备案信息 ---------------- */
+
+#[tauri::command]
+fn filing_info(app: AppHandle, apk: String) -> Result<filing::FilingInfo, String> {
+    let state = store::load(&app)?;
+    Ok(filing::inspect(&apk, &state.settings.android))
 }
 
 /* ---------------- 命令增删 ---------------- */
@@ -928,6 +1075,9 @@ pub fn run() {
             list_devices,
             launch_emulator,
             build_targets,
+            platform_matrix,
+            start_platform_action,
+            filing_info,
             upsert_command,
             remove_command,
             upsert_template,
