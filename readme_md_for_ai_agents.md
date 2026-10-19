@@ -636,6 +636,8 @@ per-project semaphore
 | A24 | 从菜单选设备后运行 | 命令带 `-d <id>` 启动；选模拟器则先 `emulator.launch` |
 | A25 | 工具栏「📱 模拟器」 | 同时列出 Android AVD 与 HarmonyOS 实例，点击即启动 |
 | A26 | 设置页「自动检测」 | 在本机实测命中 Flutter / Android SDK+emulator+AVD / DevEco Emulator+实例+镜像+Flutter 分支，且未配置时自动回退 |
+| A27 | 构建目标动态探测 | 只列出当前宿主可用的目标；`--flavor` 支持度逐目标判定 |
+| A28 | 构建产物与通知 | 产物路径从 `✓ Built ...` 解析并可打开目录；结束发系统通知 |
 
 ---
 

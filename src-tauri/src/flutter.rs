@@ -15,14 +15,14 @@ pub struct FlutterInfo {
 }
 
 #[cfg(windows)]
-fn hide_console(cmd: &mut PCommand) {
+pub fn hide_console(cmd: &mut PCommand) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn hide_console(_cmd: &mut PCommand) {}
+pub fn hide_console(_cmd: &mut PCommand) {}
 
 fn flutter_bin_name() -> &'static str {
     if cfg!(windows) {

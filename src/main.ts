@@ -1,7 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -153,6 +158,8 @@ interface TermSession {
   device: string;
   mode: string;
   kind: string;
+  cwd: string;
+  artifacts: string[];
   status: SessionStatus;
   exitCode?: number | null;
   devToolsUrl?: string;
@@ -161,6 +168,12 @@ interface TermSession {
   term?: Terminal;
   fit?: FitAddon;
   pane?: HTMLDivElement;
+}
+
+interface BuildTarget {
+  name: string;
+  description: string;
+  supportsFlavor: boolean;
 }
 
 let state: State = { schemaVersion: 3, settings: defaultSettings(), projects: [] };
@@ -331,6 +344,21 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
+
+  // 构建产物
+  const bar = req<HTMLSpanElement>("#artifact-bar");
+  bar.innerHTML = "";
+  if (s && s.kind === "build" && s.artifacts.length > 0) {
+    for (const a of s.artifacts.slice(-3)) {
+      const btn = document.createElement("button");
+      btn.className = "cbtn artifact";
+      btn.title = `打开所在目录\n${a}`;
+      const name = a.split(/[\\/]/).pop() ?? a;
+      btn.textContent = `📦 ${name}`;
+      btn.addEventListener("click", () => void revealArtifact(s, a));
+      bar.appendChild(btn);
+    }
+  }
 }
 
 function updateEmptyState(): void {
@@ -515,6 +543,13 @@ function renderTree(): void {
         list.appendChild(row);
       }
 
+      const addCmd = document.createElement("div");
+      addCmd.className = "cmd add";
+      addCmd.innerHTML = `<span class="cico">＋</span><span class="cname">添加命令</span>`;
+      addCmd.title = "添加运行命令或发布构建命令";
+      addCmd.addEventListener("click", () => void openCommandDialog(p));
+      list.appendChild(addCmd);
+
       box.appendChild(list);
     }
 
@@ -570,6 +605,8 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
       device: res.device,
       mode: c.flutterMode ?? "debug",
       kind: c.kind,
+      cwd: res.cwd,
+      artifacts: [],
       status: "starting",
       scan: "",
     };
@@ -701,6 +738,19 @@ function handleOutput(id: string, data: string): void {
   // 锚点可能被切块，用滚动窗口匹配
   s.scan = (s.scan + data).slice(-4000);
 
+  // 构建产物：flutter 输出形如 "✓ Built build\app\outputs\flutter-apk\app-release.apk"
+  if (s.kind === "build") {
+    let added = false;
+    for (const m of data.matchAll(/Built\s+([^\r\n]+)/g)) {
+      const p = (m[1] ?? "").replace(/["']/g, "").trim();
+      if (p && !s.artifacts.includes(p)) {
+        s.artifacts.push(p);
+        added = true;
+      }
+    }
+    if (added && s.id === activeSessionId) updateControls();
+  }
+
   if (s.status !== "running" && s.scan.includes("Flutter run key commands.")) {
     s.status = "running";
     renderTabs();
@@ -729,6 +779,37 @@ function handleExit(id: string, code: number | null): void {
   renderTabs();
   renderStatus();
   updateControls();
+
+  // D-11：构建结束发系统通知
+  if (s.kind === "build") void notifyBuild(s);
+}
+
+async function notifyBuild(s: TermSession): Promise<void> {
+  try {
+    let granted = await isPermissionGranted();
+    if (!granted) granted = (await requestPermission()) === "granted";
+    if (!granted) return;
+
+    const failed = (s.exitCode ?? 0) !== 0;
+    sendNotification({
+      title: failed ? "构建失败" : "构建完成",
+      body: failed
+        ? `${s.title} · 退出码 ${s.exitCode ?? "未知"}`
+        : `${s.title}${s.artifacts.length ? ` · ${s.artifacts[s.artifacts.length - 1]}` : ""}`,
+    });
+  } catch {
+    /* 通知失败不影响主流程 */
+  }
+}
+
+async function revealArtifact(s: TermSession, rel: string): Promise<void> {
+  const base = s.cwd.replace(/[\\/]+$/, "");
+  const abs = /^[a-zA-Z]:[\\/]/.test(rel) ? rel : `${base}\\${rel.replace(/\//g, "\\")}`;
+  try {
+    await revealItemInDir(abs);
+  } catch (e) {
+    toast(`打开失败：${String(e)}`, "error");
+  }
 }
 
 /* ---------------- 设备菜单（M3） ---------------- */
@@ -828,7 +909,271 @@ function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
         );
       }
     }
+
+    addGroup("命令");
+    addItem("编辑命令…", "名称 / 设备 / 参数 / 构建目标", () => void openCommandDialog(p, c));
   })();
+}
+
+/* ---------------- 命令编辑（M5：构建命令） ---------------- */
+
+function splitArgs(text: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const v = m[1] ?? m[2] ?? m[3];
+    if (v !== undefined) out.push(v);
+  }
+  return out;
+}
+
+async function openCommandDialog(p: Proj, existing?: Cmd): Promise<void> {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 640px">
+      <div class="modal-head">
+        <span>${existing ? "编辑命令" : "添加命令"}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="cmd-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="cmd-hint"></span>
+        <span class="flex1"></span>
+        ${existing ? '<button class="btn" id="cmd-del">删除</button>' : ""}
+        <button class="btn" id="cmd-cancel">取消</button>
+        <button class="btn primary" id="cmd-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#cmd-body") as HTMLDivElement;
+  const hint = overlay.querySelector("#cmd-hint") as HTMLSpanElement;
+  const close = (): void => overlay.remove();
+
+  // 从已有 args 里拆出 flavor
+  let flavor = "";
+  let restArgs = [...(existing?.args ?? [])];
+  const fi = restArgs.findIndex((a) => a === "--flavor");
+  if (fi >= 0) {
+    flavor = restArgs[fi + 1] ?? "";
+    restArgs = restArgs.filter((_, i) => i !== fi && i !== fi + 1);
+  }
+
+  const draft = {
+    name: existing?.name ?? "",
+    kind: existing?.kind ?? "run",
+    program: existing?.program ?? "",
+    cwd: existing?.cwd ?? "",
+    mode: existing?.flutterMode ?? "debug",
+    target: existing?.buildType ?? "apk",
+    flavor,
+    args: restArgs.join(" "),
+  };
+
+  let targets: BuildTarget[] | null = null;
+
+  const row = (label: string): [HTMLDivElement, HTMLElement] => {
+    const r = document.createElement("div");
+    r.className = "set-row";
+    const l = document.createElement("label");
+    l.textContent = label;
+    const cell = document.createElement("div");
+    cell.className = "set-cell";
+    r.append(l, cell);
+    body.appendChild(r);
+    return [r, cell];
+  };
+
+  const input = (parent: HTMLElement, value: string, placeholder: string, onInput: (v: string) => void): void => {
+    const el = document.createElement("input");
+    el.className = "set-input";
+    el.value = value;
+    el.placeholder = placeholder;
+    el.addEventListener("input", () => onInput(el.value));
+    parent.appendChild(el);
+  };
+
+  const build = async (): Promise<void> => {
+    body.innerHTML = "";
+
+    {
+      const [, cell] = row("名称");
+      input(cell, draft.name, "如 GooglePlayReleaseProd", (v) => {
+        draft.name = v;
+      });
+    }
+
+    {
+      const [, cell] = row("类型");
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const k of ["run", "build"]) {
+        const o = document.createElement("option");
+        o.value = k;
+        o.textContent = k === "run" ? "run（调试运行）" : "build（发布构建）";
+        if (draft.kind === k) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.disabled = Boolean(existing);
+      sel.addEventListener("change", () => {
+        draft.kind = sel.value;
+        void build();
+      });
+      cell.appendChild(sel);
+    }
+
+    if (draft.kind === "run") {
+      const [, c1] = row("program");
+      input(c1, draft.program, "lib/main.dart（可空）", (v) => {
+        draft.program = v;
+      });
+      const [, c2] = row("cwd");
+      input(c2, draft.cwd, "projects/xxx（可空）", (v) => {
+        draft.cwd = v;
+      });
+      const [, c3] = row("模式");
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const m of ["debug", "profile", "release"]) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        if (draft.mode === m) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        draft.mode = sel.value;
+      });
+      c3.appendChild(sel);
+    } else {
+      if (targets === null) {
+        hint.textContent = "正在探测构建目标…";
+        try {
+          targets = await invoke<BuildTarget[]>("build_targets", { projectId: p.id });
+          hint.textContent = "";
+        } catch (e) {
+          hint.textContent = String(e);
+          targets = [];
+        }
+      }
+
+      const [, c1] = row("构建目标");
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const t of targets) {
+        const o = document.createElement("option");
+        o.value = t.name;
+        o.textContent = `${t.name} — ${t.description}`;
+        if (draft.target === t.name) o.selected = true;
+        sel.appendChild(o);
+      }
+      const cur = targets.find((t) => t.name === draft.target);
+      if (!cur && targets.length > 0) draft.target = targets[0].name;
+      sel.addEventListener("change", () => {
+        draft.target = sel.value;
+        void build();
+      });
+      c1.appendChild(sel);
+
+      const [, c2] = row("flavor");
+      input(c2, draft.flavor, "可空（如 prod）", (v) => {
+        draft.flavor = v;
+      });
+      const supported = targets.find((t) => t.name === draft.target)?.supportsFlavor ?? false;
+      c2.classList.toggle("disabled", !supported);
+      const note = document.createElement("div");
+      note.className = "set-note";
+      note.textContent = supported ? "该目标支持 --flavor" : "该目标不支持 --flavor（留空）";
+      c2.appendChild(note);
+    }
+
+    {
+      const [, cell] = row("额外参数");
+      input(cell, draft.args, "--dart-define=ENV=prod", (v) => {
+        draft.args = v;
+      });
+    }
+
+    if (draft.kind === "build") {
+      const tip = document.createElement("div");
+      tip.className = "set-desc";
+      tip.style.marginTop = "10px";
+      tip.textContent = "构建始终以 --release 执行；产物路径会在终端中解析，并在结束后发系统通知。";
+      body.appendChild(tip);
+    }
+  };
+
+  await build();
+
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#cmd-cancel") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  overlay.querySelector("#cmd-del")?.addEventListener("click", () => {
+    void (async () => {
+      if (!existing) return;
+      const ok = await confirm(`删除命令「${existing.name}」？`, {
+        title: "删除命令",
+        kind: "warning",
+      });
+      if (!ok) return;
+      try {
+        state = await invoke<State>("remove_command", {
+          projectId: p.id,
+          commandId: existing.id,
+        });
+        close();
+        render();
+        toast("命令已删除");
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
+  (overlay.querySelector("#cmd-save") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      if (!draft.name.trim()) {
+        hint.textContent = "请填写名称";
+        return;
+      }
+
+      const args = splitArgs(draft.args);
+      if (draft.kind === "build" && draft.flavor.trim()) {
+        args.unshift("--flavor", draft.flavor.trim());
+      }
+
+      const cmd: Cmd = {
+        id: existing?.id ?? "",
+        name: draft.name.trim(),
+        kind: draft.kind,
+        program: draft.kind === "run" ? draft.program.trim() || null : null,
+        cwd: draft.kind === "run" ? draft.cwd.trim() || null : null,
+        flutterMode: draft.kind === "run" ? draft.mode : null,
+        args,
+        env: existing?.env ?? {},
+        toolArgs: existing?.toolArgs ?? [],
+        deviceId: existing?.deviceId ?? null,
+        emulatorId: existing?.emulatorId ?? null,
+        buildType: draft.kind === "build" ? draft.target : null,
+        source: "manual",
+      };
+
+      try {
+        state = await invoke<State>("upsert_command", { projectId: p.id, command: cmd });
+        close();
+        render();
+        toast(existing ? "命令已更新" : "命令已添加");
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
 }
 
 /* ---------------- 模拟器菜单（工具栏） ---------------- */
@@ -1160,6 +1505,7 @@ async function boot(): Promise<void> {
             <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
             <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
             <span class="flex1"></span>
+            <span class="artifact-bar" id="artifact-bar"></span>
             <span class="ctx-info" id="ctx-info">等待会话</span>
           </div>
           <div class="term-holder" id="term-holder">

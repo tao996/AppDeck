@@ -269,6 +269,166 @@ fn launch_emulator(
     Ok(())
 }
 
+/* ---------------- 发布构建 ---------------- */
+
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildTarget {
+    name: String,
+    description: String,
+    supports_flavor: bool,
+}
+
+#[derive(Default)]
+struct TargetCache(std::sync::Mutex<std::collections::HashMap<String, Vec<BuildTarget>>>);
+
+fn run_flutter(exe: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    let mut cmd = flutter::build_command(exe, args);
+    flutter::hide_console(&mut cmd);
+    let out = cmd
+        .output()
+        .map_err(|e| format!("执行 flutter 失败: {e}"))?;
+    let mut text = String::from_utf8_lossy(&out.stdout).to_string();
+    text.push_str(&String::from_utf8_lossy(&out.stderr));
+    Ok(text)
+}
+
+/// 解析 `flutter build --help` 的子命令列表，并逐目标探测 `--flavor` 支持。
+/// 实测：apk / appbundle / windows 支持，web 不支持，且 Windows 宿主没有 ipa / macos。
+fn detect_targets(exe: &std::path::Path) -> Result<Vec<BuildTarget>, String> {
+    let help = run_flutter(exe, &["build", "--help"])?;
+    let mut targets: Vec<BuildTarget> = Vec::new();
+    let mut in_list = false;
+
+    for line in help.lines() {
+        if line.contains("Available subcommands:") {
+            in_list = true;
+            continue;
+        }
+        if !in_list {
+            continue;
+        }
+
+        let s = line.trim_end().trim_start();
+        if s.is_empty() {
+            continue;
+        }
+
+        let mut it = s.splitn(2, char::is_whitespace);
+        let Some(name) = it.next() else { continue };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            in_list = false;
+            continue;
+        }
+
+        targets.push(BuildTarget {
+            name: name.to_string(),
+            description: it.next().unwrap_or("").trim().to_string(),
+            supports_flavor: false,
+        });
+    }
+
+    if targets.is_empty() {
+        return Err("未能解析 flutter build 的子命令列表".to_string());
+    }
+
+    let names: Vec<String> = targets.iter().map(|t| t.name.clone()).collect();
+    let flags: Vec<(String, bool)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = names
+            .iter()
+            .map(|n| {
+                let n = n.clone();
+                let exe = exe.to_path_buf();
+                scope.spawn(move || {
+                    let ok = run_flutter(&exe, &["build", &n, "--help"])
+                        .map(|h| h.contains("--flavor"))
+                        .unwrap_or(false);
+                    (n, ok)
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok()).collect()
+    });
+
+    for (n, ok) in flags {
+        if let Some(t) = targets.iter_mut().find(|t| t.name == n) {
+            t.supports_flavor = ok;
+        }
+    }
+
+    Ok(targets)
+}
+
+#[tauri::command]
+fn build_targets(
+    app: AppHandle,
+    cache: tauri::State<'_, TargetCache>,
+    project_id: String,
+) -> Result<Vec<BuildTarget>, String> {
+    let state = store::load(&app)?;
+    let exe = flutter_exe_for(&state, &project_id)?;
+    let key = exe.display().to_string();
+
+    if let Ok(map) = cache.0.lock() {
+        if let Some(list) = map.get(&key) {
+            return Ok(list.clone());
+        }
+    }
+
+    let list = detect_targets(&exe)?;
+    if let Ok(mut map) = cache.0.lock() {
+        map.insert(key, list.clone());
+    }
+    Ok(list)
+}
+
+/* ---------------- 命令增删 ---------------- */
+
+#[tauri::command]
+fn upsert_command(
+    app: AppHandle,
+    project_id: String,
+    command: model::Command,
+) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    let idx = state
+        .projects
+        .iter()
+        .position(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let mut cmd = command;
+    if cmd.id.trim().is_empty() {
+        cmd.id = model::make_id("cmd", &format!("{}|{}|{}", project_id, cmd.name, cmd.kind));
+    }
+
+    let project = &mut state.projects[idx];
+    match project.commands.iter_mut().find(|c| c.id == cmd.id) {
+        Some(existing) => *existing = cmd,
+        None => project.commands.push(cmd),
+    }
+
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+#[tauri::command]
+fn remove_command(
+    app: AppHandle,
+    project_id: String,
+    command_id: String,
+) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    project.commands.retain(|c| c.id != command_id);
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
 /* ---------------- 设置与工具链 ---------------- */
 
 #[tauri::command]
@@ -437,8 +597,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(pty::Registry::default())
         .manage(daemon::Daemons::default())
+        .manage(TargetCache::default())
         .invoke_handler(tauri::generate_handler![
             load_state,
             state_location,
@@ -452,6 +614,9 @@ pub fn run() {
             kill_session,
             list_devices,
             launch_emulator,
+            build_targets,
+            upsert_command,
+            remove_command,
             save_settings,
             detect_toolchains,
             list_all_emulators,
