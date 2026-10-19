@@ -23,6 +23,23 @@
 | M6 | `launch.json` 高级导入（手动添加命令等） | ✅ 完成（命令增删改 + 模板库） |
 | M7 | 会话恢复 + 打磨 | ✅ 完成 |
 
+### 体检横幅（§6.6 / §14）
+
+启动后后台跑一次 `flutter doctor`，有问题才在顶部常驻横幅，点「详情」看完整报告：
+
+- **符号陷阱**：`flutter_tools/lib/src/base/logger.dart:738` 在 `supportsEmoji == false` 时
+  把 `✓` 换成 `√`、`✗` 换成 `X`、`⚠️` 换成 `!`。解析器**两套符号都接受**，
+  否则在中文终端上永远匹配不到状态行
+- **修复指引**：从 `To resolve this, run:` 与已知问题表里提取命令，可复制
+- **在终端执行**：白名单内的修复动作（如 `flutter doctor --android-licenses`）
+  可直接起一个 PTY 会话跑，许可证确认可交互输入 `y`
+- 失败时原样呈现 Flutter 自己的报错，而不是"未知错误"
+- 结果缓存 5 分钟，横幅上可「重新体检」
+
+![体检发现问题](docs/shot-doctor.png)
+
+![体检通过](docs/shot-doctor-pass.png)
+
 ### M7 已实现 · 会话恢复（D-10）
 
 重启应用后，**tab 壳与历史输出都在，但进程不自动拉起**：
@@ -75,8 +92,11 @@
 ### 设置页与模拟器菜单（M3.5）
 
 - **工具栏「📱 模拟器」**：聚合两个来源，点条目即启动
-  - Android AVD ← `flutter daemon` 的 `emulator.getEmulators`
+  - Android AVD ← 直接驱动 `emulator.exe -list-avds`，并把设置里的
+    SDK / AVD 目录通过 `ANDROID_AVD_HOME` 等注入子进程（自定义 AVD 目录才真正生效）；
+    未配置时回退 `flutter daemon`
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
+- **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
 - **设置页**（⚙）三段：
   - Flutter：`auto` / `custom` / `fvm` + 自定义路径
   - Android：SDK 目录 / `emulator.exe` / AVD 目录
@@ -120,7 +140,7 @@
 cd src-tauri && cargo test
 ```
 
-25 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份。
+31 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析。
 
 诊断工具：
 ```bash
