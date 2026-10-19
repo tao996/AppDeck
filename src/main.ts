@@ -196,7 +196,7 @@ function renderTree(): void {
           <span class="cname">${esc(c.name)}</span>
           ${mode !== "debug" ? `<span class="cmd-mode">${esc(mode)}</span>` : ""}
           <span class="cnote">${esc(c.cwd ?? "")}</span>
-          <span class="cadd" title="选择设备并运行">▷</span>
+          <button class="run-btn" title="运行此命令（也可双击该行）">▶</button>
         `;
         row.title = [
           c.cwd ? `目录: ${c.cwd}` : "目录: 工作区根",
@@ -206,10 +206,12 @@ function renderTree(): void {
           .filter(Boolean)
           .join("\n");
 
-        row.addEventListener("click", () => {
-          selectedCommand = c.id;
-          renderTree();
-          toast("M2：将在此命令上创建 ConPTY 会话");
+        // 单击 = 选中；运行需点右侧 ▶ 或双击
+        row.addEventListener("click", () => selectCommand(c.id));
+        row.addEventListener("dblclick", () => runCommand(p, c));
+        row.querySelector(".run-btn")?.addEventListener("click", (e) => {
+          e.stopPropagation();
+          runCommand(p, c);
         });
         row.addEventListener("contextmenu", (e) => {
           e.preventDefault();
@@ -321,6 +323,20 @@ async function removeProject(p: Proj): Promise<void> {
 
 function targetProjectId(): string | null {
   return state.projects.length === 1 ? state.projects[0].id : null;
+}
+
+/** 单击命令：仅选中，不触发任何执行 */
+function selectCommand(id: string): void {
+  if (selectedCommand === id) return;
+  selectedCommand = id;
+  renderTree();
+}
+
+/** 运行命令：由行内 ▶ 按钮或双击触发（M2 接入 ConPTY 后在此创建会话） */
+function runCommand(p: Proj, c: Cmd): void {
+  selectCommand(c.id);
+  const where = c.cwd ? `${p.name}\\${c.cwd}` : p.name;
+  toast(`M2 接入后在此创建会话：${where} · ${c.name}`);
 }
 
 /* ---------------- 启动 ---------------- */

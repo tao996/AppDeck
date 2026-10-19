@@ -599,15 +599,47 @@ body.dragging .term-pane {
   opacity: 1;
 }
 
-.cadd {
-  opacity: 0;
-  color: var(--accent);
-  font-size: 10px;
-  margin-left: 6px;
+.run-btn {
+  margin-left: 8px;
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: none;
+  color: var(--fg-faint);
+  font-size: 8px;
+  line-height: 1;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0.65;
+  transition: color 0.12s, background 0.12s, border-color 0.12s, opacity 0.12s;
 }
 
-.cmd:hover .cadd {
+.cmd:hover .run-btn {
   opacity: 1;
+  color: var(--accent);
+  border-color: #2f3a4a;
+  background: rgba(74, 158, 255, 0.1);
+}
+
+.cmd .run-btn:hover {
+  opacity: 1;
+  color: #fff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.cmd .run-btn:active {
+  transform: scale(0.9);
+}
+
+.cmd.selected .run-btn {
+  opacity: 1;
+  color: var(--accent);
 }
 
 .cmd.hint {
