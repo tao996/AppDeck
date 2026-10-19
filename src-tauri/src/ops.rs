@@ -160,6 +160,22 @@ pub fn import_launch_from_path(
 ) -> Result<(Project, ImportOutcome, bool), String> {
     let root = resolve_workspace_root(raw)?;
 
+    // **先校验再改状态**：否则会在 state 里留下一个"加了一半"的项目，
+    // 调用方虽然不会落盘，但函数语义上仍是脏的
+    let launch = PathBuf::from(&root).join(".vscode").join("launch.json");
+    if !launch.is_file() {
+        let has_pubspec = PathBuf::from(&root).join("pubspec.yaml").is_file();
+        return Err(if has_pubspec {
+            format!(
+                "{} 是 Flutter 项目，但没有 .vscode/launch.json。\n\
+                 用「＋ 添加 Flutter 项目」即可，它的命令走右键「平台 → 动作」。",
+                root
+            )
+        } else {
+            format!("{root} 下没有 .vscode/launch.json")
+        });
+    }
+
     let existing = state
         .projects
         .iter()
@@ -692,6 +708,34 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn import_path_validates_launch_json_before_mutating() {
+        // 有 pubspec 但没有 .vscode/launch.json：应报错且**不留下半个项目**
+        let tmp = std::env::temp_dir().join("fla_import_nolaunch");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("pubspec.yaml"), b"name: nolaunch\n").unwrap();
+
+        let mut state = State::default();
+        let err = import_launch_from_path(&mut state, &tmp.display().to_string()).unwrap_err();
+
+        assert!(
+            err.contains("launch.json"),
+            "错误信息应指出缺 launch.json：{err}"
+        );
+        assert!(
+            err.contains("添加 Flutter 项目"),
+            "有 pubspec 时应引导用正确入口：{err}"
+        );
+        assert!(
+            state.projects.is_empty(),
+            "校验失败不应改动状态，实际有 {} 个项目",
+            state.projects.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     fn import_path_picks_kind_by_pubspec() {
         let tmp = std::env::temp_dir().join("fla_import_kind");
         let _ = std::fs::remove_dir_all(&tmp);
