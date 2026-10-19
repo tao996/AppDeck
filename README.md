@@ -3,26 +3,34 @@
 > 轻量级 **Flutter 应用启动器与发布管理器** —— 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
 > 界面参考 **WindTerm**：高信息密度、多标签终端、层级树导航。
 
-![界面截图](docs/shot-m1.png)
+![界面截图](docs/shot-m2.png)
 
 ---
 
 ## 当前状态
 
-**M1：项目管理 + 项目树 + 持久化**（真实数据，尚未接入 PTY）
-
-界面已跑通真实链路：`state.json` → Rust → 前端渲染。终端区仍为占位，等待 M2 接入 ConPTY。
+**M2：ConPTY 终端已打通** —— 点 `▶` 即可在应用内启动真实的 `flutter run`，输出、热重载、DevTools 全部可用。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
 | M0 | Tauri 骨架 + WindTerm 风格界面 | ✅ 完成 |
 | M1 | 项目管理 + 项目树 + 持久化 | ✅ 完成 |
-| M2 | ConPTY 会话 + 真实终端 + 进程树回收 | 待做 |
+| M2 | ConPTY 会话 + 真实终端 + 进程树回收 | ✅ 完成 |
 | M3 | 设备/模拟器（`flutter daemon`） | 待做 |
-| M4 | 热重载 / 热重启 / 停止 / DevTools | 待做 |
+| M4 | 热重载 / 热重启 / 停止 / DevTools | 部分（按钮已可用，设备选择属 M3） |
 | M5 | 发布构建 + 通知 | 待做 |
 | M6 | `launch.json` 高级导入（手动添加命令等） | 待做 |
 | M7 | 会话恢复 + 打磨 | 待做 |
+
+### M2 已实现
+
+- **ConPTY 会话**：每条命令一个伪终端（`portable-pty`），前端 xterm.js 直接渲染 ANSI 彩色输出
+- **流式 UTF-8 解码**：多字节字符被数据块切断时保留尾部，中文日志不乱码
+- **DSR 握手**：ConPTY 启动即发 `ESC[6n` 查询光标位置，不应答会**永久卡住**；由后端统一应答 `ESC[1;1R` 并剔除该序列（只应答一次）
+- **进程树回收**：Windows Job Object + `KILL_ON_JOB_CLOSE`，关标签/退出应用时连带杀掉 `flutter → dart → gradle`
+- **会话状态机**：命中 `Flutter run key commands.` → 🟢；进程退出 → 🔴 并记录退出码
+- **控制按钮**：热重载 `r`、热重启 `R`、停止 `q`（5 秒后兜底强杀）、DevTools（从输出解析 URL 打开）
+- **命令拼装**：`.bat` 经 `cmd.exe /d /c`（**不加 `/s`**），路径与参数逐项传参，避免引号被二次转义
 
 ### M1 已实现
 
@@ -30,7 +38,7 @@
 - **`launch.json` 导入**：手写 JSONC 状态机（行注释 / 块注释 / 尾逗号）；按 `type == "dart" && request == "launch"` 过滤；`cwd` 相对**工作区根**解析（VS Code 的真实语义，不是相对 `.vscode`）
 - **项目树**：真实数据渲染，展示 Flutter 来源（`FVM` / `自定义` / `PATH`）、版本号、`release` 模式标记
 - **持久化**：`%APPDATA%\com.flutterlauncher.app\state.json`，`schemaVersion: 2`，原子写入；损坏时备份为 `state.corrupt.json` 后重建
-- **Flutter 探测**：解析可执行文件并执行 `--version`。Windows 上 `.bat` 必须经 `cmd.exe`，且 Rust 的 `Command` 会把引号转义为 `\"`（cmd 不认），因此改用 `raw_arg` 拼接命令尾
+- **Flutter 探测**：解析可执行文件并执行 `--version`
 
 ### 测试
 
@@ -38,8 +46,14 @@
 cd src-tauri && cargo test
 ```
 
-9 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复。
+17 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装。
 
+诊断 ConPTY 可用：
+```bash
+cd src-tauri && cargo run --bin pty_probe
+```
+
+> **开发期钩子**：设置 `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID>"` 后，应用启动会自动运行该命令，便于无人值守验证终端链路。
 
 ---
 
@@ -95,10 +109,13 @@ npm run tauri build  # 打包安装程序
 │   ├── src/launch.rs           launch.json 解析
 │   ├── src/jsonc.rs            JSONC 状态机（注释 / 尾逗号）
 │   ├── src/flutter.rs          Flutter 可执行文件解析与版本探测
+│   ├── src/pty.rs              ConPTY 会话（UTF-8 流解码 / DSR 应答 / Job Object）
+│   ├── src/bin/pty_probe.rs    ConPTY 诊断探针
 │   ├── src/model.rs            数据模型（schemaVersion 2）
 │   ├── tauri.conf.json         窗口与应用配置
 │   └── Cargo.toml
 ├── docs/
+│   ├── shot-m2.png             M2 界面截图（真实终端）
 │   ├── shot-m1.png             M1 界面截图
 │   └── shot-m1-tree.png        项目树细节
 ├── readme_md_for_ai_agents.md  ★ 权威规格 v2（AI 助手必读）

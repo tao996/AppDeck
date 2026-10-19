@@ -182,6 +182,20 @@ D-4 选择终端，因此 **D-6 放弃 `--machine`**。代价是状态由文本�
 
 > ⚠️ **实现禁令**：不要在 `flutter run` 命令行里加 `--machine`。也不要同时维护两套模式（除非 §18-Q2 被确认为"需要"）。
 
+### 5.6 ConPTY 的 DSR 握手（M2 实测，必读）
+
+ConPTY 创建后会先向"终端"发送 `ESC[6n`（Device Status Report，查询光标位置），
+**在收到位置应答前不会继续输出**。实测若不回应，进程一直卡住、终端一片空白
+（现象：只收到一个 4 字节的 `\x1b[6n`，之后再无任何输出）。
+
+**本项目的处理**：由 **Rust 后端**统一拦截 `ESC[6n` → 立即回写 `ESC[1;1R` →
+并把该序列从输出中**剔除**（避免 xterm.js 再应答一次；多余的 `R` 会变成 stray input）。
+
+- 该序列可能被拆到两个数据块，必须保留跨块状态（实现见 `pty::DsrFilter`）。
+- **只能应答一次**：要么后端做，要么前端做，不能都做。
+- 回归测试：`pty::tests::dsr_detects_and_strips` / `dsr_handles_split_sequence` / `dsr_passes_normal_escapes`。
+- 诊断工具：`cargo run --bin pty_probe`（会打印 ConPTY 原始分块）。
+
 ---
 
 ## 6. Flutter 工具链解析（D-5）
@@ -251,14 +265,19 @@ D-4 选择终端，因此 **D-6 放弃 `--machine`**。代价是状态由文本�
 D:\apps\flutter\bin\  →  flutter, flutter.bat, dart, dart.bat
 ```
 
-**正确方式**：在 PTY 内启动 shell 后执行：
+**正确方式**：在 PTY 内以 `cmd.exe` 启动，**参数逐项传，不要自己拼引号**：
 
 ```
-cmd.exe /d /s /c ""<flutter.bat 绝对路径>" <args...>"
+cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
 ```
 
-- `/d`：跳过 AutoRun（避免用户注册表注入干扰）；
-- `/s`：使引号处理可预期，配合最外层引号可安全处理含空格路径；
+- `/d`：跳过 AutoRun（避免用户注册表注入干扰）。
+- **不要加 `/s`**。实测 `/s` 会剥掉首尾引号，导致含空格路径被截断：
+  `'C:\...\my' 不是内部或外部命令`。不加 `/s` 时 cmd 的"两个引号"启发式能正确处理
+  `"C:\Program Files\...\flutter.bat"`。
+- **不要把路径和参数拼成一个带引号的字符串**再交给 `Command`。Rust 的 `Command`
+  会把内层引号转义成 `\"`，而 cmd.exe 不认这种转义（报"不是内部或外部命令"）。
+  路径作为独立实参传入，由 std 自行加引号。
 - `.exe` 场景可绕过 cmd，直接执行。
 
 **参数传递**：一律以 **argv 数组**逐项传递并转义，**禁止字符串拼接**（见 §15）。
@@ -560,6 +579,8 @@ per-project semaphore
 11. ❌ 实现 §3.1「v1 明确不做」清单中的任何功能（范围已冻结）。
 12. ❌ 引入 `addon-search` 等**特性** addon（`addon-serialize` 仅为 D-10 会话恢复所需，允许；见下方依赖锁定表）。
 13. ❌ 在用户点击「重跑」前自动拉起恢复的会话进程。
+14. ❌ 后端与前端同时应答 DSR，或完全不应答（前者产生 stray input，后者直接卡死）。
+15. ❌ 给 `cmd.exe` 加 `/s`，或把可执行文件路径与参数拼成一个带引号的字符串。
 
 **依赖范围（锁定）**：终端仅使用以下基础 addon，其余一律不引入。
 
@@ -597,6 +618,8 @@ per-project semaphore
 | A18 | 状态持久化往返 | 重启后项目与命令完整保留，`state.json` 的 `schemaVersion = 2` |
 | A19 | 重复添加同一目录 | 被拒绝，提示"该项目已在列表中" |
 | A20 | 状态文件损坏 | 备份为 `state.corrupt.json` 并重置，不静默丢失 |
+| A21 | 点 `▶` 后终端出现真实 `flutter run` 输出 | 有 ANSI 颜色、可滚动、状态灯转 🟢、DevTools 可点 |
+| A22 | 会话结束 | 标签转 🔴、可查退出码、进程树无残留 |
 
 ---
 

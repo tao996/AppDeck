@@ -1,13 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { WebglAddon } from "@xterm/addon-webgl";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import "@xterm/xterm/css/xterm.css";
 
 /* ============================================================
-   Flutter Launcher — M1：项目管理 + 项目树 + 持久化
-   真实数据来源：Rust 后端 state.json
-   尚未接入：PTY 会话（M2）、设备（M3）
+   Flutter Launcher — M2：ConPTY 终端
    ============================================================ */
 
 type FlutterSource = "fvm" | "custom" | "path" | "none";
+type SessionStatus = "starting" | "running" | "stopped";
 
 interface Cmd {
   id: string;
@@ -57,11 +63,47 @@ interface ImportResponse {
   warnings: string[];
 }
 
+interface StartResponse {
+  id: string;
+  pid: number;
+  title: string;
+  device: string;
+  cwd: string;
+  program: string;
+  args: string[];
+}
+
+interface DevAutostart {
+  projectId: string;
+  commandId: string;
+  deviceId: string | null;
+}
+
+interface TermSession {
+  id: string;
+  title: string;
+  device: string;
+  mode: string;
+  kind: string;
+  status: SessionStatus;
+  exitCode?: number | null;
+  devToolsUrl?: string;
+  /** 用于跨数据块匹配锚点的滚动窗口 */
+  scan: string;
+  term?: Terminal;
+  fit?: FitAddon;
+  pane?: HTMLDivElement;
+}
+
 let state: State = { schemaVersion: 2, settings: {}, projects: [] };
 const flutterInfo = new Map<string, FlutterInfo>();
 const collapsed = new Set<string>();
 let selectedCommand: string | null = null;
 let statePath = "";
+
+const sessions: TermSession[] = [];
+const pendingOutput = new Map<string, string[]>();
+let activeSessionId: string | null = null;
 
 /* ---------------- 工具 ---------------- */
 
@@ -96,17 +138,206 @@ const SOURCE_TEXT: Record<FlutterSource, string> = {
   none: "未检测",
 };
 
-/* ---------------- 渲染：标签栏 ---------------- */
+const STATUS_TEXT: Record<SessionStatus, string> = {
+  starting: "启动中",
+  running: "运行中",
+  stopped: "已停止",
+};
+
+/* ---------------- 终端主题 ---------------- */
+
+const termTheme = {
+  background: "#0f1115",
+  foreground: "#c8d0da",
+  cursor: "#4a9eff",
+  cursorAccent: "#0f1115",
+  selectionBackground: "#2a3a52",
+  black: "#1a1d24",
+  red: "#f85149",
+  green: "#3fb950",
+  yellow: "#d29922",
+  blue: "#4a9eff",
+  magenta: "#bc8cff",
+  cyan: "#39c5cf",
+  white: "#c8d0da",
+  brightBlack: "#5a6472",
+  brightRed: "#ff7b72",
+  brightGreen: "#56d364",
+  brightYellow: "#e3b341",
+  brightBlue: "#79c0ff",
+  brightMagenta: "#d2a8ff",
+  brightCyan: "#56d4dd",
+  brightWhite: "#f0f6fc",
+};
+
+/* ---------------- 会话 ---------------- */
+
+function activeSession(): TermSession | undefined {
+  return sessions.find((s) => s.id === activeSessionId);
+}
+
+function ensureTerm(s: TermSession): void {
+  if (s.term) return;
+  const holder = req<HTMLDivElement>("#term-holder");
+
+  const pane = document.createElement("div");
+  pane.className = "term-pane";
+  pane.dataset.sid = s.id;
+  holder.appendChild(pane);
+
+  const term = new Terminal({
+    fontFamily: '"Cascadia Mono", "JetBrains Mono", Consolas, "Courier New", monospace',
+    fontSize: 13,
+    lineHeight: 1.35,
+    cursorBlink: true,
+    cursorStyle: "bar",
+    scrollback: 10000,
+    theme: termTheme,
+    allowProposedApi: true,
+  });
+
+  const fit = new FitAddon();
+  term.loadAddon(fit);
+  try {
+    term.loadAddon(new Unicode11Addon());
+    term.unicode.activeVersion = "11";
+  } catch {
+    /* 退化为默认宽度 */
+  }
+
+  term.open(pane);
+  try {
+    const webgl = new WebglAddon();
+    webgl.onContextLoss(() => webgl.dispose());
+    term.loadAddon(webgl);
+  } catch {
+    /* 回退 DOM 渲染器 */
+  }
+
+  // 键盘 → PTY
+  term.onData((data) => {
+    void invoke("write_session", { id: s.id, data }).catch(() => {});
+  });
+  term.onResize(({ rows, cols }) => {
+    void invoke("resize_session", { id: s.id, rows, cols }).catch(() => {});
+  });
+
+  s.term = term;
+  s.fit = fit;
+  s.pane = pane;
+
+  const buffered = pendingOutput.get(s.id);
+  if (buffered) {
+    term.write(buffered.join(""));
+    pendingOutput.delete(s.id);
+  }
+}
+
+function activateSession(id: string): void {
+  activeSessionId = id;
+  for (const s of sessions) {
+    if (!s.pane) continue;
+    s.pane.classList.toggle("active", s.id === id);
+  }
+  const cur = sessions.find((s) => s.id === id);
+  if (cur) {
+    ensureTerm(cur);
+    for (const s of sessions) s.pane?.classList.toggle("active", s.id === id);
+    requestAnimationFrame(() => {
+      cur.fit?.fit();
+      cur.term?.focus();
+    });
+  }
+  renderTabs();
+  renderStatus();
+  updateControls();
+  updateEmptyState();
+}
+
+function updateControls(): void {
+  const s = activeSession();
+  const isRun = s?.status === "running" && s.mode === "debug";
+  req<HTMLButtonElement>("#btn-reload").disabled = !isRun;
+  req<HTMLButtonElement>("#btn-restart").disabled = !isRun;
+  req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
+  req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
+  const info = req<HTMLSpanElement>("#ctx-info");
+  info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
+}
+
+function updateEmptyState(): void {
+  const empty = document.querySelector<HTMLDivElement>("#term-empty");
+  if (!empty) return;
+  empty.style.display = sessions.length === 0 ? "flex" : "none";
+}
+
+/* ---------------- 渲染：标签 ---------------- */
 
 function renderTabs(): void {
   const strip = req<HTMLDivElement>("#tabstrip");
-  strip.innerHTML = `
-    <div class="tab-hint">暂无会话　·　M2 接入 ConPTY 后在此显示终端标签</div>
-    <button class="tab-add" id="tab-add" title="新建会话">+</button>
-  `;
-  req<HTMLButtonElement>("#tab-add").addEventListener("click", () =>
-    toast("M2：会话将由「执行命令」创建"),
-  );
+  strip.innerHTML = "";
+
+  if (sessions.length === 0) {
+    const hint = document.createElement("div");
+    hint.className = "tab-hint";
+    hint.textContent = "暂无会话　·　在右侧选择命令，点 ▶ 或双击运行";
+    strip.appendChild(hint);
+  }
+
+  for (const s of sessions) {
+    const el = document.createElement("div");
+    el.className = "tab" + (s.id === activeSessionId ? " active" : "");
+    el.title = `${STATUS_TEXT[s.status]} · ${s.device}${s.exitCode != null ? ` · 退出码 ${s.exitCode}` : ""}`;
+    el.innerHTML = `
+      <span class="dot ${s.status === "running" ? "run" : s.status === "starting" ? "start" : "stop"}"></span>
+      <span class="tab-title">${esc(s.title)}</span>
+      <span class="tab-dev">${esc(s.device)}</span>
+      <button class="tab-x" title="关闭会话">×</button>
+    `;
+    el.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).closest(".tab-x")) return;
+      activateSession(s.id);
+    });
+    el.querySelector(".tab-x")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void closeSession(s.id);
+    });
+    strip.appendChild(el);
+  }
+
+  const add = document.createElement("button");
+  add.className = "tab-add";
+  add.textContent = "+";
+  add.title = "新建会话";
+  add.addEventListener("click", () => toast("在右侧选择命令后点 ▶ 运行"));
+  strip.appendChild(add);
+}
+
+async function closeSession(id: string): Promise<void> {
+  const idx = sessions.findIndex((s) => s.id === id);
+  if (idx < 0) return;
+  try {
+    await invoke("kill_session", { id });
+  } catch {
+    /* 已结束的会话忽略 */
+  }
+  const [removed] = sessions.splice(idx, 1);
+  removed.term?.dispose();
+  removed.pane?.remove();
+  pendingOutput.delete(id);
+  if (activeSessionId === id) {
+    activeSessionId = sessions.length ? sessions[sessions.length - 1].id : null;
+    if (activeSessionId) activateSession(activeSessionId);
+    else {
+      renderTabs();
+      renderStatus();
+      updateControls();
+      updateEmptyState();
+    }
+  } else {
+    renderTabs();
+    renderStatus();
+  }
 }
 
 /* ---------------- 渲染：项目树 ---------------- */
@@ -206,12 +437,11 @@ function renderTree(): void {
           .filter(Boolean)
           .join("\n");
 
-        // 单击 = 选中；运行需点右侧 ▶ 或双击
         row.addEventListener("click", () => selectCommand(c.id));
-        row.addEventListener("dblclick", () => runCommand(p, c));
+        row.addEventListener("dblclick", () => void runCommand(p, c));
         row.querySelector(".run-btn")?.addEventListener("click", (e) => {
           e.stopPropagation();
-          runCommand(p, c);
+          void runCommand(p, c);
         });
         row.addEventListener("contextmenu", (e) => {
           e.preventDefault();
@@ -237,15 +467,76 @@ function renderStatus(): void {
   const fname = statePath ? (statePath.split(/[\\/]/).pop() ?? "") : "";
   req<HTMLSpanElement>("#sb-path").textContent = fname;
   req<HTMLSpanElement>("#sb-path").title = statePath;
+
+  const sbSess = req<HTMLSpanElement>("#sb-sessions");
+  sbSess.textContent = `会话 ${sessions.length}`;
 }
 
 function render(): void {
   renderTabs();
   renderTree();
   renderStatus();
+  updateControls();
+  updateEmptyState();
 }
 
 /* ---------------- 动作 ---------------- */
+
+function selectCommand(id: string): void {
+  if (selectedCommand === id) return;
+  selectedCommand = id;
+  renderTree();
+}
+
+async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
+  selectCommand(c.id);
+  try {
+    const res = await invoke<StartResponse>("start_session", {
+      projectId: p.id,
+      commandId: c.id,
+      deviceId: deviceId ?? null,
+      rows: 30,
+      cols: 100,
+    });
+
+    const session: TermSession = {
+      id: res.id,
+      title: res.title,
+      device: res.device,
+      mode: c.flutterMode ?? "debug",
+      kind: c.kind,
+      status: "starting",
+      scan: "",
+    };
+    sessions.push(session);
+    activateSession(session.id);
+    requestAnimationFrame(() => {
+      session.fit?.fit();
+      session.term?.focus();
+      const rows = session.term?.rows ?? 30;
+      const cols = session.term?.cols ?? 100;
+      void invoke("resize_session", { id: session.id, rows, cols }).catch(() => {});
+    });
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+function sendKey(data: string): void {
+  const s = activeSession();
+  if (!s) return;
+  void invoke("write_session", { id: s.id, data }).catch(() => {});
+}
+
+async function stopActive(): Promise<void> {
+  const s = activeSession();
+  if (!s) return;
+  sendKey("q");
+  window.setTimeout(() => {
+    const still = sessions.find((x) => x.id === s.id && x.status !== "stopped");
+    if (still) void closeSession(s.id);
+  }, 5000);
+}
 
 async function refreshFlutter(id: string): Promise<void> {
   try {
@@ -297,7 +588,10 @@ async function importLaunch(projectId: string, silent = false): Promise<void> {
 
     const base = `导入完成：${res.imported}/${res.total} 条`;
     const warn = res.warnings.length ? `，${res.warnings.length} 条告警` : "";
-    toast(silent ? `已自动导入 ${res.imported} 条命令` : base + warn, res.warnings.length ? "error" : "info");
+    toast(
+      silent ? `已自动导入 ${res.imported} 条命令` : base + warn,
+      res.warnings.length ? "error" : "info",
+    );
     if (res.warnings.length) console.warn("[launch.json]", res.warnings);
   } catch (e) {
     toast(String(e), "error");
@@ -325,18 +619,51 @@ function targetProjectId(): string | null {
   return state.projects.length === 1 ? state.projects[0].id : null;
 }
 
-/** 单击命令：仅选中，不触发任何执行 */
-function selectCommand(id: string): void {
-  if (selectedCommand === id) return;
-  selectedCommand = id;
-  renderTree();
+/* ---------------- PTY 事件 ---------------- */
+
+function handleOutput(id: string, data: string): void {
+  const s = sessions.find((x) => x.id === id);
+  if (!s) return;
+
+  if (!s.term) {
+    const buf = pendingOutput.get(id) ?? [];
+    buf.push(data);
+    pendingOutput.set(id, buf);
+  } else {
+    s.term.write(data);
+  }
+
+  // 锚点可能被切块，用滚动窗口匹配
+  s.scan = (s.scan + data).slice(-4000);
+
+  if (s.status !== "running" && s.scan.includes("Flutter run key commands.")) {
+    s.status = "running";
+    renderTabs();
+    updateControls();
+  }
+
+  if (!s.devToolsUrl) {
+    const m = s.scan.match(
+      /The Flutter DevTools debugger and profiler on .*? is available at:\s*(\S+)/,
+    );
+    if (m) {
+      s.devToolsUrl = m[1];
+      updateControls();
+    }
+  }
 }
 
-/** 运行命令：由行内 ▶ 按钮或双击触发（M2 接入 ConPTY 后在此创建会话） */
-function runCommand(p: Proj, c: Cmd): void {
-  selectCommand(c.id);
-  const where = c.cwd ? `${p.name}\\${c.cwd}` : p.name;
-  toast(`M2 接入后在此创建会话：${where} · ${c.name}`);
+function handleExit(id: string, code: number | null): void {
+  const s = sessions.find((x) => x.id === id);
+  if (!s || s.status === "stopped") return;
+
+  s.status = "stopped";
+  s.exitCode = code;
+  const label = code == null ? "已终止" : `退出码 ${code}`;
+  s.term?.write(`\r\n\x1b[90m──── 会话结束（${label}）────\x1b[0m\r\n`);
+  renderTabs();
+  renderStatus();
+  updateControls();
 }
 
 /* ---------------- 启动 ---------------- */
@@ -350,7 +677,7 @@ async function boot(): Promise<void> {
         <div class="brand">
           <span class="logo">◆</span>
           <span class="title">Flutter Launcher</span>
-          <span class="badge-m0">M1 · 项目管理</span>
+          <span class="badge-m0">M2 · 终端</span>
         </div>
         <div class="tb-center">
           <button class="btn primary" id="btn-add">＋ 添加 Flutter 项目</button>
@@ -367,20 +694,19 @@ async function boot(): Promise<void> {
       <div class="main">
         <section class="left">
           <div class="term-controls">
-            <button class="cbtn" disabled><i class="hi">⚡</i>热重载</button>
-            <button class="cbtn" disabled><i class="hi">🔄</i>热重启</button>
-            <button class="cbtn danger" disabled><i class="hi">⏹</i>停止</button>
-            <button class="cbtn" disabled><i class="hi">🌐</i>DevTools</button>
+            <button class="cbtn" id="btn-reload" disabled><i class="hi">⚡</i>热重载</button>
+            <button class="cbtn" id="btn-restart" disabled><i class="hi">🔄</i>热重启</button>
+            <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
+            <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
             <span class="flex1"></span>
-            <span class="ctx-info">等待会话</span>
+            <span class="ctx-info" id="ctx-info">等待会话</span>
           </div>
           <div class="term-holder" id="term-holder">
-            <div class="empty-term">
+            <div class="empty-term" id="term-empty">
               <div class="et-glyph">▮</div>
               <div class="et-title">还没有运行中的会话</div>
               <div class="et-sub">
-                在右侧项目树中选择一条命令，选择设备后即可在此打开终端<br/>
-                <span class="dim">ConPTY 终端将在 M2 接入</span>
+                在右侧项目树中选择一条命令，点行内 <b>▶</b> 或双击该行即可启动
               </div>
             </div>
           </div>
@@ -403,15 +729,24 @@ async function boot(): Promise<void> {
         <span class="sb-item" id="sb-state">0 个项目</span>
         <span class="sb-sep"></span>
         <span class="sb-item" id="sb-path"></span>
-        <span class="flex1"></span>
-        <span class="sb-item">UTF-8</span>
         <span class="sb-sep"></span>
-        <span class="sb-item">ConPTY 未连接（M2）</span>
+        <span class="sb-item" id="sb-sessions">会话 0</span>
+        <span class="flex1"></span>
+        <span class="sb-item">ConPTY</span>
+        <span class="sb-sep"></span>
+        <span class="sb-item">UTF-8</span>
       </footer>
     </div>
   `;
 
   render();
+
+  await listen<{ id: string; data: string }>("pty://output", (e) => {
+    handleOutput(e.payload.id, e.payload.data);
+  });
+  await listen<{ id: string; code: number | null }>("pty://exit", (e) => {
+    handleExit(e.payload.id, e.payload.code);
+  });
 
   req<HTMLButtonElement>("#btn-add").addEventListener("click", () => void addProject());
   req<HTMLButtonElement>("#btn-import").addEventListener("click", () => {
@@ -425,8 +760,14 @@ async function boot(): Promise<void> {
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () =>
     toast("M1：Flutter 工具链设置将支持 auto / custom / fvm"),
   );
+  req<HTMLButtonElement>("#btn-reload").addEventListener("click", () => sendKey("r"));
+  req<HTMLButtonElement>("#btn-restart").addEventListener("click", () => sendKey("R"));
+  req<HTMLButtonElement>("#btn-stop").addEventListener("click", () => void stopActive());
+  req<HTMLButtonElement>("#btn-devtools").addEventListener("click", () => {
+    const url = activeSession()?.devToolsUrl;
+    if (url) void openUrl(url).catch((e) => toast(String(e), "error"));
+  });
 
-  // 加载真实状态
   try {
     const [s, loc] = await Promise.all([
       invoke<State>("load_state"),
@@ -439,14 +780,23 @@ async function boot(): Promise<void> {
   }
 
   render();
-
-  const meta = req<HTMLSpanElement>("#tb-meta");
-  meta.textContent = `schema v${state.schemaVersion}`;
-
-  // 并发探测各项目的 Flutter 版本
+  req<HTMLSpanElement>("#tb-meta").textContent = `schema v${state.schemaVersion}`;
   for (const p of state.projects) void refreshFlutter(p.id);
 
-  // 分割条拖拽
+  // 开发期自动启动（FLA_AUTOSTART 环境变量）
+  try {
+    const auto = await invoke<DevAutostart | null>("dev_autostart");
+    if (auto) {
+      const proj = state.projects.find((x) => x.id === auto.projectId);
+      const cmd = proj?.commands.find((x) => x.id === auto.commandId);
+      if (proj && cmd) void runCommand(proj, cmd, auto.deviceId ?? undefined);
+      else console.warn("[autostart] 未找到项目或命令", auto);
+    }
+  } catch {
+    /* 无钩子 */
+  }
+
+  // 分割条
   const splitter = req<HTMLDivElement>("#splitter");
   const right = req<HTMLElement>(".right");
   let dragging = false;
@@ -459,11 +809,13 @@ async function boot(): Promise<void> {
     const total = window.innerWidth;
     const w = Math.min(Math.max(total - e.clientX, 260), total * 0.55);
     right.style.flexBasis = `${w}px`;
+    activeSession()?.fit?.fit();
   });
   window.addEventListener("mouseup", () => {
     dragging = false;
     document.body.classList.remove("dragging");
   });
+  window.addEventListener("resize", () => activeSession()?.fit?.fit());
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());

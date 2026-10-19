@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Flutter App Launcher & Release Manager (WindTerm style)"
 authors = ["you"]
 edition = "2024"
+# src/bin/ 下还有诊断工具 pty_probe，需显式指定默认二进制
+default-run = "flutter-launcher"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -23,6 +25,14 @@ tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+portable-pty = "0.9"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

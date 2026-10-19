@@ -77,6 +77,128 @@ pub fn import_into(state: &mut State, project_id: &str) -> Result<ImportOutcome,
     Ok(outcome)
 }
 
+/// 一次会话的执行计划：最终要执行的程序、参数、工作目录
+#[derive(Debug, Clone)]
+pub struct Plan {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: PathBuf,
+    pub title: String,
+    pub device: String,
+}
+
+/// 把「项目 + 命令」翻译成可直接 spawn 的程序与参数。
+///
+/// 关键约定：
+/// - 工作目录 = 项目根 + 命令的 `cwd`（工作区模式下每个命令指向自己的子应用）
+/// - `.bat` 不能直接 CreateProcess，必须 `cmd.exe /d /c <bat> <args>`
+///   （**不能加 `/s`**：实测 `/s` 会剥掉引号，导致含空格路径被截断）
+pub fn build_plan(
+    state: &State,
+    project_id: &str,
+    command_id: &str,
+    device_override: Option<&str>,
+) -> Result<Plan, String> {
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    let command = project
+        .commands
+        .iter()
+        .find(|c| c.id == command_id)
+        .ok_or_else(|| "命令不存在".to_string())?;
+
+    let project_root = PathBuf::from(&project.path);
+    let cwd = match &command.cwd {
+        Some(c) if !c.trim().is_empty() => project_root.join(c),
+        _ => project_root.clone(),
+    };
+    if !cwd.is_dir() {
+        return Err(format!("工作目录不存在：{}", cwd.display()));
+    }
+
+    let custom = project
+        .flutter_tool
+        .as_ref()
+        .and_then(|f| f.custom_path.clone())
+        .or_else(|| state.settings.flutter_tool.custom_path.clone());
+
+    // FVM 的 junction 通常挂在子应用目录下，先查 cwd 再查项目根
+    let mut resolved = crate::flutter::resolve(&cwd, custom.as_deref());
+    if resolved.0.is_none() {
+        resolved = crate::flutter::resolve(&project_root, custom.as_deref());
+    }
+    let exe = resolved.0.ok_or_else(|| {
+        "未找到 flutter 可执行文件（PATH 中没有，项目也没有 .fvm/flutter_sdk）".to_string()
+    })?;
+
+    // 设备优先级：本次调用显式指定 > 命令自身配置
+    let resolved_device = device_override
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| command.device_id.clone().filter(|s| !s.is_empty()));
+
+    let mut flutter_args: Vec<String> = Vec::new();
+    match command.kind.as_str() {
+        "build" => {
+            flutter_args.push("build".to_string());
+            flutter_args.push(
+                command
+                    .build_type
+                    .clone()
+                    .unwrap_or_else(|| "apk".to_string()),
+            );
+            let has_mode = command
+                .args
+                .iter()
+                .any(|a| a == "--release" || a == "--profile" || a == "--debug");
+            if !has_mode {
+                flutter_args.push("--release".to_string());
+            }
+        }
+        _ => {
+            flutter_args.push("run".to_string());
+            if let Some(d) = resolved_device.as_ref() {
+                flutter_args.push("-d".to_string());
+                flutter_args.push(d.clone());
+            }
+            if let Some(p) = command.program.as_ref().filter(|p| !p.is_empty()) {
+                flutter_args.push("-t".to_string());
+                flutter_args.push(p.clone());
+            }
+        }
+    }
+    flutter_args.extend(command.tool_args.iter().cloned());
+    flutter_args.extend(command.args.iter().cloned());
+
+    let exe_str = exe.display().to_string();
+    let is_batch = exe
+        .extension()
+        .map(|e| {
+            let e = e.to_string_lossy().to_ascii_lowercase();
+            e == "bat" || e == "cmd"
+        })
+        .unwrap_or(false);
+
+    let (program, args) = if is_batch {
+        let mut a = vec!["/d".to_string(), "/c".to_string(), exe_str];
+        a.extend(flutter_args);
+        ("cmd.exe".to_string(), a)
+    } else {
+        (exe_str, flutter_args)
+    };
+
+    Ok(Plan {
+        program,
+        args,
+        cwd,
+        title: format!("{}:{}", project.name, command.name),
+        device: resolved_device.unwrap_or_else(|| "自动".to_string()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,6 +279,59 @@ mod tests {
         assert_eq!(jbook_cn.cwd.as_deref(), Some(r"projects\jbook"));
 
         println!("STATE_PATH={}", tmp.display());
+    }
+
+    #[test]
+    fn build_plan_uses_command_cwd_and_cmd_wrapper() {
+        let Some(ws) = fixture() else {
+            eprintln!("跳过：测试素材不存在");
+            return;
+        };
+
+        let mut state = State::default();
+        let project = add_project_to(&mut state, ws).unwrap();
+        let outcome = import_into(&mut state, &project.id).unwrap();
+
+        let cmd = outcome
+            .commands
+            .iter()
+            .find(|c| c.name == "jbook (国内 APK)")
+            .unwrap();
+        let plan = build_plan(&state, &project.id, &cmd.id, None).unwrap();
+
+        // 工作目录 = 项目根 + 命令 cwd
+        assert!(
+            plan.cwd.ends_with(r"projects\jbook"),
+            "实际 cwd: {}",
+            plan.cwd.display()
+        );
+        // .bat 经 cmd.exe /d /c 启动（不能带 /s）
+        assert_eq!(plan.program, "cmd.exe");
+        assert_eq!(plan.args[0], "/d");
+        assert_eq!(plan.args[1], "/c");
+        assert!(
+            plan.args[2].to_ascii_lowercase().ends_with("flutter.bat")
+                || plan.args[2].to_ascii_lowercase().ends_with("flutter"),
+            "应指向 flutter 可执行文件，实际: {}",
+            plan.args[2]
+        );
+        // flutter 子命令与参数
+        assert!(plan.args.contains(&"run".to_string()));
+        assert!(!plan.args.contains(&"--release".to_string()), "run 不该带 --release");
+        assert!(
+            plan.args.iter().any(|a| a == "--dart-define=APP_CHANNEL=cn"),
+            "应保留自定义 args"
+        );
+        assert_eq!(plan.device, "自动");
+    }
+
+    #[test]
+    fn build_plan_rejects_unknown_command() {
+        let mut state = State::default();
+        let Some(ws) = fixture() else { return };
+        let project = add_project_to(&mut state, ws).unwrap();
+        assert!(build_plan(&state, &project.id, "nope", None).is_err());
+        assert!(build_plan(&state, "nope", "nope", None).is_err());
     }
 
     #[test]
