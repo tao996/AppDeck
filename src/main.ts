@@ -81,6 +81,7 @@ interface State {
   schemaVersion: number;
   settings: SettingsModel;
   projects: Proj[];
+  commandTemplates: Cmd[];
 }
 
 function defaultSettings(): SettingsModel {
@@ -176,7 +177,12 @@ interface BuildTarget {
   supportsFlavor: boolean;
 }
 
-let state: State = { schemaVersion: 3, settings: defaultSettings(), projects: [] };
+let state: State = {
+  schemaVersion: 4,
+  settings: defaultSettings(),
+  projects: [],
+  commandTemplates: [],
+};
 const flutterInfo = new Map<string, FlutterInfo>();
 const collapsed = new Set<string>();
 let selectedCommand: string | null = null;
@@ -549,6 +555,13 @@ function renderTree(): void {
       addCmd.title = "添加运行命令或发布构建命令";
       addCmd.addEventListener("click", () => void openCommandDialog(p));
       list.appendChild(addCmd);
+
+      const tplImport = document.createElement("div");
+      tplImport.className = "cmd add";
+      tplImport.innerHTML = `<span class="cico">⤓</span><span class="cname">从模板导入…</span>`;
+      tplImport.title = "从全局命令模板中按需导入";
+      tplImport.addEventListener("click", () => openTemplateImport(p));
+      list.appendChild(tplImport);
 
       box.appendChild(list);
     }
@@ -928,13 +941,14 @@ function splitArgs(text: string): string[] {
   return out;
 }
 
-async function openCommandDialog(p: Proj, existing?: Cmd): Promise<void> {
+async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> {
+  const isTemplate = p === null;
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
     <div class="modal" style="width: 640px">
       <div class="modal-head">
-        <span>${existing ? "编辑命令" : "添加命令"}</span>
+        <span>${existing ? (isTemplate ? "编辑模板" : "编辑命令") : isTemplate ? "新建模板" : "添加命令"}</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
       <div class="modal-body" id="cmd-body"></div>
@@ -1052,7 +1066,9 @@ async function openCommandDialog(p: Proj, existing?: Cmd): Promise<void> {
       if (targets === null) {
         hint.textContent = "正在探测构建目标…";
         try {
-          targets = await invoke<BuildTarget[]>("build_targets", { projectId: p.id });
+          targets = await invoke<BuildTarget[]>("build_targets", {
+            projectId: p?.id ?? null,
+          });
           hint.textContent = "";
         } catch (e) {
           hint.textContent = String(e);
@@ -1117,19 +1133,21 @@ async function openCommandDialog(p: Proj, existing?: Cmd): Promise<void> {
   overlay.querySelector("#cmd-del")?.addEventListener("click", () => {
     void (async () => {
       if (!existing) return;
-      const ok = await confirm(`删除命令「${existing.name}」？`, {
-        title: "删除命令",
-        kind: "warning",
-      });
+      const ok = await confirm(
+        `删除${isTemplate ? "模板" : "命令"}「${existing.name}」？`,
+        { title: isTemplate ? "删除模板" : "删除命令", kind: "warning" },
+      );
       if (!ok) return;
       try {
-        state = await invoke<State>("remove_command", {
-          projectId: p.id,
-          commandId: existing.id,
-        });
+        state = isTemplate
+          ? await invoke<State>("remove_template", { id: existing.id })
+          : await invoke<State>("remove_command", {
+              projectId: p!.id,
+              commandId: existing.id,
+            });
         close();
         render();
-        toast("命令已删除");
+        toast(isTemplate ? "模板已删除" : "命令已删除");
       } catch (e) {
         hint.textContent = String(e);
       }
@@ -1165,10 +1183,230 @@ async function openCommandDialog(p: Proj, existing?: Cmd): Promise<void> {
       };
 
       try {
-        state = await invoke<State>("upsert_command", { projectId: p.id, command: cmd });
+        state = isTemplate
+          ? await invoke<State>("upsert_template", { template: cmd })
+          : await invoke<State>("upsert_command", { projectId: p!.id, command: cmd });
         close();
         render();
-        toast(existing ? "命令已更新" : "命令已添加");
+        toast(existing ? "已更新" : isTemplate ? "模板已保存" : "命令已添加");
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+}
+
+/* ---------------- 命令模板库 ---------------- */
+
+function openTemplateManager(): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 740px">
+      <div class="modal-head">
+        <span>命令模板库</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="tpl-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">新建「单应用」项目时会自动套用这些模板</span>
+        <span class="flex1"></span>
+        <button class="btn" id="tpl-reset">恢复默认</button>
+        <button class="btn" id="tpl-new">＋ 新建模板</button>
+        <button class="btn primary" id="tpl-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const body = overlay.querySelector("#tpl-body") as HTMLDivElement;
+  const close = (): void => overlay.remove();
+
+  const renderList = (): void => {
+    body.innerHTML = "";
+    if (state.commandTemplates.length === 0) {
+      const e = document.createElement("div");
+      e.className = "set-desc";
+      e.textContent = "模板库为空。可「新建模板」，或点「恢复默认」载入内置模板。";
+      body.appendChild(e);
+      return;
+    }
+
+    for (const t of state.commandTemplates) {
+      const row = document.createElement("div");
+      row.className = "tpl-row";
+
+      const main = document.createElement("div");
+      main.className = "tpl-main";
+      main.innerHTML = `
+        <span class="tpl-name">${esc(t.name)}</span>
+        <span class="chip ${t.kind === "build" ? "src-custom" : "src-fvm"}">${esc(t.kind)}</span>
+        ${t.buildType ? `<span class="fver">${esc(t.buildType)}</span>` : ""}
+        ${t.flutterMode ? `<span class="fver">${esc(t.flutterMode)}</span>` : ""}
+        <span class="tpl-args">${esc(t.args.join(" "))}</span>
+      `;
+
+      const edit = document.createElement("button");
+      edit.className = "btn";
+      edit.textContent = "编辑";
+      edit.addEventListener("click", () => void openCommandDialog(null, t));
+
+      const del = document.createElement("button");
+      del.className = "btn";
+      del.textContent = "删除";
+      del.addEventListener("click", () => {
+        void (async () => {
+          const ok = await confirm(`删除模板「${t.name}」？`, {
+            title: "删除模板",
+            kind: "warning",
+          });
+          if (!ok) return;
+          try {
+            state = await invoke<State>("remove_template", { id: t.id });
+            renderList();
+            render();
+            toast("模板已删除");
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      row.append(main, edit, del);
+      body.appendChild(row);
+    }
+  };
+
+  renderList();
+
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#tpl-close") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  (overlay.querySelector("#tpl-new") as HTMLButtonElement).addEventListener("click", () => {
+    void openCommandDialog(null);
+  });
+
+  (overlay.querySelector("#tpl-reset") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        state = await invoke<State>("reset_templates");
+        renderList();
+        render();
+        toast("已恢复默认模板");
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    })();
+  });
+}
+
+function openTemplateImport(p: Proj): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 680px">
+      <div class="modal-head">
+        <span>从模板导入 · ${esc(p.name)}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="imp-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="imp-hint"></span>
+        <span class="flex1"></span>
+        <button class="btn" id="imp-all">全选</button>
+        <button class="btn" id="imp-none">全不选</button>
+        <button class="btn" id="imp-cancel">取消</button>
+        <button class="btn primary" id="imp-go">导入</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#imp-body") as HTMLDivElement;
+  const hint = overlay.querySelector("#imp-hint") as HTMLSpanElement;
+  const selected = new Set<string>();
+  const close = (): void => overlay.remove();
+
+  const updateHint = (): void => {
+    hint.textContent = `已选 ${selected.size} / ${state.commandTemplates.length}`;
+  };
+
+  const renderList = (): void => {
+    body.innerHTML = "";
+    if (state.commandTemplates.length === 0) {
+      const e = document.createElement("div");
+      e.className = "set-desc";
+      e.textContent = "模板库为空，请先到「设置 → 命令模板」里添加。";
+      body.appendChild(e);
+      updateHint();
+      return;
+    }
+
+    for (const t of state.commandTemplates) {
+      const row = document.createElement("label");
+      row.className = "imp-row";
+
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = selected.has(t.id);
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.add(t.id);
+        else selected.delete(t.id);
+        updateHint();
+      });
+
+      const main = document.createElement("div");
+      main.className = "imp-main";
+      main.innerHTML = `
+        <span class="tpl-name">${esc(t.name)}</span>
+        <span class="chip ${t.kind === "build" ? "src-custom" : "src-fvm"}">${esc(t.kind)}</span>
+        ${t.buildType ? `<span class="fver">${esc(t.buildType)}</span>` : ""}
+        ${t.flutterMode ? `<span class="fver">${esc(t.flutterMode)}</span>` : ""}
+        <span class="tpl-args">${esc(t.args.join(" "))}</span>
+      `;
+
+      row.append(cb, main);
+      body.appendChild(row);
+    }
+    updateHint();
+  };
+
+  renderList();
+
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#imp-cancel") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  (overlay.querySelector("#imp-all") as HTMLButtonElement).addEventListener("click", () => {
+    for (const t of state.commandTemplates) selected.add(t.id);
+    renderList();
+  });
+  (overlay.querySelector("#imp-none") as HTMLButtonElement).addEventListener("click", () => {
+    selected.clear();
+    renderList();
+  });
+
+  (overlay.querySelector("#imp-go") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      if (selected.size === 0) {
+        hint.textContent = "请至少选择一条模板";
+        return;
+      }
+      try {
+        const res = await invoke<{ state: State; added: number }>("import_templates", {
+          projectId: p.id,
+          templateIds: [...selected],
+        });
+        state = res.state;
+        close();
+        render();
+        toast(
+          res.added === 0 ? "所选命令已存在，未新增" : `已导入 ${res.added} 条命令`,
+        );
       } catch (e) {
         hint.textContent = String(e);
       }
@@ -1391,6 +1629,27 @@ function openSettings(): void {
       field(s, "自定义路径", draft.flutterTool.customPath, (v) => {
         draft.flutterTool.customPath = v;
       });
+    }
+
+    // 命令模板
+    {
+      const s = section(
+        "命令模板",
+        `共 ${state.commandTemplates.length} 条；新建「单应用」项目会自动套用，也可在项目树里按需导入`,
+      );
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "模板库";
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "管理命令模板…";
+      btn.addEventListener("click", () => {
+        close();
+        openTemplateManager();
+      });
+      row.append(lab, btn);
+      s.appendChild(row);
     }
 
     // Android
@@ -1631,6 +1890,14 @@ async function boot(): Promise<void> {
     if (await invoke<string | null>("dev_env", { name: "FLA_EMU_MENU" })) {
       const anchor = document.querySelector<HTMLButtonElement>("#btn-emulators");
       if (anchor) openEmulatorMenu(anchor);
+    }
+    if (await invoke<string | null>("dev_env", { name: "FLA_TEMPLATES" })) {
+      openTemplateManager();
+    }
+    const tplImport = await invoke<string | null>("dev_env", { name: "FLA_TPL_IMPORT" });
+    if (tplImport) {
+      const proj = state.projects.find((x) => x.id === tplImport) ?? state.projects[0];
+      if (proj) openTemplateImport(proj);
     }
   } catch {
     /* 无钩子 */

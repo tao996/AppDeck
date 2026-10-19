@@ -363,10 +363,19 @@ fn detect_targets(exe: &std::path::Path) -> Result<Vec<BuildTarget>, String> {
 fn build_targets(
     app: AppHandle,
     cache: tauri::State<'_, TargetCache>,
-    project_id: String,
+    project_id: Option<String>,
 ) -> Result<Vec<BuildTarget>, String> {
     let state = store::load(&app)?;
-    let exe = flutter_exe_for(&state, &project_id)?;
+    let exe = match project_id {
+        Some(pid) => flutter_exe_for(&state, &pid)?,
+        None => {
+            // 模板编辑时可能还没有项目：退回 PATH / 设置里的 Flutter
+            let custom = state.settings.flutter_tool.custom_path.clone();
+            flutter::resolve(std::path::Path::new("."), custom.as_deref())
+                .0
+                .ok_or_else(|| "未找到 flutter 可执行文件".to_string())?
+        }
+    };
     let key = exe.display().to_string();
 
     if let Ok(map) = cache.0.lock() {
@@ -427,6 +436,64 @@ fn remove_command(
     project.commands.retain(|c| c.id != command_id);
     store::save(&app, &state)?;
     Ok(state)
+}
+
+/* ---------------- 全局命令模板 ---------------- */
+
+#[tauri::command]
+fn upsert_template(app: AppHandle, template: model::Command) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    let mut tpl = template;
+    if tpl.id.trim().is_empty() {
+        tpl.id = model::make_id("tpl", &format!("{}|{}", tpl.name, tpl.kind));
+    }
+    tpl.source = Some("template".to_string());
+
+    match state
+        .command_templates
+        .iter_mut()
+        .find(|t| t.id == tpl.id)
+    {
+        Some(existing) => *existing = tpl,
+        None => state.command_templates.push(tpl),
+    }
+
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+#[tauri::command]
+fn remove_template(app: AppHandle, id: String) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    state.command_templates.retain(|t| t.id != id);
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+#[tauri::command]
+fn reset_templates(app: AppHandle) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    state.command_templates = model::default_templates();
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+#[derive(serde::Serialize)]
+struct ImportTemplatesResponse {
+    state: State,
+    added: usize,
+}
+
+#[tauri::command]
+fn import_templates(
+    app: AppHandle,
+    project_id: String,
+    template_ids: Vec<String>,
+) -> Result<ImportTemplatesResponse, String> {
+    let mut state = store::load(&app)?;
+    let added = ops::import_templates(&mut state, &project_id, &template_ids)?;
+    store::save(&app, &state)?;
+    Ok(ImportTemplatesResponse { state, added })
 }
 
 /* ---------------- 设置与工具链 ---------------- */
@@ -617,6 +684,10 @@ pub fn run() {
             build_targets,
             upsert_command,
             remove_command,
+            upsert_template,
+            remove_template,
+            reset_templates,
+            import_templates,
             save_settings,
             detect_toolchains,
             list_all_emulators,

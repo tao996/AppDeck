@@ -20,8 +20,19 @@
 | M3.5 | 设置页（Flutter/Android/HarmonyOS 目录）+ 工具栏模拟器菜单 | ✅ 完成 |
 | M4 | 热重载 / 热重启 / 停止 / DevTools | ✅ 完成（随 M2 一并落地） |
 | M5 | 发布构建 + 通知 | ✅ 完成 |
-| M6 | `launch.json` 高级导入（手动添加命令等） | 部分（命令增删改已可用） |
+| M6 | `launch.json` 高级导入（手动添加命令等） | ✅ 完成（命令增删改 + 模板库） |
 | M7 | 会话恢复 + 打磨 | 待做 |
+
+### 命令模板库（解决"新项目命令为空"）
+
+- **全局模板**：设置 → 命令模板，可新建 / 编辑 / 删除 / 恢复默认（内置 Debug、Build APK、Build Windows、Build Web）
+- **自动套用**：新增「单应用」项目时自动把模板实例化为该项目的命令，不再是空树
+- **按需导入**：项目树底部「⤓ 从模板导入…」，勾选后导入（支持全选 / 全不选，按名称+类型去重）
+- **工作区不自动套用**：monorepo 的命令来自 `launch.json`，避免污染
+
+![命令模板库](docs/shot-templates.png)
+
+![从模板导入](docs/shot-template-import.png)
 
 ### M5 已实现
 
@@ -84,7 +95,7 @@
 cd src-tauri && cargo test
 ```
 
-19 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、**工具链自动检测**。
+21 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重。
 
 诊断工具：
 ```bash

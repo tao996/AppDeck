@@ -1,7 +1,7 @@
 //! 业务操作：与 Tauri 解耦，便于直接单元测试。
 
 use crate::launch::{self, ImportOutcome};
-use crate::model::{make_id, Project, State};
+use crate::model::{instantiate_template, make_id, Command, Project, State};
 use std::path::PathBuf;
 
 /// 统一路径写法：分隔符归一为 `\`，去掉尾部斜杠
@@ -45,8 +45,21 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| p.clone());
 
+    let id = make_id("proj", &p.to_lowercase());
+
+    // 单应用项目：自动套用全局命令模板，避免"导入后命令为空"
+    let commands: Vec<Command> = if has_pubspec {
+        state
+            .command_templates
+            .iter()
+            .map(|t| instantiate_template(t, &id))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let project = Project {
-        id: make_id("proj", &p.to_lowercase()),
+        id,
         name,
         path: p,
         kind: if has_pubspec {
@@ -55,11 +68,51 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
             "workspace".to_string()
         },
         flutter_tool: None,
-        commands: Vec::new(),
+        commands,
     };
 
     state.projects.push(project.clone());
     Ok(project)
+}
+
+/// 从全局模板库导入选中的模板到项目（按「名称 + 类型」去重）
+pub fn import_templates(
+    state: &mut State,
+    project_id: &str,
+    template_ids: &[String],
+) -> Result<usize, String> {
+    let picked: Vec<Command> = state
+        .command_templates
+        .iter()
+        .filter(|t| template_ids.iter().any(|id| id == &t.id))
+        .cloned()
+        .collect();
+
+    if picked.is_empty() {
+        return Ok(0);
+    }
+
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let mut added = 0usize;
+    for tpl in picked {
+        let inst = instantiate_template(&tpl, project_id);
+        if project
+            .commands
+            .iter()
+            .any(|c| c.name == inst.name && c.kind == inst.kind)
+        {
+            continue;
+        }
+        project.commands.push(inst);
+        added += 1;
+    }
+
+    Ok(added)
 }
 
 /// 导入项目的 `.vscode/launch.json`，覆盖该项目已有命令。
@@ -332,6 +385,56 @@ mod tests {
         let project = add_project_to(&mut state, ws).unwrap();
         assert!(build_plan(&state, &project.id, "nope", None).is_err());
         assert!(build_plan(&state, "nope", "nope", None).is_err());
+    }
+
+    #[test]
+    fn imports_templates_into_project() {
+        let Some(ws) = fixture() else {
+            eprintln!("跳过：测试素材不存在");
+            return;
+        };
+
+        let mut state = State::default();
+        assert!(!state.command_templates.is_empty(), "默认模板库不应为空");
+
+        // 工作区项目不会自动套模板
+        let project = add_project_to(&mut state, ws).unwrap();
+        assert!(project.commands.is_empty());
+
+        let ids: Vec<String> = state
+            .command_templates
+            .iter()
+            .map(|t| t.id.clone())
+            .collect();
+
+        let added = import_templates(&mut state, &project.id, &ids).unwrap();
+        assert_eq!(added, ids.len(), "应导入全部选中模板");
+
+        // 幂等：重复导入不新增
+        let again = import_templates(&mut state, &project.id, &ids).unwrap();
+        assert_eq!(again, 0, "重复导入应被去重");
+
+        // 只导入部分
+        let one = vec![ids[0].clone()];
+        let partial = import_templates(&mut state, &project.id, &one).unwrap();
+        assert_eq!(partial, 0, "已存在的模板仍应去重");
+    }
+
+    #[test]
+    fn single_project_gets_template_commands() {
+        let path = r"D:\demo\code\flutter\library\projects\today";
+        if !std::path::Path::new(path).join("pubspec.yaml").exists() {
+            eprintln!("跳过：单应用测试素材不存在");
+            return;
+        }
+
+        let mut state = State::default();
+        let project = add_project_to(&mut state, path).unwrap();
+
+        assert_eq!(project.kind, "single");
+        assert!(!project.commands.is_empty(), "单应用项目应自动套用模板");
+        assert!(project.commands.iter().any(|c| c.kind == "run"));
+        assert!(project.commands.iter().any(|c| c.kind == "build"));
     }
 
     #[test]

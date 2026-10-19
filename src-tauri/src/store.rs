@@ -26,7 +26,12 @@ pub fn load_from(path: &Path) -> State {
     match fs::read_to_string(path) {
         Ok(raw) => match serde_json::from_str::<State>(&raw) {
             Ok(mut s) => {
-                // 旧版本状态文件升级时补齐版本号（新增字段由 serde default 兜底）
+                // v4：新增命令模板库，老版本状态文件补一次默认模板
+                if s.schema_version < crate::model::SCHEMA_VERSION && s.command_templates.is_empty()
+                {
+                    s.command_templates = crate::model::default_templates();
+                }
+                // 新增字段由 serde default 兜底，版本号归一
                 s.schema_version = crate::model::SCHEMA_VERSION;
                 s
             }

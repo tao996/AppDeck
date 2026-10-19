@@ -432,6 +432,22 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
       "sdkPath": null
     }
   },
+  "commandTemplates": [
+    {
+      "id": "tpl-debug",
+      "name": "Debug",
+      "kind": "run",
+      "flutterMode": "debug",
+      "args": []
+    },
+    {
+      "id": "tpl-build-apk",
+      "name": "Build APK",
+      "kind": "build",
+      "buildType": "apk",
+      "args": []
+    }
+  ],
   "projects": [
     {
       "id": "uuid",
@@ -638,6 +654,8 @@ per-project semaphore
 | A26 | 设置页「自动检测」 | 在本机实测命中 Flutter / Android SDK+emulator+AVD / DevEco Emulator+实例+镜像+Flutter 分支，且未配置时自动回退 |
 | A27 | 构建目标动态探测 | 只列出当前宿主可用的目标；`--flavor` 支持度逐目标判定 |
 | A28 | 构建产物与通知 | 产物路径从 `✓ Built ...` 解析并可打开目录；结束发系统通知 |
+| A29 | 命令模板库 | 设置里可增删改模板；新增「单应用」项目自动套用模板，不再是空命令树 |
+| A30 | 按需导入模板 | 项目树「从模板导入…」支持全选/部分选择，按「名称+类型」去重 |
 
 ---
 

@@ -1,7 +1,81 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
+
+/// 内置命令模板：新项目会自动套用，也可在设置里增删改
+pub fn default_templates() -> Vec<Command> {
+    vec![
+        Command {
+            id: "tpl-debug".into(),
+            name: "Debug".into(),
+            kind: "run".into(),
+            program: None,
+            cwd: None,
+            flutter_mode: Some("debug".into()),
+            args: vec![],
+            env: HashMap::new(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("template".into()),
+        },
+        Command {
+            id: "tpl-build-apk".into(),
+            name: "Build APK".into(),
+            kind: "build".into(),
+            program: None,
+            cwd: None,
+            flutter_mode: None,
+            args: vec![],
+            env: HashMap::new(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: Some("apk".into()),
+            source: Some("template".into()),
+        },
+        Command {
+            id: "tpl-build-windows".into(),
+            name: "Build Windows".into(),
+            kind: "build".into(),
+            program: None,
+            cwd: None,
+            flutter_mode: None,
+            args: vec![],
+            env: HashMap::new(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: Some("windows".into()),
+            source: Some("template".into()),
+        },
+        Command {
+            id: "tpl-build-web".into(),
+            name: "Build Web".into(),
+            kind: "build".into(),
+            program: None,
+            cwd: None,
+            flutter_mode: None,
+            args: vec![],
+            env: HashMap::new(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: Some("web".into()),
+            source: Some("template".into()),
+        },
+    ]
+}
+
+/// 由模板实例化出属于某个项目的命令（换新 id，标记来源）
+pub fn instantiate_template(tpl: &Command, project_id: &str) -> Command {
+    let mut c = tpl.clone();
+    c.id = make_id("cmd", &format!("{}|{}|{}", project_id, tpl.name, tpl.kind));
+    c.source = Some("template".into());
+    c
+}
 
 /// 稳定 ID 生成（FNV-1a），避免引入 uuid 依赖
 pub fn make_id(prefix: &str, seed: &str) -> String {
@@ -138,6 +212,9 @@ pub struct State {
     pub settings: Settings,
     #[serde(default)]
     pub projects: Vec<Project>,
+    /// 全局命令模板库
+    #[serde(rename = "commandTemplates", default)]
+    pub command_templates: Vec<Command>,
 }
 
 impl Default for State {
@@ -146,6 +223,7 @@ impl Default for State {
             schema_version: SCHEMA_VERSION,
             settings: Settings::default(),
             projects: Vec::new(),
+            command_templates: default_templates(),
         }
     }
 }
