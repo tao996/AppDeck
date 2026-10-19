@@ -607,8 +607,8 @@ function renderTree(): void {
         hint.className = "cmd hint";
         hint.textContent =
           p.kind === "workspace"
-            ? "尚未导入命令 —— 点击上方「导入 launch.json」"
-            : "暂无命令 —— M6 支持手动添加";
+            ? "尚无命令 —— 点上方「📂 导入 launch.json」选择该目录"
+            : "暂无命令 —— 右键项目可用「平台 → 动作」运行/构建，也可点「＋ 添加命令」";
         list.appendChild(hint);
       }
 
@@ -850,6 +850,57 @@ async function importLaunch(projectId: string, silent = false): Promise<void> {
   }
 }
 
+interface ImportPathResponse {
+  state: State;
+  projectId: string;
+  projectName: string;
+  kind: string;
+  created: boolean;
+  total: number;
+  imported: number;
+  skipped: number;
+  warnings: string[];
+}
+
+/** 从目录导入 launch.json：有 pubspec 当 Flutter 项目，否则当命令集 */
+async function importLaunchPath(): Promise<void> {
+  let picked: string | string[] | null = null;
+  try {
+    picked = await open({
+      directory: true,
+      multiple: false,
+      title: "选择包含 .vscode/launch.json 的目录",
+      defaultPath: lastImportDir ?? state.projects[0]?.path ?? undefined,
+    });
+  } catch (e) {
+    toast(`打开目录选择器失败：${String(e)}`, "error");
+    return;
+  }
+  if (!picked) return;
+
+  const path = Array.isArray(picked) ? picked[0] : picked;
+  if (!path) return;
+  lastImportDir = path;
+
+  try {
+    const res = await invoke<ImportPathResponse>("import_launch_path", { path });
+    state = res.state;
+    render();
+    void refreshFlutter(res.projectId);
+
+    const what = res.kind === "single" ? "Flutter 项目" : "命令集";
+    const how = res.created ? "已导入" : "已更新";
+    const warn = res.warnings.length ? `，${res.warnings.length} 条告警` : "";
+    toast(`${how}${what}「${res.projectName}」：${res.imported}/${res.total} 条命令${warn}`);
+
+    if (res.warnings.length) console.warn("[launch.json]", res.warnings);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+let lastImportDir: string | null = null;
+
 async function removeProject(p: Proj): Promise<void> {
   const ok = await confirm(`确定要从列表中移除「${p.name}」吗？\n（不会删除磁盘上的任何文件）`, {
     title: "移除项目",
@@ -865,10 +916,6 @@ async function removeProject(p: Proj): Promise<void> {
   } catch (e) {
     toast(String(e), "error");
   }
-}
-
-function targetProjectId(): string | null {
-  return state.projects.length === 1 ? state.projects[0].id : null;
 }
 
 /* ---------------- PTY 事件 ---------------- */
@@ -2043,127 +2090,155 @@ let devSubmenu: string | null = null;
 function openProjectMenu(ev: MouseEvent, p: Proj): void {
   closeAllMenus();
 
+  // 命令集（无 pubspec 的 workspace）本身就是命令列表：不显示平台，也不显示全局命令
+  const isCommandSet = p.kind !== "single";
+
   const menu = document.createElement("div");
   menu.className = "device-menu";
   menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 360)}px`;
   menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 420)}px`;
-  menu.innerHTML = `<div class="dm-head">${esc(p.name)}</div><div class="dm-body"></div>`;
+  menu.innerHTML = `
+    <div class="dm-head">
+      <span>${esc(p.name)}${isCommandSet ? ' <span class="dm-tag">命令集</span>' : ""}</span>
+    </div>
+    <div class="dm-body"></div>
+  `;
   document.body.appendChild(menu);
   projMenuEl = menu;
 
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
 
-  // 1) 平台（异步填充，先占位）
-  const platformBox = document.createElement("div");
-  platformBox.innerHTML = `<div class="dm-group">平台 · 正在分析…</div>`;
-  body.appendChild(platformBox);
-
-  void (async () => {
-    if (p.kind !== "single") {
-      platformBox.innerHTML = "";
-      renderMenuRows(platformBox, [
-        { kind: "group", text: "平台" },
-        {
-          kind: "item",
-          name: "工作区项目不支持平台菜单",
-          detail: "请用命令右侧的设备菜单，或把子应用单独添加为项目",
-          disabled: true,
-        },
-      ]);
-      return;
-    }
-
-    try {
-      const m = await invoke<PlatformMatrix>("platform_matrix", { projectId: p.id });
-      if (projMenuEl !== menu) return;
-      platformBox.innerHTML = "";
-
-      const rows: MenuRow[] = [{ kind: "group", text: "平台" }];
-      for (const pf of m.platforms) {
-        if (!pf.enabled) {
-          rows.push({
-            kind: "item",
-            name: pf.label,
-            detail: pf.reason ?? "当前不可用",
-            disabled: true,
-          });
-          continue;
-        }
-        const usable = pf.actions.filter((a) => a.enabled);
-        rows.push({
-          kind: "item",
-          name: pf.label,
-          detail: `${usable.length} 个动作`,
-          children: pf.actions.map((a) => ({
-            kind: "item" as const,
-            name: a.label,
-            detail: a.enabled ? undefined : (a.reason ?? "不可用"),
-            disabled: !a.enabled,
-            onClick: () => void runPlatformAction(p, pf.id, a),
-          })),
-        });
-      }
-      renderMenuRows(platformBox, rows);
-
-      // 开发期：自动展开某个平台，便于截图
-      if (devSubmenu) {
-        const el = Array.from(
-          platformBox.querySelectorAll<HTMLDivElement>(".dm-item.has-sub"),
-        ).find((x) => x.querySelector(".dm-name")?.textContent === devSubmenu);
-        if (el) el.dispatchEvent(new MouseEvent("mouseenter"));
-      }
-    } catch (e) {
-      platformBox.innerHTML = "";
-      renderMenuRows(platformBox, [{ kind: "group", text: "平台" }]);
-      const err = document.createElement("div");
-      err.className = "dm-error";
-      err.textContent = String(e);
-      platformBox.appendChild(err);
-    }
-  })();
+  // 1) 平台（仅 Flutter 项目）
+  if (!isCommandSet) {
+    const platformBox = document.createElement("div");
+    platformBox.innerHTML = `<div class="dm-group">平台 · 正在分析…</div>`;
+    body.appendChild(platformBox);
+    void loadPlatformRows(p, platformBox, menu);
+  }
 
   // 2) 全局命令
-  const globals = state.commandTemplates.filter((t) => t.scope === "global");
-  const globalRows: MenuRow[] = [{ kind: "group", text: `全局命令 (${globals.length})` }];
-  if (globals.length === 0) {
-    globalRows.push({
-      kind: "item",
-      name: "（暂无全局模板）",
-      detail: "设置 → 命令模板 → 作用域选「全局」",
-      disabled: true,
-    });
+  if (!isCommandSet) {
+    const globals = state.commandTemplates.filter((t) => t.scope === "global");
+    const rows: MenuRow[] = [{ kind: "group", text: `全局命令 (${globals.length})` }];
+
+    if (globals.length === 0) {
+      rows.push({
+        kind: "item",
+        name: "（暂无全局模板）",
+        detail: "设置 → 命令模板 → 作用域选「全局」",
+        disabled: true,
+      });
+    }
+    for (const t of globals) {
+      rows.push({
+        kind: "item",
+        name: t.name,
+        detail: [t.kind, t.buildType, t.args.join(" ")].filter(Boolean).join(" · "),
+        onClick: () => void runTemplate(p, t),
+      });
+    }
+
+    const box = document.createElement("div");
+    body.appendChild(box);
+    renderMenuRows(box, rows);
   }
-  for (const t of globals) {
-    globalRows.push({
-      kind: "item",
-      name: t.name,
-      detail: [t.kind, t.buildType, t.args.join(" ")].filter(Boolean).join(" · "),
-      onClick: () => void runTemplate(p, t),
-    });
-  }
-  const globalBox = document.createElement("div");
-  body.appendChild(globalBox);
-  renderMenuRows(globalBox, globalRows);
 
   // 3) 项目级操作
-  const tailBox = document.createElement("div");
-  body.appendChild(tailBox);
-  renderMenuRows(tailBox, [
-    { kind: "sep" },
+  const tail: MenuRow[] = [{ kind: "sep" }];
+
+  if (!isCommandSet) {
+    tail.push({
+      kind: "item",
+      name: "重新分析平台信息",
+      detail: "刷新宿主可构建的平台与该平台设备",
+      onClick: () => {
+        void (async () => {
+          try {
+            await invoke("platform_matrix", { projectId: p.id, force: true });
+            toast("平台信息已刷新");
+            openProjectMenu(ev, p);
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      },
+    });
+  }
+
+  tail.push(
     {
       kind: "item",
-      name: "选择设备…",
-      detail: "手动指定设备（含未启动的模拟器）",
-      onClick: () => toast("在命令行上右键可选择设备"),
+      name: "从模板导入…",
+      detail: "把模板加入本项目",
+      onClick: () => openTemplateImport(p),
     },
-    { kind: "item", name: "从模板导入…", detail: "把模板加入本项目", onClick: () => openTemplateImport(p) },
     {
       kind: "item",
       name: "添加命令…",
       detail: "新建 run / build / custom 命令",
       onClick: () => void openCommandDialog(p),
     },
-  ]);
+  );
+
+  const box = document.createElement("div");
+  body.appendChild(box);
+  renderMenuRows(box, tail);
+}
+
+/** 平台行渲染。结果由后端缓存，只有「重新分析」才会真正重算。 */
+async function loadPlatformRows(
+  p: Proj,
+  box: HTMLDivElement,
+  menu: HTMLDivElement,
+): Promise<void> {
+  try {
+    const m = await invoke<PlatformMatrix>("platform_matrix", { projectId: p.id });
+    if (projMenuEl !== menu) return;
+    box.innerHTML = "";
+
+    const rows: MenuRow[] = [{ kind: "group", text: "平台" }];
+    for (const pf of m.platforms) {
+      if (!pf.enabled) {
+        rows.push({
+          kind: "item",
+          name: pf.label,
+          detail: pf.reason ?? "当前不可用",
+          disabled: true,
+        });
+        continue;
+      }
+      const usable = pf.actions.filter((a) => a.enabled);
+      rows.push({
+        kind: "item",
+        name: pf.label,
+        detail: `${usable.length} 个动作`,
+        children: pf.actions.map((a) => ({
+          kind: "item" as const,
+          name: a.label,
+          detail: a.enabled ? undefined : (a.reason ?? "不可用"),
+          disabled: !a.enabled,
+          onClick: () => void runPlatformAction(p, pf.id, a),
+        })),
+      });
+    }
+    renderMenuRows(box, rows);
+
+    // 开发期：自动展开某个平台，便于截图
+    if (devSubmenu) {
+      const el = Array.from(box.querySelectorAll<HTMLDivElement>(".dm-item.has-sub")).find(
+        (x) => x.querySelector(".dm-name")?.textContent === devSubmenu,
+      );
+      if (el) el.dispatchEvent(new MouseEvent("mouseenter"));
+    }
+  } catch (e) {
+    if (projMenuEl !== menu) return;
+    box.innerHTML = "";
+    renderMenuRows(box, [{ kind: "group", text: "平台" }]);
+    const err = document.createElement("div");
+    err.className = "dm-error";
+    err.textContent = String(e);
+    box.appendChild(err);
+  }
 }
 
 async function runPlatformAction(
@@ -2911,14 +2986,7 @@ async function boot(): Promise<void> {
   window.addEventListener("blur", closeDeviceMenu);
 
   req<HTMLButtonElement>("#btn-add").addEventListener("click", () => void addProject());
-  req<HTMLButtonElement>("#btn-import").addEventListener("click", () => {
-    const id = targetProjectId();
-    if (!id) {
-      toast(state.projects.length === 0 ? "请先添加项目" : "请先在项目树中选中一个项目", "error");
-      return;
-    }
-    void importLaunch(id);
-  });
+  req<HTMLButtonElement>("#btn-import").addEventListener("click", () => void importLaunchPath());
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
@@ -3057,6 +3125,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

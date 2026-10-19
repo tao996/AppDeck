@@ -1500,3 +1500,14 @@ select.set-input {
   padding: 3px 0;
   line-height: 1.5;
 }
+
+/* 命令集标签 */
+.dm-tag {
+  font-size: 9.5px;
+  color: var(--fg-faint);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0 4px;
+  margin-left: 4px;
+  vertical-align: middle;
+}

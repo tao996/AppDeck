@@ -18,6 +18,7 @@ mod store;
 use model::State;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::Manager;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 
@@ -60,6 +61,21 @@ struct ImportResponse {
     warnings: Vec<String>,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportPathResponse {
+    state: State,
+    project_id: String,
+    project_name: String,
+    /// single（Flutter 项目）| workspace（命令集）
+    kind: String,
+    created: bool,
+    total: usize,
+    imported: usize,
+    skipped: usize,
+    warnings: Vec<String>,
+}
+
 #[tauri::command]
 fn import_launch(app: AppHandle, project_id: String) -> Result<ImportResponse, String> {
     let mut state = store::load(&app)?;
@@ -68,6 +84,35 @@ fn import_launch(app: AppHandle, project_id: String) -> Result<ImportResponse, S
 
     Ok(ImportResponse {
         state,
+        total: outcome.total,
+        imported: outcome.imported,
+        skipped: outcome.skipped,
+        warnings: outcome.warnings,
+    })
+}
+
+/// 从路径导入 launch.json：目录有 pubspec.yaml 就当普通 Flutter 项目，
+/// 否则当命令集（命令集没有平台菜单、也不显示全局命令）。
+#[tauri::command]
+fn import_launch_path(
+    app: AppHandle,
+    path: String,
+) -> Result<ImportPathResponse, String> {
+    let mut state = store::load(&app)?;
+    let (project, outcome, created) = ops::import_launch_from_path(&mut state, &path)?;
+    store::save(&app, &state)?;
+
+    // 项目的平台信息可能因重新导入而变化
+    if let Ok(mut map) = app.state::<PlatformCache>().0.lock() {
+        map.remove(&project.id);
+    }
+
+    Ok(ImportPathResponse {
+        state,
+        project_id: project.id,
+        project_name: project.name,
+        kind: project.kind,
+        created,
         total: outcome.total,
         imported: outcome.imported,
         skipped: outcome.skipped,
@@ -500,33 +545,80 @@ fn devices_snapshot(
     serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
 }
 
-#[tauri::command]
-fn platform_matrix(
-    app: AppHandle,
-    reg: tauri::State<'_, daemon::Daemons>,
-    cache: tauri::State<'_, TargetCache>,
-    project_id: String,
+/// 平台矩阵缓存：分析一次就留着，只有点「重新分析」才刷新。
+/// 首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon，约十秒量级。
+#[derive(Default)]
+struct PlatformCache(std::sync::Mutex<std::collections::HashMap<String, platforms::PlatformMatrix>>);
+
+fn platform_matrix_impl(
+    app: &AppHandle,
+    project_id: &str,
+    force: bool,
 ) -> Result<platforms::PlatformMatrix, String> {
-    let state = store::load(&app)?;
+    let pcache = app.state::<PlatformCache>();
+
+    if !force {
+        if let Ok(map) = pcache.0.lock() {
+            if let Some(hit) = map.get(project_id) {
+                return Ok(hit.clone());
+            }
+        }
+    }
+
+    let state = store::load(app)?;
     let project = state
         .projects
         .iter()
         .find(|p| p.id == project_id)
         .ok_or_else(|| "项目不存在".to_string())?;
 
-    // 工作区项目没有平台菜单
-    if project.kind != "single" {
-        return Ok(platforms::matrix(project, &[], &[], None));
-    }
+    // 命令集（无 pubspec 的 workspace）没有平台菜单
+    let matrix = if project.kind != "single" {
+        platforms::matrix(project, &[], &[], None)
+    } else {
+        let cache = app.state::<TargetCache>();
+        let reg = app.state::<daemon::Daemons>();
 
-    let targets = host_target_names(&app, &cache, &project_id)?;
+        let targets = host_target_names(app, &cache, project_id)?;
+        let (devices, device_error) = match devices_snapshot(app, &reg, project_id) {
+            Ok(list) => (list, None),
+            Err(e) => (Vec::new(), Some(e)),
+        };
 
-    let (devices, device_error) = match devices_snapshot(&app, &reg, &project_id) {
-        Ok(list) => (list, None),
-        Err(e) => (Vec::new(), Some(e)),
+        platforms::matrix(project, &targets, &devices, device_error)
     };
 
-    Ok(platforms::matrix(project, &targets, &devices, device_error))
+    if let Ok(mut map) = pcache.0.lock() {
+        map.insert(project_id.to_string(), matrix.clone());
+    }
+
+    Ok(matrix)
+}
+
+#[tauri::command]
+async fn platform_matrix(
+    app: AppHandle,
+    project_id: String,
+    force: Option<bool>,
+) -> Result<platforms::PlatformMatrix, String> {
+    let force = force.unwrap_or(false);
+
+    // 放到阻塞线程池：分析可能耗时数秒，绝不能占住主线程（会卡住界面）
+    tauri::async_runtime::spawn_blocking(move || platform_matrix_impl(&app, &project_id, force))
+        .await
+        .map_err(|e| format!("分析平台信息失败: {e}"))?
+}
+
+#[tauri::command]
+fn invalidate_platform_cache(app: AppHandle, project_id: Option<String>) {
+    if let Ok(mut map) = app.state::<PlatformCache>().0.lock() {
+        match project_id {
+            Some(id) => {
+                map.remove(&id);
+            }
+            None => map.clear(),
+        }
+    }
 }
 
 /// 派生动作：平台 + 动作（+ 构建目标）→ 起一个会话，**不写入项目命令**
@@ -1060,6 +1152,7 @@ pub fn run() {
         .manage(pty::Registry::default())
         .manage(daemon::Daemons::default())
         .manage(TargetCache::default())
+        .manage(PlatformCache::default())
         .manage(doctor::Cache::default())
         .invoke_handler(tauri::generate_handler![
             load_state,
@@ -1077,6 +1170,8 @@ pub fn run() {
             launch_emulator,
             build_targets,
             platform_matrix,
+            invalidate_platform_cache,
+            import_launch_path,
             start_platform_action,
             filing_info,
             upsert_command,
@@ -1100,5 +1195,7 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 

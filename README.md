@@ -49,6 +49,14 @@
 - **运行类置灰会说明原因**："没有可用设备（可先启动模拟器）"
 - **工作区项目不显示平台菜单**（根目录没有平台，跑哪个子应用是歧义的）
 - 派生动作**不落盘**；恢复后「⟳ 重跑」按平台重新解析设备
+- **结果缓存**：首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon（约十秒），
+  之后直接用缓存；右键菜单里有「重新分析平台信息」强制刷新
+- 分析在阻塞线程池执行，不会占住主线程卡界面
+
+**导入 launch.json 的判定**（`import_launch_path`）：先看目录有没有 `pubspec.yaml`——
+有则作为**普通 Flutter 项目**导入，launch.json 的命令成为它的自定义命令；
+没有则作为**命令集**导入。命令集本身就是命令列表，右键时不显示平台也不显示全局命令。
+重复导入同一目录只刷新命令，不重复添加。选目录、选 `.vscode`、直接选 `launch.json` 都可以。
 
 **迁移（schema v4 → v5）**：`Debug` / `Build APK` / `Build Windows` / `Build Web`
 四条内置模板退役，已实例化且未改名的命令一并清理；模板库只保留 `Pub Get`。
@@ -320,5 +328,6 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 

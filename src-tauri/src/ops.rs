@@ -116,6 +116,81 @@ pub fn import_templates(
     Ok(added)
 }
 
+/// 把用户给的路径归一成工作区根：
+/// 支持直接选 `launch.json`、选 `.vscode` 目录、或选工作区目录本身。
+pub fn resolve_workspace_root(raw: &str) -> Result<String, String> {
+    let p = PathBuf::from(raw.trim());
+    let mut dir = if p.is_file() {
+        p.parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "路径无效".to_string())?
+    } else {
+        p
+    };
+
+    if dir
+        .file_name()
+        .map(|n| n.eq_ignore_ascii_case(".vscode"))
+        .unwrap_or(false)
+    {
+        dir = dir
+            .parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "路径无效".to_string())?;
+    }
+
+    if !dir.is_dir() {
+        return Err(format!("目录不存在：{}", dir.display()));
+    }
+
+    Ok(dir.display().to_string())
+}
+
+/// 按 `.vscode/launch.json` 导入：
+///
+/// - 目录是 Flutter 项目（有 `pubspec.yaml`）→ 作为**普通项目**导入，
+///   命令作为该项目的自定义命令
+/// - 否则 → 作为**命令集**导入（旧称 workspace）
+///
+/// 已存在的项目只刷新命令，不重复添加。
+/// 返回 (项目, 导入结果, 是否新建)
+pub fn import_launch_from_path(
+    state: &mut State,
+    raw: &str,
+) -> Result<(Project, ImportOutcome, bool), String> {
+    let root = resolve_workspace_root(raw)?;
+
+    let existing = state
+        .projects
+        .iter()
+        .find(|p| normalize(&p.path).eq_ignore_ascii_case(&normalize(&root)))
+        .map(|p| p.id.clone());
+
+    let (project, created) = match existing {
+        Some(id) => {
+            let p = state
+                .projects
+                .iter()
+                .find(|p| p.id == id)
+                .cloned()
+                .ok_or_else(|| "项目不存在".to_string())?;
+            (p, false)
+        }
+        None => (add_project_to(state, &root)?, true),
+    };
+
+    let outcome = import_into(state, &project.id)?;
+
+    let updated = state
+        .projects
+        .iter()
+        .find(|p| p.id == project.id)
+        .cloned()
+        .unwrap_or(project);
+
+    Ok((updated, outcome, created))
+}
+
 /// 导入项目的 `.vscode/launch.json`，覆盖该项目已有命令。
 pub fn import_into(state: &mut State, project_id: &str) -> Result<ImportOutcome, String> {
     let idx = state
@@ -588,6 +663,74 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn workspace_root_resolution_accepts_file_dir_and_vscode() {
+        let tmp = std::env::temp_dir().join("fla_root_probe");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".vscode")).unwrap();
+        std::fs::write(tmp.join(".vscode").join("launch.json"), "{}").unwrap();
+
+        let root = tmp.display().to_string();
+        let expect = std::fs::canonicalize(&tmp).unwrap();
+
+        // 直接给工作区目录
+        let a = resolve_workspace_root(&root).unwrap();
+        assert_eq!(std::fs::canonicalize(&a).unwrap(), expect);
+
+        // 给 .vscode 目录
+        let b = resolve_workspace_root(&format!("{root}\\.vscode")).unwrap();
+        assert_eq!(std::fs::canonicalize(&b).unwrap(), expect);
+
+        // 给 launch.json 文件本身
+        let c = resolve_workspace_root(&format!("{root}\\.vscode\\launch.json")).unwrap();
+        assert_eq!(std::fs::canonicalize(&c).unwrap(), expect);
+
+        // 不存在的目录
+        assert!(resolve_workspace_root(&format!("{root}\\nope")).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn import_path_picks_kind_by_pubspec() {
+        let tmp = std::env::temp_dir().join("fla_import_kind");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".vscode")).unwrap();
+        std::fs::write(
+            tmp.join(".vscode").join("launch.json"),
+            r#"{"version":"0.2.0","configurations":[
+                 {"name":"Demo","type":"dart","request":"launch","program":"lib/main.dart"}
+               ]}"#,
+        )
+        .unwrap();
+
+        // 没有 pubspec → 命令集
+        let mut state = State::default();
+        let (p, outcome, created) =
+            import_launch_from_path(&mut state, &tmp.display().to_string()).unwrap();
+        assert!(created);
+        assert_eq!(p.kind, "workspace", "无 pubspec 应作为命令集");
+        assert_eq!(outcome.imported, 1);
+        assert_eq!(state.projects.len(), 1);
+
+        // 再导一次：不重复添加，只刷新命令
+        let (p2, _, created2) =
+            import_launch_from_path(&mut state, &tmp.display().to_string()).unwrap();
+        assert!(!created2, "同一目录不应重复添加");
+        assert_eq!(p2.id, p.id);
+        assert_eq!(state.projects.len(), 1);
+
+        // 加上 pubspec → 同一个目录应变成 Flutter 项目
+        std::fs::write(tmp.join("pubspec.yaml"), b"name: demo\n").unwrap();
+        let mut state2 = State::default();
+        let (p3, outcome3, _) =
+            import_launch_from_path(&mut state2, &tmp.display().to_string()).unwrap();
+        assert_eq!(p3.kind, "single", "有 pubspec 应作为普通 Flutter 项目");
+        assert_eq!(outcome3.imported, 1);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     fn corrupted_state_is_backed_up() {
         let tmp = std::env::temp_dir().join("fla_m1_corrupt.json");
         fs::write(&tmp, "{ this is not json").unwrap();
