@@ -53,6 +53,9 @@ pub struct Daemon {
     emulators: Arc<Mutex<Vec<EmulatorInfo>>>,
     next: AtomicU64,
     alive: Arc<AtomicBool>,
+    /// 与应用同生命周期：进程退出时 Job 关闭 → daemon 连同子树被系统杀掉。
+    /// 没有它，每次启动应用都会泄漏一个 `flutter daemon`。
+    _job: Option<crate::pty::JobGuard>,
 }
 
 #[derive(Default)]
@@ -213,6 +216,9 @@ pub fn spawn(exe: &Path, sink: EventSink) -> Result<Daemon, String> {
         .spawn()
         .map_err(|e| format!("启动 flutter daemon 失败: {e}"))?;
 
+    // 关键：daemon 常驻，必须挂到 Job Object 上，否则应用退出后会变成孤儿进程
+    let job = crate::pty::JobGuard::assign(child.id());
+
     let stdin = child.stdin.take().ok_or("无法获取 daemon stdin")?;
     let stdout = child.stdout.take().ok_or("无法获取 daemon stdout")?;
 
@@ -275,6 +281,7 @@ pub fn spawn(exe: &Path, sink: EventSink) -> Result<Daemon, String> {
         emulators,
         next: AtomicU64::new(1),
         alive,
+        _job: job,
     })
 }
 

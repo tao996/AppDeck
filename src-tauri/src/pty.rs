@@ -85,7 +85,7 @@ impl Utf8Stream {
 /* ---------------- Job Object ---------------- */
 
 #[cfg(windows)]
-struct JobGuard(windows_sys::Win32::Foundation::HANDLE);
+pub(crate) struct JobGuard(windows_sys::Win32::Foundation::HANDLE);
 
 #[cfg(windows)]
 unsafe impl Send for JobGuard {}
@@ -94,7 +94,7 @@ unsafe impl Sync for JobGuard {}
 
 #[cfg(windows)]
 impl JobGuard {
-    fn assign(pid: u32) -> Option<Self> {
+    pub(crate) fn assign(pid: u32) -> Option<Self> {
         use std::ptr;
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::{
@@ -152,11 +152,11 @@ impl Drop for JobGuard {
 }
 
 #[cfg(not(windows))]
-struct JobGuard;
+pub(crate) struct JobGuard;
 
 #[cfg(not(windows))]
 impl JobGuard {
-    fn assign(_pid: u32) -> Option<Self> {
+    pub(crate) fn assign(_pid: u32) -> Option<Self> {
         None
     }
 }

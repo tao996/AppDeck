@@ -26,13 +26,26 @@ pub fn load_from(path: &Path) -> State {
     match fs::read_to_string(path) {
         Ok(raw) => match serde_json::from_str::<State>(&raw) {
             Ok(mut s) => {
+                let mut migrated = false;
+
                 // v4：新增命令模板库，老版本状态文件补一次默认模板
-                if s.schema_version < crate::model::SCHEMA_VERSION && s.command_templates.is_empty()
-                {
-                    s.command_templates = crate::model::default_templates();
+                if s.schema_version < crate::model::SCHEMA_VERSION {
+                    if s.command_templates.is_empty() {
+                        s.command_templates = crate::model::default_templates();
+                    }
+                    migrated = true;
                 }
+
                 // 新增字段由 serde default 兜底，版本号归一
                 s.schema_version = crate::model::SCHEMA_VERSION;
+
+                // 迁移结果落盘，避免每次启动都重新推断（也让 state.json 版本号如实反映）
+                if migrated {
+                    if let Ok(text) = serde_json::to_string_pretty(&s) {
+                        let _ = fs::write(path, text);
+                    }
+                }
+
                 s
             }
             Err(_) => {
