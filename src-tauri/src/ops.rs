@@ -264,7 +264,7 @@ mod tests {
         // 4. 落盘 + 重新读取
         store::save_to(&tmp, &state).expect("保存应成功");
         let reloaded = store::load_from(&tmp);
-        assert_eq!(reloaded.schema_version, 2);
+        assert_eq!(reloaded.schema_version, crate::model::SCHEMA_VERSION);
         assert_eq!(reloaded.projects.len(), 1);
         assert_eq!(reloaded.projects[0].commands.len(), outcome.imported);
         assert_eq!(reloaded.projects[0].id, project.id);

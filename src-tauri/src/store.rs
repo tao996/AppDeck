@@ -25,7 +25,11 @@ pub fn load_from(path: &Path) -> State {
     }
     match fs::read_to_string(path) {
         Ok(raw) => match serde_json::from_str::<State>(&raw) {
-            Ok(s) => s,
+            Ok(mut s) => {
+                // 旧版本状态文件升级时补齐版本号（新增字段由 serde default 兜底）
+                s.schema_version = crate::model::SCHEMA_VERSION;
+                s
+            }
             Err(_) => {
                 let _ = fs::copy(path, path.with_file_name("state.corrupt.json"));
                 State::default()

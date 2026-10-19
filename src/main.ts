@@ -39,10 +39,57 @@ interface Proj {
   commands: Cmd[];
 }
 
+interface SettingsModel {
+  flutterTool: { mode: string; customPath: string | null };
+  android: { sdkPath: string | null; emulatorPath: string | null; avdPath: string | null };
+  harmony: {
+    emulatorPath: string | null;
+    instancePath: string | null;
+    imageRoot: string | null;
+    flutterPath: string | null;
+    sdkPath: string | null;
+  };
+}
+
+interface Detected {
+  android: SettingsModel["android"];
+  harmony: SettingsModel["harmony"];
+  flutter: string | null;
+  harmonyVersion: string | null;
+  notes: string[];
+}
+
+interface EmulatorEntry {
+  id: string;
+  name: string;
+  detail: string;
+  kind: string;
+}
+
+interface AllEmulators {
+  android: EmulatorEntry[];
+  harmony: EmulatorEntry[];
+  notes: string[];
+}
+
 interface State {
   schemaVersion: number;
-  settings: unknown;
+  settings: SettingsModel;
   projects: Proj[];
+}
+
+function defaultSettings(): SettingsModel {
+  return {
+    flutterTool: { mode: "auto", customPath: null },
+    android: { sdkPath: null, emulatorPath: null, avdPath: null },
+    harmony: {
+      emulatorPath: null,
+      instancePath: null,
+      imageRoot: null,
+      flutterPath: null,
+      sdkPath: null,
+    },
+  };
 }
 
 interface FlutterInfo {
@@ -116,7 +163,7 @@ interface TermSession {
   pane?: HTMLDivElement;
 }
 
-let state: State = { schemaVersion: 2, settings: {}, projects: [] };
+let state: State = { schemaVersion: 3, settings: defaultSettings(), projects: [] };
 const flutterInfo = new Map<string, FlutterInfo>();
 const collapsed = new Set<string>();
 let selectedCommand: string | null = null;
@@ -784,6 +831,301 @@ function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
   })();
 }
 
+/* ---------------- 模拟器菜单（工具栏） ---------------- */
+
+let emuMenuEl: HTMLDivElement | null = null;
+
+function closeEmuMenu(): void {
+  emuMenuEl?.remove();
+  emuMenuEl = null;
+}
+
+function openEmulatorMenu(anchor: HTMLElement): void {
+  if (emuMenuEl) {
+    closeEmuMenu();
+    return;
+  }
+
+  const rect = anchor.getBoundingClientRect();
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.max(8, Math.min(rect.right - 320, window.innerWidth - 336))}px`;
+  menu.style.top = `${rect.bottom + 4}px`;
+  menu.innerHTML = `
+    <div class="dm-head">可启动的模拟器</div>
+    <div class="dm-body"><div class="dm-loading">正在查询…</div></div>
+  `;
+  document.body.appendChild(menu);
+  emuMenuEl = menu;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+
+  void (async () => {
+    let data: AllEmulators | null = null;
+    let error: string | null = null;
+    try {
+      data = await invoke<AllEmulators>("list_all_emulators", {
+        projectId: state.projects[0]?.id ?? null,
+      });
+    } catch (e) {
+      error = String(e);
+    }
+    if (emuMenuEl !== menu) return;
+    body.innerHTML = "";
+
+    const group = (t: string): void => {
+      const g = document.createElement("div");
+      g.className = "dm-group";
+      g.textContent = t;
+      body.appendChild(g);
+    };
+    const note = (t: string, cls = "dm-empty"): void => {
+      const d = document.createElement("div");
+      d.className = cls;
+      d.textContent = t;
+      body.appendChild(d);
+    };
+    const item = (name: string, detail: string, onClick: () => void): void => {
+      const el = document.createElement("div");
+      el.className = "dm-item emulator";
+      el.innerHTML = `<span class="dm-name">${esc(name)}</span>${detail ? `<span class="dm-sub">${esc(detail)}</span>` : ""}`;
+      el.addEventListener("click", () => {
+        closeEmuMenu();
+        onClick();
+      });
+      body.appendChild(el);
+    };
+
+    if (error) {
+      note(error, "dm-error");
+      return;
+    }
+    if (!data) return;
+
+    group(`Android 模拟器 (${data.android.length})`);
+    if (data.android.length === 0) note("无可用 AVD");
+    for (const a of data.android) {
+      item(a.name, a.detail, () => {
+        const pid = state.projects[0]?.id;
+        if (!pid) {
+          toast("启动 Android 模拟器需要先添加一个 Flutter 项目", "error");
+          return;
+        }
+        toast(`正在启动：${a.name}`);
+        void invoke("launch_emulator", { projectId: pid, emulatorId: a.id }).catch((e2) =>
+          toast(String(e2), "error"),
+        );
+      });
+    }
+
+    group(`HarmonyOS 模拟器 (${data.harmony.length})`);
+    if (data.harmony.length === 0) note("未发现鸿蒙模拟器（可在设置里指定 DevEco 目录）");
+    for (const h of data.harmony) {
+      item(h.name, h.detail, () => {
+        toast(`正在启动：${h.name}`);
+        void invoke("launch_harmony_emulator", { name: h.id }).catch((e2) =>
+          toast(String(e2), "error"),
+        );
+      });
+    }
+
+    if (data.notes.length > 0) {
+      group("提示");
+      for (const n of data.notes) note(n);
+    }
+  })();
+}
+
+/* ---------------- 设置页 ---------------- */
+
+function openSettings(): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-head">
+        <span>设置 · 工具链与模拟器目录</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="settings-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="settings-hint"></span>
+        <span class="flex1"></span>
+        <button class="btn" id="set-detect">自动检测</button>
+        <button class="btn" id="set-cancel">取消</button>
+        <button class="btn primary" id="set-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#settings-body") as HTMLDivElement;
+  const hint = overlay.querySelector("#settings-hint") as HTMLSpanElement;
+  const draft: SettingsModel = JSON.parse(
+    JSON.stringify(state.settings ?? defaultSettings()),
+  ) as SettingsModel;
+
+  const close = (): void => overlay.remove();
+
+  const section = (title: string, desc: string): HTMLDivElement => {
+    const s = document.createElement("div");
+    s.className = "set-section";
+    const h = document.createElement("div");
+    h.className = "set-title";
+    h.textContent = title;
+    s.appendChild(h);
+    if (desc) {
+      const d = document.createElement("div");
+      d.className = "set-desc";
+      d.textContent = desc;
+      s.appendChild(d);
+    }
+    body.appendChild(s);
+    return s;
+  };
+
+  const field = (
+    parent: HTMLElement,
+    label: string,
+    value: string | null,
+    onChange: (v: string | null) => void,
+  ): void => {
+    const row = document.createElement("div");
+    row.className = "set-row";
+
+    const lab = document.createElement("label");
+    lab.textContent = label;
+
+    const input = document.createElement("input");
+    input.className = "set-input";
+    input.value = value ?? "";
+    input.placeholder = "未配置";
+    input.addEventListener("input", () => onChange(input.value.trim() || null));
+
+    const browse = document.createElement("button");
+    browse.className = "btn";
+    browse.textContent = "浏览…";
+    browse.addEventListener("click", () => {
+      void (async () => {
+        const picked = await open({ directory: true, multiple: false, title: `选择${label}` });
+        if (typeof picked === "string") {
+          input.value = picked;
+          onChange(picked);
+        }
+      })();
+    });
+
+    row.append(lab, input, browse);
+    parent.appendChild(row);
+  };
+
+  const build = (): void => {
+    body.innerHTML = "";
+
+    // Flutter
+    {
+      const s = section("Flutter", "auto：优先项目 .fvm，其次自定义路径，最后 PATH");
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "模式";
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const m of ["auto", "custom", "fvm"]) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        if (draft.flutterTool.mode === m) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        draft.flutterTool.mode = sel.value;
+      });
+      row.append(lab, sel);
+      s.appendChild(row);
+      field(s, "自定义路径", draft.flutterTool.customPath, (v) => {
+        draft.flutterTool.customPath = v;
+      });
+    }
+
+    // Android
+    {
+      const s = section("Android", "SDK、emulator.exe、AVD 目录");
+      field(s, "SDK 目录", draft.android.sdkPath, (v) => {
+        draft.android.sdkPath = v;
+      });
+      field(s, "emulator.exe", draft.android.emulatorPath, (v) => {
+        draft.android.emulatorPath = v;
+      });
+      field(s, "AVD 目录", draft.android.avdPath, (v) => {
+        draft.android.avdPath = v;
+      });
+    }
+
+    // HarmonyOS
+    {
+      const s = section("HarmonyOS", "DevEco 模拟器（Emulator.exe）与鸿蒙 Flutter 分支");
+      field(s, "Emulator 目录", draft.harmony.emulatorPath, (v) => {
+        draft.harmony.emulatorPath = v;
+      });
+      field(s, "实例目录", draft.harmony.instancePath, (v) => {
+        draft.harmony.instancePath = v;
+      });
+      field(s, "镜像目录", draft.harmony.imageRoot, (v) => {
+        draft.harmony.imageRoot = v;
+      });
+      field(s, "Flutter 分支", draft.harmony.flutterPath, (v) => {
+        draft.harmony.flutterPath = v;
+      });
+      field(s, "SDK 目录", draft.harmony.sdkPath, (v) => {
+        draft.harmony.sdkPath = v;
+      });
+    }
+  };
+
+  build();
+
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#set-cancel") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  (overlay.querySelector("#set-detect") as HTMLButtonElement).addEventListener("click", () => {
+    hint.textContent = "检测中…";
+    void (async () => {
+      try {
+        const d = await invoke<Detected>("detect_toolchains");
+        draft.android = { ...draft.android, ...d.android };
+        draft.harmony = { ...draft.harmony, ...d.harmony };
+        if (d.flutter) {
+          draft.flutterTool.mode = "custom";
+          draft.flutterTool.customPath = d.flutter;
+        }
+        build();
+        const parts = [...d.notes];
+        if (d.harmonyVersion) parts.unshift(d.harmonyVersion);
+        hint.textContent = parts.length ? parts.join("；") : "已填入检测结果，确认后保存";
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
+  (overlay.querySelector("#set-save") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        state = await invoke<State>("save_settings", { settings: draft });
+        close();
+        render();
+        toast("设置已保存");
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+}
+
 /* ---------------- 启动 ---------------- */
 
 async function boot(): Promise<void> {
@@ -795,13 +1137,14 @@ async function boot(): Promise<void> {
         <div class="brand">
           <span class="logo">◆</span>
           <span class="title">Flutter Launcher</span>
-          <span class="badge-m0">M3 · 设备</span>
+          <span class="badge-m0">设置 · 模拟器</span>
         </div>
         <div class="tb-center">
           <button class="btn primary" id="btn-add">＋ 添加 Flutter 项目</button>
           <button class="btn" id="btn-import">📂 导入 launch.json</button>
         </div>
         <div class="tb-right">
+          <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
           <span class="tb-meta" id="tb-meta">—</span>
           <button class="btn icon" id="btn-settings" title="设置">⚙</button>
         </div>
@@ -869,9 +1212,12 @@ async function boot(): Promise<void> {
   // 设备菜单：点击外部 / Esc 关闭
   document.addEventListener("mousedown", (e) => {
     if (deviceMenuEl && !deviceMenuEl.contains(e.target as Node)) closeDeviceMenu();
+    if (emuMenuEl && !emuMenuEl.contains(e.target as Node)) closeEmuMenu();
   });
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeDeviceMenu();
+    if (e.key !== "Escape") return;
+    closeDeviceMenu();
+    closeEmuMenu();
   });
   window.addEventListener("blur", closeDeviceMenu);
 
@@ -884,8 +1230,9 @@ async function boot(): Promise<void> {
     }
     void importLaunch(id);
   });
-  req<HTMLButtonElement>("#btn-settings").addEventListener("click", () =>
-    toast("M1：Flutter 工具链设置将支持 auto / custom / fvm"),
+  req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
+  req<HTMLButtonElement>("#btn-emulators").addEventListener("click", (e) =>
+    openEmulatorMenu(e.currentTarget as HTMLElement),
   );
   req<HTMLButtonElement>("#btn-reload").addEventListener("click", () => sendKey("r"));
   req<HTMLButtonElement>("#btn-restart").addEventListener("click", () => sendKey("R"));
@@ -929,6 +1276,15 @@ async function boot(): Promise<void> {
         const ev = new MouseEvent("contextmenu", { clientX: 1180, clientY: 210 });
         openDeviceMenu(ev, proj, cmd);
       }
+    }
+
+    // 开发期：自动打开设置页 / 模拟器菜单
+    if (await invoke<string | null>("dev_env", { name: "FLA_SETTINGS" })) {
+      openSettings();
+    }
+    if (await invoke<string | null>("dev_env", { name: "FLA_EMU_MENU" })) {
+      const anchor = document.querySelector<HTMLButtonElement>("#btn-emulators");
+      if (anchor) openEmulatorMenu(anchor);
     }
   } catch {
     /* 无钩子 */

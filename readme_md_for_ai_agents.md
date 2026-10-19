@@ -59,7 +59,7 @@
 
 ```
 +-----------------------------------------------------------------------------------------+
-| [ + 添加 Flutter 项目 ]  [ 📂 导入 launch.json ]                          ⚙️ 设置       |
+| [ + 添加 Flutter 项目 ]  [ 📂 导入 launch.json ]              [ 📱 模拟器 ]  ⚙️ 设置       |
 +-----------------------------------------------------------------------------------------+
 | 活跃会话（终端标签）                                                                     |
 | [ 🟢 MyApp:DebugDev (Pixel 5) × ] | [ 🟡 MyApp:GooglePlay (等待构建锁…) × ] | [ + ]     |
@@ -416,9 +416,21 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
 
 ```jsonc
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "settings": {
-    "flutterTool": { "mode": "auto", "customPath": null, "fvmVersion": null }
+    "flutterTool": { "mode": "auto", "customPath": null },   // auto | custom | fvm
+    "android": {
+      "sdkPath": null,          // Android SDK 根目录
+      "emulatorPath": null,     // <sdk>\emulator\emulator.exe
+      "avdPath": null           // %USERPROFILE%\.android\avd
+    },
+    "harmony": {
+      "emulatorPath": null,     // DevEco 的 tools\emulator\Emulator.exe（或其目录）
+      "instancePath": null,     // %LOCALAPPDATA%\Huawei\Emulator\deployed
+      "imageRoot": null,        // 系统镜像根
+      "flutterPath": null,      // 鸿蒙 Flutter 分支（flutter_flutter）
+      "sdkPath": null
+    }
   },
   "projects": [
     {
@@ -622,6 +634,8 @@ per-project semaphore
 | A22 | 会话结束 | 标签转 🔴、可查退出码、进程树无残留 |
 | A23 | 右键命令弹出设备菜单 | 列出在线设备 **且** 列出未启动的模拟器（如 `Pixel_5`） |
 | A24 | 从菜单选设备后运行 | 命令带 `-d <id>` 启动；选模拟器则先 `emulator.launch` |
+| A25 | 工具栏「📱 模拟器」 | 同时列出 Android AVD 与 HarmonyOS 实例，点击即启动 |
+| A26 | 设置页「自动检测」 | 在本机实测命中 Flutter / Android SDK+emulator+AVD / DevEco Emulator+实例+镜像+Flutter 分支，且未配置时自动回退 |
 
 ---
 

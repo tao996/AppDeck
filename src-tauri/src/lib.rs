@@ -1,5 +1,7 @@
 mod daemon;
+mod detect;
 mod flutter;
+mod harmony;
 mod jsonc;
 mod launch;
 mod model;
@@ -267,6 +269,128 @@ fn launch_emulator(
     Ok(())
 }
 
+/* ---------------- 设置与工具链 ---------------- */
+
+#[tauri::command]
+fn save_settings(app: AppHandle, settings: model::Settings) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    state.settings = settings;
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+#[tauri::command]
+fn detect_toolchains() -> detect::Detected {
+    detect::detect()
+}
+
+#[derive(serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct EmulatorEntry {
+    id: String,
+    name: String,
+    detail: String,
+    kind: String,
+}
+
+#[derive(serde::Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AllEmulators {
+    android: Vec<EmulatorEntry>,
+    harmony: Vec<EmulatorEntry>,
+    notes: Vec<String>,
+}
+
+/// 未显式配置时回退到自动探测结果，保证开箱即用
+fn effective_harmony(state: &State) -> model::HarmonySettings {
+    if state
+        .settings
+        .harmony
+        .emulator_path
+        .as_ref()
+        .map(|p| !p.trim().is_empty())
+        .unwrap_or(false)
+    {
+        state.settings.harmony.clone()
+    } else {
+        detect::detect().harmony
+    }
+}
+
+/// 聚合两个来源：Android（flutter daemon）+ HarmonyOS（Emulator.exe -list）
+#[tauri::command]
+fn list_all_emulators(
+    app: AppHandle,
+    reg: tauri::State<'_, daemon::Daemons>,
+    project_id: Option<String>,
+) -> AllEmulators {
+    let mut out = AllEmulators::default();
+
+    let state = match store::load(&app) {
+        Ok(s) => s,
+        Err(e) => {
+            out.notes.push(e);
+            return out;
+        }
+    };
+
+    match harmony::list(&effective_harmony(&state)) {
+        Ok(list) => {
+            out.harmony = list
+                .into_iter()
+                .map(|h| EmulatorEntry {
+                    id: h.name.clone(),
+                    name: h.name,
+                    detail: h.detail,
+                    kind: "harmony".into(),
+                })
+                .collect()
+        }
+        Err(e) => out.notes.push(e),
+    }
+
+    let target = project_id.or_else(|| state.projects.first().map(|p| p.id.clone()));
+    match target {
+        Some(pid) => match flutter_exe_for(&state, &pid) {
+            Ok(exe) => match daemon::get_or_start(&reg, &exe, device_sink(&app)) {
+                Ok(d) => match d.request("emulator.getEmulators", None) {
+                    Ok(v) => {
+                        if let Ok(list) = serde_json::from_value::<Vec<daemon::EmulatorInfo>>(v) {
+                            out.android = list
+                                .into_iter()
+                                .map(|m| EmulatorEntry {
+                                    detail: format!(
+                                        "{} · {}",
+                                        m.id,
+                                        m.category.unwrap_or_else(|| "android".into())
+                                    ),
+                                    id: m.id,
+                                    name: m.name,
+                                    kind: "android".into(),
+                                })
+                                .collect();
+                        }
+                    }
+                    Err(e) => out.notes.push(format!("Android: {e}")),
+                },
+                Err(e) => out.notes.push(format!("Android: {e}")),
+            },
+            Err(e) => out.notes.push(format!("Android: {e}")),
+        },
+        None => out
+            .notes
+            .push("Android 模拟器需要先添加至少一个 Flutter 项目".into()),
+    }
+
+    out
+}
+
+#[tauri::command]
+fn launch_harmony_emulator(app: AppHandle, name: String) -> Result<(), String> {
+    let state = store::load(&app)?;
+    harmony::start(&effective_harmony(&state), &name)
+}
+
 /* ---------------- 开发期钩子 ---------------- */
 
 /// 自动化/调试用：设置 `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID?>"` 后，
@@ -328,6 +452,10 @@ pub fn run() {
             kill_session,
             list_devices,
             launch_emulator,
+            save_settings,
+            detect_toolchains,
+            list_all_emulators,
+            launch_harmony_emulator,
             dev_autostart,
             dev_env
         ])

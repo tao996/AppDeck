@@ -17,10 +17,27 @@
 | M1 | 项目管理 + 项目树 + 持久化 | ✅ 完成 |
 | M2 | ConPTY 会话 + 真实终端 + 进程树回收 | ✅ 完成 |
 | M3 | 设备/模拟器（`flutter daemon`） | ✅ 完成 |
+| M3.5 | 设置页（Flutter/Android/HarmonyOS 目录）+ 工具栏模拟器菜单 | ✅ 完成 |
 | M4 | 热重载 / 热重启 / 停止 / DevTools | ✅ 完成（随 M2 一并落地） |
 | M5 | 发布构建 + 通知 | 待做 |
 | M6 | `launch.json` 高级导入（手动添加命令等） | 待做 |
 | M7 | 会话恢复 + 打磨 | 待做 |
+
+### 设置页与模拟器菜单（M3.5）
+
+- **工具栏「📱 模拟器」**：聚合两个来源，点条目即启动
+  - Android AVD ← `flutter daemon` 的 `emulator.getEmulators`
+  - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
+- **设置页**（⚙）三段：
+  - Flutter：`auto` / `custom` / `fvm` + 自定义路径
+  - Android：SDK 目录 / `emulator.exe` / AVD 目录
+  - HarmonyOS：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK
+- **一键自动检测**：不扫全盘，只用环境变量 + `hdc.exe` 反推 + 常见安装位置
+- **开箱即用**：HarmonyOS 路径未配置时自动回退到探测结果
+
+![模拟器菜单](docs/shot-emulators-menu.png)
+
+![设置页](docs/shot-settings.png)
 
 ### M3 已实现
 
@@ -54,7 +71,7 @@
 cd src-tauri && cargo test
 ```
 
-18 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、**真实 daemon 查询设备与模拟器**。
+19 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、**工具链自动检测**。
 
 诊断工具：
 ```bash
