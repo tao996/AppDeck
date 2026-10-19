@@ -806,7 +806,7 @@ function targetProjectId(): string | null {
 
 /* ---------------- PTY 事件 ---------------- */
 
-/* ---------------- 体检横幅（§14 / §6.6） ---------------- */
+/* ---------------- 体检（§14 / §6.6）：工具栏按钮 ---------------- */
 
 interface DoctorCheck {
   key: string;
@@ -828,7 +828,7 @@ interface DoctorReport {
 }
 
 let doctorReport: DoctorReport | null = null;
-let doctorTimer: number | null = null;
+let doctorBusy = false;
 
 const DOCTOR_ICON: Record<string, string> = {
   ok: "√",
@@ -840,95 +840,61 @@ function doctorIssues(): DoctorCheck[] {
   return (doctorReport?.checks ?? []).filter((c) => c.status !== "ok");
 }
 
-async function refreshDoctor(force = false): Promise<void> {
-  const bar = req<HTMLDivElement>("#health-bar");
-  bar.hidden = false;
-  bar.className = "health-bar checking";
-  bar.innerHTML = `<span class="hb-icon">⏳</span><span class="hb-text">正在运行 flutter doctor…</span>`;
-
-  if (doctorTimer !== null) window.clearTimeout(doctorTimer);
-
-  try {
-    const rep = await invoke<DoctorReport>("flutter_doctor", {
-      projectId: state.projects[0]?.id ?? null,
-      force,
-    });
-    doctorReport = rep;
-    renderHealthBar();
-  } catch (e) {
-    doctorReport = null;
-    bar.className = "health-bar error";
-    bar.innerHTML = `<span class="hb-icon">✗</span><span class="hb-text">体检未执行：${esc(String(e))}</span>`;
-  }
-}
-
-function renderHealthBar(): void {
-  const bar = req<HTMLDivElement>("#health-bar");
+/** 工具栏按钮即体检入口：状态直接体现在按钮上 */
+function renderDoctorButton(): void {
+  const btn = req<HTMLButtonElement>("#btn-doctor");
   const rep = doctorReport;
 
-  if (!rep) {
-    bar.hidden = true;
+  if (doctorBusy || !rep) {
+    btn.className = "btn doc-btn checking";
+    btn.textContent = "⏳ 体检";
+    btn.title = "正在运行 flutter doctor…";
     return;
   }
 
-  bar.hidden = false;
-  bar.innerHTML = "";
-
-  const icon = document.createElement("span");
-  icon.className = "hb-icon";
-  const text = document.createElement("span");
-  text.className = "hb-text";
-
-  const actions = document.createElement("span");
-  actions.className = "hb-actions";
-
-  const btn = (label: string, fn: () => void, cls = ""): HTMLButtonElement => {
-    const b = document.createElement("button");
-    b.className = `hb-btn ${cls}`.trim();
-    b.textContent = label;
-    b.addEventListener("click", fn);
-    actions.appendChild(b);
-    return b;
-  };
-
   if (rep.error) {
-    // §6.6：失败时把原始报错原样呈现，而不是"未知错误"
-    bar.className = "health-bar error";
-    icon.textContent = "✗";
-    text.textContent = `体检未能完成：${rep.error}`;
-    btn("详情", () => openDoctorReport());
-    btn("重新体检", () => void refreshDoctor(true));
-    btn("关闭", () => {
-      bar.hidden = true;
-    });
-  } else {
-    const bad = doctorIssues();
-
-    if (bad.length === 0) {
-      bar.className = "health-bar ok";
-      icon.textContent = "√";
-      text.textContent = `体检通过 · ${rep.checks.length} 项检查全部正常`;
-      btn("查看", () => openDoctorReport());
-      btn("关闭", () => {
-        bar.hidden = true;
-      });
-      // 通过时自动收起，不长期占位
-      doctorTimer = window.setTimeout(() => {
-        if (doctorReport === rep) bar.hidden = true;
-      }, 6000);
-    } else {
-      bar.className = "health-bar warn";
-      icon.textContent = "!";
-      text.textContent = `体检发现 ${bad.length} 项问题：${bad.map((c) => c.name).join("、")}`;
-      btn("详情", () => openDoctorReport());
-      btn("重新体检", () => void refreshDoctor(true));
-      btn("关闭", () => {
-        bar.hidden = true;
-      });
-    }
+    btn.className = "btn doc-btn error";
+    btn.textContent = "✗ 体检";
+    btn.title = `体检未能完成：${rep.error}\n点击查看详情`;
+    return;
   }
 
-  bar.append(icon, text, actions);
+  const bad = doctorIssues();
+  if (bad.length === 0) {
+    btn.className = "btn doc-btn ok";
+    btn.textContent = "✓ 体检";
+    btn.title = `${rep.checks.length} 项检查全部正常\n点击查看详情`;
+  } else {
+    btn.className = "btn doc-btn warn";
+    btn.textContent = `! 体检 ${bad.length}`;
+    btn.title = `${bad.map((c) => c.name).join("、")}\n点击查看详情`;
+  }
+}
+
+async function refreshDoctor(force = false): Promise<void> {
+  if (doctorBusy) return;
+
+  doctorBusy = true;
+  renderDoctorButton();
+
+  try {
+    doctorReport = await invoke<DoctorReport>("flutter_doctor", {
+      projectId: state.projects[0]?.id ?? null,
+      force,
+    });
+  } catch (e) {
+    doctorReport = {
+      checks: [],
+      issues: 0,
+      summary: null,
+      raw: "",
+      error: String(e),
+      ranAt: Date.now(),
+    };
+  } finally {
+    doctorBusy = false;
+    renderDoctorButton();
+  }
 }
 
 function openDoctorReport(): void {
@@ -2397,13 +2363,12 @@ async function boot(): Promise<void> {
           <button class="btn" id="btn-import">📂 导入 launch.json</button>
         </div>
         <div class="tb-right">
+          <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
           <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
           <span class="tb-meta" id="tb-meta">—</span>
           <button class="btn icon" id="btn-settings" title="设置">⚙</button>
         </div>
       </header>
-
-      <div class="health-bar" id="health-bar" hidden></div>
 
       <div class="tabstrip" id="tabstrip"></div>
 
@@ -2493,6 +2458,14 @@ async function boot(): Promise<void> {
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
     if (s) void rerunSession(s);
+  });
+  req<HTMLButtonElement>("#btn-doctor").addEventListener("click", () => {
+    if (doctorBusy) {
+      toast("体检进行中…");
+      return;
+    }
+    if (doctorReport) openDoctorReport();
+    else void refreshDoctor(true);
   });
   req<HTMLButtonElement>("#btn-emulators").addEventListener("click", (e) =>
     openEmulatorMenu(e.currentTarget as HTMLElement),
@@ -2613,3 +2586,5 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+

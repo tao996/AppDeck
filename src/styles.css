@@ -1,3 +1,8 @@
+/* 兜底：任何显式 display 都会盖掉 UA 的 [hidden] { display: none }，
+   导致 el.hidden = true 静默失效（体检横幅的关闭按钮就这么点不动的）。 */
+[hidden] {
+  display: none !important;
+}
 /* ============================================================
    Flutter Launcher — WindTerm 风格深色主题
    ============================================================ */
@@ -1233,74 +1238,32 @@ select.set-input {
   color: #8fc6ff;
 }
 
-/* ---------------- 体检横幅 ---------------- */
+/* ---------------- 工具栏体检按钮 ---------------- */
 
-.health-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
-  font-size: 12px;
-  border-bottom: 1px solid var(--line);
-  background: #1a1f27;
+.doc-btn {
+  font-variant-numeric: tabular-nums;
 }
 
-.health-bar.checking {
+.doc-btn.checking {
   color: var(--fg-dim);
 }
 
-.health-bar.ok {
-  background: #14231a;
-  border-bottom-color: #244a33;
+.doc-btn.ok {
+  border-color: #2c5a41;
+  background: #17251d;
   color: #7ee2a8;
 }
 
-.health-bar.warn {
+.doc-btn.warn {
+  border-color: #6b5a20;
   background: #2a2413;
-  border-bottom-color: #574a1c;
   color: #f0c674;
 }
 
-.health-bar.error {
+.doc-btn.error {
+  border-color: #7a2f2f;
   background: #2c1717;
-  border-bottom-color: #5c2626;
   color: #ff9a9a;
-}
-
-.hb-icon {
-  font-weight: 700;
-  flex: 0 0 auto;
-  width: 14px;
-  text-align: center;
-}
-
-.hb-text {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.hb-actions {
-  display: flex;
-  gap: 6px;
-  flex: 0 0 auto;
-}
-
-.hb-btn {
-  height: 22px;
-  padding: 0 8px;
-  font-size: 11px;
-  color: inherit;
-  background: rgba(255, 255, 255, 0.06);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.hb-btn:hover {
-  background: rgba(255, 255, 255, 0.14);
 }
 
 /* 体检报告 */
@@ -1437,3 +1400,4 @@ select.set-input {
   opacity: 0.4;
   cursor: default;
 }
+
