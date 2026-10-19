@@ -62,7 +62,8 @@ pub fn save_to(path: &Path, state: &State) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
     }
-    let tmp = path.with_file_name("state.json.tmp");
+    // 临时文件名按目标派生，避免多文件/并行写入互相覆盖
+    let tmp = path.with_extension("tmp");
     let data = serde_json::to_string_pretty(state).map_err(|e| format!("序列化失败: {e}"))?;
     fs::write(&tmp, data).map_err(|e| format!("写入临时文件失败: {e}"))?;
     if path.exists() {

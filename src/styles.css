@@ -1208,3 +1208,27 @@ select.set-input {
   height: 28px;
   flex: 0 0 auto;
 }
+
+/* ---------------- 会话恢复 ---------------- */
+
+.tab.restored .tab-title {
+  opacity: 0.72;
+  font-style: italic;
+}
+
+.tab.restored::after {
+  content: "恢复";
+  font-size: 9px;
+  color: var(--fg-faint);
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  padding: 0 3px;
+  margin-left: 4px;
+  line-height: 13px;
+}
+
+#btn-rerun:not(:disabled) {
+  border-color: #3d5a7a;
+  background: #182534;
+  color: #8fc6ff;
+}

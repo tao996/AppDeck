@@ -9,6 +9,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
@@ -167,8 +168,14 @@ interface TermSession {
   devToolsUrl?: string;
   /** 用于跨数据块匹配锚点的滚动窗口 */
   scan: string;
+  /** 恢复自磁盘（进程未运行，禁止写 PTY） */
+  restored?: boolean;
+  projectId?: string;
+  commandId?: string;
+  templateId?: string;
   term?: Terminal;
   fit?: FitAddon;
+  serialize?: SerializeAddon;
   pane?: HTMLDivElement;
 }
 
@@ -302,16 +309,26 @@ function ensureTerm(s: TermSession): void {
     /* 回退 DOM 渲染器 */
   }
 
-  // 键盘 → PTY
+  // 会话恢复需要把缓冲序列化成 ANSI 文本
+  const serialize = new SerializeAddon();
+  term.loadAddon(serialize);
+
+  // 键盘 → PTY（恢复的会话没有进程，绝不能写）
   term.onData((data) => {
+    if (s.restored) {
+      toast("该会话已结束，点「⟳ 重跑」重新运行");
+      return;
+    }
     void invoke("write_session", { id: s.id, data }).catch(() => {});
   });
   term.onResize(({ rows, cols }) => {
+    if (s.restored) return;
     void invoke("resize_session", { id: s.id, rows, cols }).catch(() => {});
   });
 
   s.term = term;
   s.fit = fit;
+  s.serialize = serialize;
   s.pane = pane;
 
   const buffered = pendingOutput.get(s.id);
@@ -349,6 +366,11 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-restart").disabled = !isRun;
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
+  req<HTMLButtonElement>("#btn-rerun").disabled = !(
+    s &&
+    (s.restored || s.status === "stopped") &&
+    (s.commandId || s.templateId)
+  );
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
 
@@ -389,7 +411,10 @@ function renderTabs(): void {
 
   for (const s of sessions) {
     const el = document.createElement("div");
-    el.className = "tab" + (s.id === activeSessionId ? " active" : "");
+    el.className =
+      "tab" +
+      (s.id === activeSessionId ? " active" : "") +
+      (s.restored ? " restored" : "");
     el.title = `${STATUS_TEXT[s.status]} · ${s.device}${s.exitCode != null ? ` · 退出码 ${s.exitCode}` : ""}`;
     el.innerHTML = `
       <span class="dot ${s.status === "running" ? "run" : s.status === "starting" ? "start" : "stop"}"></span>
@@ -441,6 +466,8 @@ async function closeSession(id: string): Promise<void> {
     renderTabs();
     renderStatus();
   }
+
+  schedulePersist();
 }
 
 /* ---------------- 渲染：项目树 ---------------- */
@@ -609,7 +636,12 @@ function selectCommand(id: string): void {
   renderTree();
 }
 
-function mountSession(res: StartResponse, kind: string, mode: string): void {
+function mountSession(
+  res: StartResponse,
+  kind: string,
+  mode: string,
+  origin?: { projectId?: string; commandId?: string; templateId?: string },
+): void {
   const session: TermSession = {
     id: res.id,
     title: res.title,
@@ -620,9 +652,14 @@ function mountSession(res: StartResponse, kind: string, mode: string): void {
     artifacts: [],
     status: "starting",
     scan: "",
+    projectId: origin?.projectId,
+    commandId: origin?.commandId,
+    templateId: origin?.templateId,
   };
   sessions.push(session);
   activateSession(session.id);
+  // 立刻落盘一次：即使进程还在跑就关掉应用，tab 壳也不会丢
+  schedulePersist();
   requestAnimationFrame(() => {
     session.fit?.fit();
     session.term?.focus();
@@ -642,7 +679,10 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
       rows: 30,
       cols: 100,
     });
-    mountSession(res, c.kind, c.flutterMode ?? "debug");
+    mountSession(res, c.kind, c.flutterMode ?? "debug", {
+      projectId: p.id,
+      commandId: c.id,
+    });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -658,7 +698,10 @@ async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
       rows: 30,
       cols: 100,
     });
-    mountSession(res, t.kind, t.flutterMode ?? "debug");
+    mountSession(res, t.kind, t.flutterMode ?? "debug", {
+      projectId: p.id,
+      templateId: t.id,
+    });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -763,6 +806,124 @@ function targetProjectId(): string | null {
 
 /* ---------------- PTY 事件 ---------------- */
 
+/* ---------------- 会话恢复（D-10） ---------------- */
+
+interface SessionLog {
+  id: string;
+  title: string;
+  projectId: string | null;
+  commandId: string | null;
+  templateId: string | null;
+  device: string;
+  mode: string;
+  kind: string;
+  cwd: string;
+  exitCode: number | null;
+  status: string;
+  artifacts: string[];
+  ansi: string;
+  savedAt: number;
+}
+
+let persistTimer: number | null = null;
+
+/** 合并高频变更，避免每次输出都序列化整个缓冲 */
+function schedulePersist(): void {
+  if (persistTimer !== null) window.clearTimeout(persistTimer);
+  persistTimer = window.setTimeout(() => {
+    persistTimer = null;
+    void persistSessions();
+  }, 700);
+}
+
+async function persistSessions(): Promise<void> {
+  const logs: SessionLog[] = sessions.map((s) => ({
+    id: s.id,
+    title: s.title,
+    projectId: s.projectId ?? null,
+    commandId: s.commandId ?? null,
+    templateId: s.templateId ?? null,
+    device: s.device,
+    mode: s.mode,
+    kind: s.kind,
+    cwd: s.cwd,
+    exitCode: s.exitCode ?? null,
+    status: s.restored ? "stopped" : s.status,
+    artifacts: s.artifacts,
+    ansi: s.serialize?.serialize() ?? "",
+    savedAt: Date.now(),
+  }));
+
+  try {
+    await invoke("save_session_logs", { logs });
+  } catch {
+    /* 落盘失败不打断使用 */
+  }
+}
+
+async function restoreSessions(): Promise<void> {
+  let logs: SessionLog[] = [];
+  try {
+    logs = await invoke<SessionLog[]>("load_session_logs");
+  } catch {
+    return;
+  }
+  if (logs.length === 0) return;
+
+  for (const log of logs) {
+    const s: TermSession = {
+      id: log.id,
+      title: log.title,
+      device: log.device || "—",
+      mode: log.mode || "debug",
+      kind: log.kind || "run",
+      cwd: log.cwd || "",
+      artifacts: log.artifacts ?? [],
+      status: "stopped",
+      exitCode: log.exitCode ?? null,
+      scan: "",
+      projectId: log.projectId ?? undefined,
+      commandId: log.commandId ?? undefined,
+      templateId: log.templateId ?? undefined,
+      restored: true,
+    };
+    sessions.push(s);
+    ensureTerm(s);
+    if (log.ansi) s.term!.write(log.ansi);
+    s.term!.write("\r\n\x1b[90m──── 历史输出已恢复（进程未运行，点下方「⟳ 重跑」重新执行）────\x1b[0m\r\n");
+  }
+
+  renderTabs();
+  activateSession(sessions[0].id);
+  renderStatus();
+}
+
+async function rerunSession(s: TermSession): Promise<void> {
+  const project = state.projects.find((p) => p.id === s.projectId);
+  if (!project) {
+    toast("原项目已不存在，无法重跑", "error");
+    return;
+  }
+
+  if (s.commandId) {
+    const cmd = project.commands.find((c) => c.id === s.commandId);
+    if (cmd) {
+      await runCommand(project, cmd);
+      return;
+    }
+  }
+
+  if (s.templateId) {
+    const tpl = state.commandTemplates.find((t) => t.id === s.templateId);
+    if (tpl) {
+      await runTemplate(project, tpl);
+      return;
+    }
+  }
+
+  toast("找不到原命令（可能已被删除），请重新选择", "error");
+}
+
 function handleOutput(id: string, data: string): void {
   const s = sessions.find((x) => x.id === id);
   if (!s) return;
@@ -822,6 +983,8 @@ function handleExit(id: string, code: number | null): void {
 
   // D-11：构建结束发系统通知
   if (s.kind === "build") void notifyBuild(s);
+
+  schedulePersist();
 }
 
 async function notifyBuild(s: TermSession): Promise<void> {
@@ -1847,6 +2010,35 @@ function openSettings(): void {
       s.appendChild(row);
     }
 
+    // 会话恢复
+    {
+      const s = section("会话恢复", "重启后恢复 tab 与历史输出，但不自动拉起进程");
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "历史";
+      const btn = document.createElement("button");
+      btn.className = "btn";
+      btn.textContent = "清空已保存的会话历史";
+      btn.addEventListener("click", () => {
+        void (async () => {
+          const ok = await confirm("清空后，下次启动不会再恢复这些 tab。确定？", {
+            title: "清空会话历史",
+            kind: "warning",
+          });
+          if (!ok) return;
+          try {
+            await invoke("clear_session_logs");
+            toast("已清空会话历史");
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+      row.append(lab, btn);
+      s.appendChild(row);
+    }
+
     // Android
     {
       const s = section("Android", "SDK、emulator.exe、AVD 目录");
@@ -1958,6 +2150,7 @@ async function boot(): Promise<void> {
             <button class="cbtn" id="btn-restart" disabled><i class="hi">🔄</i>热重启</button>
             <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
             <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
+            <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
             <span class="ctx-info" id="ctx-info">等待会话</span>
@@ -2033,6 +2226,10 @@ async function boot(): Promise<void> {
     void importLaunch(id);
   });
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
+  req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
+    const s = activeSession();
+    if (s) void rerunSession(s);
+  });
   req<HTMLButtonElement>("#btn-emulators").addEventListener("click", (e) =>
     openEmulatorMenu(e.currentTarget as HTMLElement),
   );
@@ -2058,6 +2255,9 @@ async function boot(): Promise<void> {
   render();
   req<HTMLSpanElement>("#tb-meta").textContent = `schema v${state.schemaVersion}`;
   for (const p of state.projects) void refreshFlutter(p.id);
+
+  // D-10：恢复上次的 tab 壳与历史输出（进程不拉起）
+  await restoreSessions();
 
   // 开发期自动启动（FLA_AUTOSTART 环境变量）
   try {

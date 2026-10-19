@@ -2,6 +2,7 @@ mod daemon;
 mod detect;
 mod flutter;
 mod harmony;
+mod logs;
 mod jsonc;
 mod launch;
 mod model;
@@ -553,6 +554,34 @@ fn import_templates(
     Ok(ImportTemplatesResponse { state, added })
 }
 
+/* ---------------- 会话恢复（D-10） ---------------- */
+
+#[tauri::command]
+fn save_session_logs(app: AppHandle, mut logs: Vec<logs::SessionLog>) -> Result<(), String> {
+    let now = logs::now_ms();
+    for l in logs.iter_mut() {
+        if l.saved_at == 0 {
+            l.saved_at = now;
+        }
+    }
+    let path = logs::path_of(&app)?;
+    logs::save_to(&path, logs)
+}
+
+#[tauri::command]
+fn load_session_logs(app: AppHandle) -> Vec<logs::SessionLog> {
+    match logs::path_of(&app) {
+        Ok(p) => logs::load_from(&p),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[tauri::command]
+fn clear_session_logs(app: AppHandle) -> Result<(), String> {
+    let path = logs::path_of(&app)?;
+    logs::save_to(&path, Vec::new())
+}
+
 /* ---------------- 设置与工具链 ---------------- */
 
 #[tauri::command]
@@ -748,6 +777,9 @@ pub fn run() {
             import_templates,
             save_settings,
             detect_toolchains,
+            save_session_logs,
+            load_session_logs,
+            clear_session_logs,
             list_all_emulators,
             launch_harmony_emulator,
             dev_autostart,
