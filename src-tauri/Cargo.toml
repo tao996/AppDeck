@@ -20,6 +20,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+# 备案：解析 APK 签名块里的证书，取公钥与 MD5（JDK 17 的 keytool 已不打印 MD5）
+x509-parser = "0.16"
+md-5 = "0.10"
+base64 = "0.22"
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
@@ -43,3 +47,4 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+

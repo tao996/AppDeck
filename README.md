@@ -23,9 +23,9 @@
 | M6 | `launch.json` 高级导入（手动添加命令等） | ✅ 完成（命令增删改 + 模板库） |
 | M7 | 会话恢复 + 打磨 | ✅ 完成 |
 | P1 | 平台菜单派生 + 备案信息 | ✅ 完成 |
-| P2 | 备案公钥（解析 APK 签名块） | 待做 |
+| P2 | 备案公钥（解析 APK 签名块） | ✅ 完成 |
 
-### 平台菜单 + 备案信息（第一期）
+### 平台菜单 + 备案信息
 
 **导入了 Flutter 项目后命令为空？这是有意的。** 平台/模式组合不再存成命令，而是从
 「项目 + 宿主 + 设备」动态派生：
@@ -62,7 +62,11 @@
 - 三要素：应用名称 / 包名 / MD5，各带复制；MD5 统一成大写冒号分隔
 - 附加：版本、SDK、签名方案、DN、SHA-1、SHA-256，可「复制全部」
 - 调试签名会显著提示"请勿用于备案"
-- 公钥需解析 APK 签名块，**第二期提供**（见下）
+- **公钥**由自实现的 APK Signing Block 解析得到：定位 EOCD → Signing Block →
+  V2/V3 块 → `signers → signer → signed_data → digests → certificates` → 证书 DER
+  → X.509 的 SPKI → Base64
+- **交叉校验**：自解析出的证书 MD5 必须等于 `apksigner` 的 MD5，不一致会在面板上告警
+  （实测本机样本两者完全一致）
 - 设置里可覆盖 `build-tools` 目录与 `keytool` 路径，留空自动探测
 
 ![平台菜单](docs/shot-platform-menu.png)
@@ -193,7 +197,7 @@
 cd src-tauri && cargo test
 ```
 
-40 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析。
+43 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）。
 
 诊断工具：
 ```bash
@@ -316,4 +320,5 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 

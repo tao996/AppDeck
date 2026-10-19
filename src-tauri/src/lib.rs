@@ -1,4 +1,5 @@
 mod android;
+mod apksig;
 mod daemon;
 mod detect;
 mod doctor;

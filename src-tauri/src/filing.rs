@@ -302,7 +302,34 @@ pub fn inspect(apk: &str, settings: &AndroidSettings) -> FilingInfo {
         Err(e) => info.warnings.push(format!("apksigner 校验失败：{e}")),
     }
 
-    // 3) 提示类
+    // 3) 自解析签名块：取公钥，并与 apksigner 的 MD5 交叉校验
+    match crate::apksig::read_signing_cert(path) {
+        Ok(cert) => {
+            let self_md5 = crate::apksig::md5_of(&cert.der);
+
+            match &info.md5 {
+                Some(m) if m != &self_md5 => info.warnings.push(format!(
+                    "MD5 校验不一致：apksigner={m}，自解析={self_md5}（请以 apksigner 为准并反馈）"
+                )),
+                Some(_) => {}
+                None => info.md5 = Some(self_md5),
+            }
+
+            if info.scheme.is_none() {
+                info.scheme = Some(cert.scheme.trim_start_matches('V').to_string());
+            }
+
+            match crate::apksig::public_key_base64(&cert.der) {
+                Ok(pk) => info.public_key = Some(pk),
+                Err(e) => info.warnings.push(format!("提取公钥失败：{e}")),
+            }
+        }
+        Err(e) => info.warnings.push(format!(
+            "未能解析签名块取公钥：{e}。可改用 keystore 方式（keytool -exportcert）"
+        )),
+    }
+
+    // 4) 提示类
     if let Some(dn) = &info.dn {
         if dn.to_ascii_lowercase().contains("android debug") {
             info.warnings.push(
@@ -311,9 +338,6 @@ pub fn inspect(apk: &str, settings: &AndroidSettings) -> FilingInfo {
             );
         }
     }
-    info.warnings.push(
-        "公钥需要解析 APK 签名块，将在第二期提供；当前可先用 keystore 方式获取".to_string(),
-    );
 
     info
 }
