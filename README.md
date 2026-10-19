@@ -220,6 +220,26 @@ npm run tauri build  # 打包安装程序
 2. **不用 pipe 冒充终端**。管道会让 Flutter 降级（无 ANSI、无交互键）。
 3. **构建目标动态探测**。Windows 上没有 `ipa` / `macos`。
 4. **`.fvmrc` 的 `env` 必须透传**，`flutter` 字段可能是自定义分支名（如 `harmony`）。
-5. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
+5. **任何外部进程都要挂 Job Object**，包括常驻 helper（`flutter daemon`），不只是终端会话。
+   判据是"强杀应用后无残留"，不是"代码里写了 `AssignProcessToJobObject`"。
+6. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
 
-详见规格 §3.1 与 §16。
+详见规格 §3.1、§5.3 与 §16。
+
+### 回归验证：无残留外部进程（A35）
+
+新增任何 `spawn` 后跑一次。**必须强杀，不能走正常关闭**——正常关闭会执行 `Drop`，掩盖问题。
+
+```powershell
+# 1) 应用运行中，先让 daemon 起来（打开一次设备菜单），确认它在
+(Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
+  Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 期望 1
+
+# 2) 强杀应用
+Get-Process flutter-launcher | Stop-Process -Force
+Start-Sleep -Seconds 3
+
+# 3) 再数一次
+(Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
+  Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
+```

@@ -253,6 +253,22 @@ D:\apps\flutter\bin\  →  flutter, flutter.bat, dart, dart.bat
 - 模拟器启动：`emulator.launch`（`{emulatorId}`），启动完成后靠 `device.added` 事件点亮。
 - 设备列表按 `category`/`platformType` 分组，正好对应原规格的设备菜单分组。
 
+### 5.3 进程回收（M7 实测修正）
+
+上面只说了"惰性启动、空闲回收"，**漏了应用退出时的回收**：
+`Daemon` 只持有 `std::process::Child`，而 PTY 会话挂了 Job Object。
+结果应用每退出一次就残留一个 `flutter daemon`，实测累积 **11 个孤儿**（父进程早已退出）。
+
+修正：把 `JobGuard` 从 `pty` 模块提为 `pub(crate)`，daemon 复用同一个 Job。
+
+| 进程 | 修复前 | 修复后 |
+|---|---|---|
+| `flutter run` 会话 | Job 回收 ✅ | 不变 |
+| `flutter daemon` | 变孤儿 ❌ | Job 回收 ✅ |
+
+关键点：Job 句柄随进程关闭，所以**强杀**（`TerminateProcess`）同样能回收子树，
+不依赖 `Drop` 是否执行。验收：强杀应用后 `dart.exe ... daemon` 计数必须为 0。
+
 ---
 
 ## 6. 数据模型 v2（D-3 落地）

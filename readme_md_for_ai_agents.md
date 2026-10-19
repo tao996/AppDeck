@@ -161,11 +161,39 @@ bool get supportsAnsiEscapes => hasTerminal && stdout.supportsAnsiEscapes;
 **pipe 的后果**：`hasTerminal=false` → 无 ANSI 颜色、无进度重绘、无键位提示、`r`/`R`/`q` 无法触发。
 **PTY 的收益**：完整彩色输出、spinner/进度条正常、`r`/`R`/`q`/`h`/`p`/`o` 等交互键全部生效。
 
-### 5.3 进程树与孤儿进程
+### 5.3 进程树与孤儿进程（M7 实测，必读）
 
-`flutter run` 会派生 `dart.exe`、`gradle`、`adb` 等子进程。**只杀父进程会留下孤儿**。
+`flutter run` 会派生 `dart.exe`、`gradle`、`adb` 等子进程；`flutter daemon` 本身还是**常驻**进程。
+**只杀父进程会留下孤儿**。
 
-**要求**：所有会话进程必须 `AssignProcessToJobObject`，Job 设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。tab 关闭、应用退出、崩溃三种情况下整棵树都必须回收。
+**要求**：**任何由本应用启动的外部进程**都必须挂到 Job Object
+（`CreateJobObjectW` + `AssignProcessToJobObject`），并设置 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`。
+
+覆盖范围——**不止终端会话**：
+
+| 类别 | 例子 | 是否长驻 | 处理 |
+|---|---|---|---|
+| 终端会话 | `flutter run` / `build` / 自定义命令 | 否，但会派生子进程 | 必须挂 Job |
+| **常驻 helper** | `flutter daemon`、模拟器启动器、文件监听 | **是** | 必须挂 Job |
+| 一次性查询 | `flutter --version`、`Emulator.exe -list` | 否 | 同步 `output()` 等待即可 |
+
+**判据（必须实测，不能靠推理）**：用 `TerminateProcess` **强杀**应用后，
+上表进程及其子树必须全部消失。不允许依赖 `Drop`、`atexit`、`RunEvent::Exit` 等
+"优雅退出"路径——崩溃与强杀都不会走它们。
+
+**反例（本项目真实踩过）**：`flutter daemon` 只持有 `std::process::Child`，
+PTY 会话挂了 Job 而它没有。结果**每启动一次应用就残留一个 `flutter daemon`**，
+实测累积 11 个孤儿（父进程早已退出）。
+教训：**"所有进程挂 Job Object"这种笼统规则会被误读成"终端会话挂 Job"——
+必须逐个列出长驻进程，并确认它挂了。**
+
+**实现指引**：
+
+- Job 封装为可复用的 `JobGuard`（`src-tauri/src/pty.rs`），`assign(pid)` 创建 Job 并绑定，
+  `Drop` 时 `CloseHandle` 触发 `KILL_ON_JOB_CLOSE`；`pid == 0` 或 `OpenProcess` 失败时返回 `None`（降级不 panic）。
+- 新增任何 `spawn` 时，**必须**把 `JobGuard` 存进该结构体的字段
+  （参照 `Daemon::_job`、`Session::_job`），**不能只把 `Child` 丢给一个线程 `wait()` 了事**。
+- Job 句柄随进程关闭，所以应用被强杀时内核仍会回收整棵子树——这正是不能用 `Drop` 兜底的原因。
 
 ### 5.4 编码
 
@@ -592,7 +620,9 @@ per-project semaphore
 1. 先读 `ARCHITECTURE_V2.md` 的推导与证据，再改实现；遇到与本文冲突的旧代码，以本文为准。
 2. 一切终端 IO 走 PTY，UTF-8 解码。
 3. 解析锚点集中在**单一模块**（如 `anchors.ts` / `anchors.rs`），便于版本适配。
-4. 所有进程挂到 Job Object。
+4. **任何**由本应用启动的外部进程都必须挂 Job Object（`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`）——
+   包括常驻 helper（`flutter daemon`、模拟器启动器），**不只是终端会话**。
+   判据：强杀应用后无残留（见 §5.3、A35）。
 5. 命令一律 argv 数组。
 6. Flutter 工具解析走统一 `FlutterLocator`，三个 mode 全覆盖，`env` 透传。
 
@@ -612,6 +642,9 @@ per-project semaphore
 13. ❌ 在用户点击「重跑」前自动拉起恢复的会话进程。
 14. ❌ 后端与前端同时应答 DSR，或完全不应答（前者产生 stray input，后者直接卡死）。
 15. ❌ 给 `cmd.exe` 加 `/s`，或把可执行文件路径与参数拼成一个带引号的字符串。
+16. ❌ 让常驻进程只靠 `std::process::Child` 存活（应用退出后变孤儿；启动 N 次＝残留 N 份）。见 §5.3。
+17. ❌ 把原子写的临时文件名写死（如恒用 `state.json.tmp`）；必须按目标文件派生
+    （`path.with_extension("tmp")`），否则多文件或并发写入会互相覆盖。
 
 **依赖范围（锁定）**：终端仅使用以下基础 addon，其余一律不引入。
 
@@ -663,6 +696,8 @@ per-project semaphore
 | A32 | 全局作用域 | `scope: global` 的模板出现在项目右键菜单，点击即执行且**不写入项目命令列表** |
 | A33 | 会话恢复 | 重启后 tab 与历史输出恢复、进程不拉起、提供「重跑」；恢复态下输入不写 PTY |
 | A34 | 会话日志预算 | 单会话 ≤ 2 MB、全局 ≤ 20 MB、最多 20 个；损坏时备份 `sessions.corrupt.json` |
+| A35 | 无残留外部进程 | `TerminateProcess` 强杀应用后，`flutter daemon` 与子进程全部消失（实测 0 残留） |
+| A36 | 原子写不互相覆盖 | 并发生成不同目标文件的写入不串数据（临时名按目标派生） |
 
 ---
 
