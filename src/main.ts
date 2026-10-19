@@ -34,6 +34,7 @@ interface Cmd {
   emulatorId?: string | null;
   buildType?: string | null;
   source?: string | null;
+  scope?: string | null;
 }
 
 interface Proj {
@@ -499,6 +500,13 @@ function renderTree(): void {
       renderTree();
     });
 
+    // 右键：全局命令可直接执行，无需先加入项目
+    head.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openProjectMenu(e, p);
+    });
+
     head.querySelector(".proj-x")?.addEventListener("click", (e) => {
       e.stopPropagation();
       void removeProject(p);
@@ -601,6 +609,29 @@ function selectCommand(id: string): void {
   renderTree();
 }
 
+function mountSession(res: StartResponse, kind: string, mode: string): void {
+  const session: TermSession = {
+    id: res.id,
+    title: res.title,
+    device: res.device,
+    mode,
+    kind,
+    cwd: res.cwd,
+    artifacts: [],
+    status: "starting",
+    scan: "",
+  };
+  sessions.push(session);
+  activateSession(session.id);
+  requestAnimationFrame(() => {
+    session.fit?.fit();
+    session.term?.focus();
+    const rows = session.term?.rows ?? 30;
+    const cols = session.term?.cols ?? 100;
+    void invoke("resize_session", { id: session.id, rows, cols }).catch(() => {});
+  });
+}
+
 async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
   selectCommand(c.id);
   try {
@@ -611,27 +642,23 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
       rows: 30,
       cols: 100,
     });
+    mountSession(res, c.kind, c.flutterMode ?? "debug");
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
 
-    const session: TermSession = {
-      id: res.id,
-      title: res.title,
-      device: res.device,
-      mode: c.flutterMode ?? "debug",
-      kind: c.kind,
-      cwd: res.cwd,
-      artifacts: [],
-      status: "starting",
-      scan: "",
-    };
-    sessions.push(session);
-    activateSession(session.id);
-    requestAnimationFrame(() => {
-      session.fit?.fit();
-      session.term?.focus();
-      const rows = session.term?.rows ?? 30;
-      const cols = session.term?.cols ?? 100;
-      void invoke("resize_session", { id: session.id, rows, cols }).catch(() => {});
+/// 全局模板：不写入项目命令列表，直接起一个会话
+async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
+  try {
+    const res = await invoke<StartResponse>("start_template_session", {
+      projectId: p.id,
+      templateId: t.id,
+      deviceId: deviceId ?? null,
+      rows: 30,
+      cols: 100,
     });
+    mountSession(res, t.kind, t.flutterMode ?? "debug");
   } catch (e) {
     toast(String(e), "error");
   }
@@ -985,6 +1012,8 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
     target: existing?.buildType ?? "apk",
     flavor,
     args: restArgs.join(" "),
+    envPairs: Object.entries(existing?.env ?? {}) as Array<[string, string]>,
+    scope: existing?.scope === "global" ? "global" : "project",
   };
 
   let targets: BuildTarget[] | null = null;
@@ -1024,10 +1053,15 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       const [, cell] = row("类型");
       const sel = document.createElement("select");
       sel.className = "set-input";
-      for (const k of ["run", "build"]) {
+      for (const k of ["run", "build", "custom"]) {
         const o = document.createElement("option");
         o.value = k;
-        o.textContent = k === "run" ? "run（调试运行）" : "build（发布构建）";
+        o.textContent =
+          k === "run"
+            ? "run（flutter 调试运行）"
+            : k === "build"
+              ? "build（flutter 发布构建）"
+              : "custom（自定义命令）";
         if (draft.kind === k) o.selected = true;
         sel.appendChild(o);
       }
@@ -1039,7 +1073,21 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       cell.appendChild(sel);
     }
 
-    if (draft.kind === "run") {
+    if (draft.kind === "custom") {
+      const [, c1] = row("程序");
+      input(c1, draft.program, "%FLUTTER% 或 C:\\path\\to\\tool.exe", (v) => {
+        draft.program = v;
+      });
+      const [, c2] = row("cwd");
+      input(c2, draft.cwd, "可空（相对项目根）", (v) => {
+        draft.cwd = v;
+      });
+      const note = document.createElement("div");
+      note.className = "set-desc";
+      note.textContent =
+        "%FLUTTER% 会替换为该项目的 flutter 可执行文件；.bat / .cmd 会自动用 cmd 包装。";
+      body.appendChild(note);
+    } else if (draft.kind === "run") {
       const [, c1] = row("program");
       input(c1, draft.program, "lib/main.dart（可空）", (v) => {
         draft.program = v;
@@ -1108,9 +1156,90 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
 
     {
       const [, cell] = row("额外参数");
-      input(cell, draft.args, "--dart-define=ENV=prod", (v) => {
-        draft.args = v;
+      input(
+        cell,
+        draft.args,
+        draft.kind === "custom" ? "原样传给程序" : "--dart-define=ENV=prod",
+        (v) => {
+          draft.args = v;
+        },
+      );
+    }
+
+    // 环境变量
+    {
+      const title = document.createElement("div");
+      title.className = "set-title";
+      title.style.marginTop = "14px";
+      title.textContent = "环境变量";
+      body.appendChild(title);
+
+      const list = document.createElement("div");
+      list.className = "env-list";
+
+      draft.envPairs.forEach((pair, idx) => {
+        const r = document.createElement("div");
+        r.className = "env-row";
+
+        const kEl = document.createElement("input");
+        kEl.className = "set-input env-key";
+        kEl.value = pair[0];
+        kEl.placeholder = "KEY";
+        kEl.addEventListener("input", () => {
+          draft.envPairs[idx][0] = kEl.value;
+        });
+
+        const vEl = document.createElement("input");
+        vEl.className = "set-input";
+        vEl.value = pair[1];
+        vEl.placeholder = "value";
+        vEl.addEventListener("input", () => {
+          draft.envPairs[idx][1] = vEl.value;
+        });
+
+        const del = document.createElement("button");
+        del.className = "btn";
+        del.textContent = "×";
+        del.title = "删除该变量";
+        del.addEventListener("click", () => {
+          draft.envPairs.splice(idx, 1);
+          void build();
+        });
+
+        r.append(kEl, vEl, del);
+        list.appendChild(r);
       });
+
+      const add = document.createElement("button");
+      add.className = "btn";
+      add.textContent = "＋ 添加变量";
+      add.addEventListener("click", () => {
+        draft.envPairs.push(["", ""]);
+        void build();
+      });
+      list.appendChild(add);
+      body.appendChild(list);
+    }
+
+    // 作用域（仅模板有意义）
+    if (isTemplate) {
+      const [, cell] = row("作用域");
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const sc of ["project", "global"]) {
+        const o = document.createElement("option");
+        o.value = sc;
+        o.textContent =
+          sc === "global"
+            ? "全局（项目右键直接执行，无需加入项目）"
+            : "项目（导入到项目后才能执行）";
+        if (draft.scope === sc) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        draft.scope = sel.value;
+      });
+      cell.appendChild(sel);
     }
 
     if (draft.kind === "build") {
@@ -1170,16 +1299,27 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         id: existing?.id ?? "",
         name: draft.name.trim(),
         kind: draft.kind,
-        program: draft.kind === "run" ? draft.program.trim() || null : null,
-        cwd: draft.kind === "run" ? draft.cwd.trim() || null : null,
+        program:
+          draft.kind === "custom" || draft.kind === "run"
+            ? draft.program.trim() || null
+            : null,
+        cwd:
+          draft.kind === "custom" || draft.kind === "run"
+            ? draft.cwd.trim() || null
+            : null,
         flutterMode: draft.kind === "run" ? draft.mode : null,
         args,
-        env: existing?.env ?? {},
+        env: Object.fromEntries(
+          draft.envPairs
+            .filter(([k]) => k.trim() !== "")
+            .map(([k, v]) => [k.trim(), v]),
+        ),
         toolArgs: existing?.toolArgs ?? [],
         deviceId: existing?.deviceId ?? null,
         emulatorId: existing?.emulatorId ?? null,
         buildType: draft.kind === "build" ? draft.target : null,
-        source: "manual",
+        source: isTemplate ? "template" : "manual",
+        scope: isTemplate ? draft.scope : "project",
       };
 
       try {
@@ -1194,6 +1334,61 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       }
     })();
   });
+}
+
+/* ---------------- 项目右键：全局命令 ---------------- */
+
+let projMenuEl: HTMLDivElement | null = null;
+
+function closeProjMenu(): void {
+  projMenuEl?.remove();
+  projMenuEl = null;
+}
+
+function openProjectMenu(ev: MouseEvent, p: Proj): void {
+  closeProjMenu();
+
+  const globals = state.commandTemplates.filter((t) => t.scope === "global");
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 340)}px`;
+  menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 320)}px`;
+  menu.innerHTML = `<div class="dm-head">${esc(p.name)}</div><div class="dm-body"></div>`;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+
+  const addGroup = (text: string): void => {
+    const g = document.createElement("div");
+    g.className = "dm-group";
+    g.textContent = text;
+    body.appendChild(g);
+  };
+
+  const addItem = (name: string, detail: string, onClick: () => void): void => {
+    const el = document.createElement("div");
+    el.className = "dm-item";
+    el.innerHTML = `<span class="dm-name">${esc(name)}</span>${detail ? `<span class="dm-sub">${esc(detail)}</span>` : ""}`;
+    el.addEventListener("click", () => {
+      closeProjMenu();
+      onClick();
+    });
+    body.appendChild(el);
+  };
+
+  addGroup(`全局命令 (${globals.length})`);
+  if (globals.length === 0) {
+    addItem("（暂无全局模板）", "设置 → 命令模板 → 作用域选「全局」", () => {});
+  }
+  for (const t of globals) {
+    const detail = [t.kind, t.buildType, t.args.join(" ")].filter(Boolean).join(" · ");
+    addItem(t.name, detail, () => void runTemplate(p, t));
+  }
+
+  addGroup("项目");
+  addItem("从模板导入…", "把模板加入本项目", () => openTemplateImport(p));
+  addItem("添加命令…", "新建 run / build / custom 命令", () => void openCommandDialog(p));
 }
 
 /* ---------------- 命令模板库 ---------------- */
@@ -1818,11 +2013,13 @@ async function boot(): Promise<void> {
   document.addEventListener("mousedown", (e) => {
     if (deviceMenuEl && !deviceMenuEl.contains(e.target as Node)) closeDeviceMenu();
     if (emuMenuEl && !emuMenuEl.contains(e.target as Node)) closeEmuMenu();
+    if (projMenuEl && !projMenuEl.contains(e.target as Node)) closeProjMenu();
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
     closeDeviceMenu();
     closeEmuMenu();
+    closeProjMenu();
   });
   window.addEventListener("blur", closeDeviceMenu);
 
@@ -1898,6 +2095,25 @@ async function boot(): Promise<void> {
     if (tplImport) {
       const proj = state.projects.find((x) => x.id === tplImport) ?? state.projects[0];
       if (proj) openTemplateImport(proj);
+    }
+    const editTpl = await invoke<string | null>("dev_env", { name: "FLA_EDIT_TEMPLATE" });
+    if (editTpl) {
+      const t = state.commandTemplates.find((x) => x.id === editTpl);
+      if (t) void openCommandDialog(null, t);
+    }
+    const projMenu = await invoke<string | null>("dev_env", { name: "FLA_PROJ_MENU" });
+    if (projMenu) {
+      const proj = state.projects.find((x) => x.id === projMenu) ?? state.projects[0];
+      if (proj) {
+        openProjectMenu(new MouseEvent("contextmenu", { clientX: 1500, clientY: 640 }), proj);
+      }
+    }
+    const runTpl = await invoke<string | null>("dev_env", { name: "FLA_RUN_TEMPLATE" });
+    if (runTpl) {
+      const [pid, tid] = runTpl.split("|");
+      const proj = state.projects.find((x) => x.id === pid);
+      const tpl = state.commandTemplates.find((x) => x.id === tid);
+      if (proj && tpl) void runTemplate(proj, tpl);
     }
   } catch {
     /* 无钩子 */

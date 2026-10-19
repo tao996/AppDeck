@@ -144,6 +144,63 @@ fn start_session(
         &plan.program,
         &plan.args,
         plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    let pid = session.pid;
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session);
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title: plan.title,
+        device: plan.device,
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+    })
+}
+
+/// 全局模板直接执行：不写入项目命令列表
+#[tauri::command]
+fn start_template_session(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    template_id: String,
+    device_id: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    let template = state
+        .command_templates
+        .iter()
+        .find(|t| t.id == template_id)
+        .ok_or_else(|| "模板不存在".to_string())?;
+
+    let plan = ops::build_plan_for(&state, project, template, device_id.as_deref())?;
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let id = format!("sess-{seq}");
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
         rows,
         cols,
     )?;
@@ -676,6 +733,7 @@ pub fn run() {
             import_launch,
             detect_flutter,
             start_session,
+            start_template_session,
             write_session,
             resize_session,
             kill_session,

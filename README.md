@@ -25,7 +25,15 @@
 
 ### 命令模板库（解决"新项目命令为空"）
 
-- **全局模板**：设置 → 命令模板，可新建 / 编辑 / 删除 / 恢复默认（内置 Debug、Build APK、Build Windows、Build Web）
+- **全局模板**：设置 → 命令模板，可新建 / 编辑 / 删除 / 恢复默认（内置 Debug、Build APK、Build Windows、Build Web、Pub Get）
+- **三种类型**：
+  - `run` — `flutter run`（可指定 `-t` 入口与 debug/profile/release）
+  - `build` — `flutter build <目标> --release`（目标动态探测）
+  - `custom` — 任意程序 + 参数；`%FLUTTER%` 会替换成该项目的 flutter 可执行文件
+- **环境变量**：键值对随命令保存，直接注入 PTY 子进程
+- **作用域**：
+  - `project` — 导入到项目后才能执行
+  - `global` — **项目右键即可执行，不写入项目命令列表**
 - **自动套用**：新增「单应用」项目时自动把模板实例化为该项目的命令，不再是空树
 - **按需导入**：项目树底部「⤓ 从模板导入…」，勾选后导入（支持全选 / 全不选，按名称+类型去重）
 - **工作区不自动套用**：monorepo 的命令来自 `launch.json`，避免污染
@@ -33,6 +41,10 @@
 ![命令模板库](docs/shot-templates.png)
 
 ![从模板导入](docs/shot-template-import.png)
+
+![自定义命令与作用域](docs/shot-cmd-custom.png)
+
+![项目右键执行全局命令](docs/shot-proj-menu-crop.png)
 
 ### M5 已实现
 
@@ -95,7 +107,7 @@
 cd src-tauri && cargo test
 ```
 
-21 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重。
+22 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量。
 
 诊断工具：
 ```bash

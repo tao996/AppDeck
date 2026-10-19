@@ -20,6 +20,7 @@ pub fn default_templates() -> Vec<Command> {
             emulator_id: None,
             build_type: None,
             source: Some("template".into()),
+            scope: Some("project".into()),
         },
         Command {
             id: "tpl-build-apk".into(),
@@ -35,6 +36,7 @@ pub fn default_templates() -> Vec<Command> {
             emulator_id: None,
             build_type: Some("apk".into()),
             source: Some("template".into()),
+            scope: Some("project".into()),
         },
         Command {
             id: "tpl-build-windows".into(),
@@ -50,6 +52,7 @@ pub fn default_templates() -> Vec<Command> {
             emulator_id: None,
             build_type: Some("windows".into()),
             source: Some("template".into()),
+            scope: Some("project".into()),
         },
         Command {
             id: "tpl-build-web".into(),
@@ -65,6 +68,24 @@ pub fn default_templates() -> Vec<Command> {
             emulator_id: None,
             build_type: Some("web".into()),
             source: Some("template".into()),
+            scope: Some("project".into()),
+        },
+        // 自定义 + 全局：项目右键直接执行，无需加入项目
+        Command {
+            id: "tpl-pub-get".into(),
+            name: "Pub Get".into(),
+            kind: "custom".into(),
+            program: Some("%FLUTTER%".into()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["pub".into(), "get".into()],
+            env: HashMap::new(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("template".into()),
+            scope: Some("global".into()),
         },
     ]
 }
@@ -74,6 +95,8 @@ pub fn instantiate_template(tpl: &Command, project_id: &str) -> Command {
     let mut c = tpl.clone();
     c.id = make_id("cmd", &format!("{}|{}|{}", project_id, tpl.name, tpl.kind));
     c.source = Some("template".into());
+    // 导入到项目后一律按项目作用域处理
+    c.scope = Some("project".into());
     c
 }
 
@@ -188,6 +211,9 @@ pub struct Command {
     /// launch-json | manual
     #[serde(default)]
     pub source: Option<String>,
+    /// project | global：全局模板可在项目右键直接执行，无需加入项目
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -227,3 +253,4 @@ impl Default for State {
         }
     }
 }
+

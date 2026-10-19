@@ -1182,3 +1182,29 @@ select.set-input {
   accent-color: var(--accent);
   flex: 0 0 14px;
 }
+
+/* ---------------- 环境变量编辑 ---------------- */
+
+.env-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+}
+
+.env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+}
+
+.env-row .env-key {
+  flex: 0 0 200px;
+  font-family: var(--mono);
+}
+
+.env-row .btn {
+  height: 28px;
+  flex: 0 0 auto;
+}

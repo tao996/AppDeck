@@ -217,6 +217,7 @@ pub fn spawn(
     program: &str,
     args: &[String],
     cwd: PathBuf,
+    env: &[(String, String)],
     rows: u16,
     cols: u16,
 ) -> Result<Arc<Session>, String> {
@@ -233,6 +234,9 @@ pub fn spawn(
     let mut cmd = CommandBuilder::new(program);
     cmd.args(args);
     cmd.cwd(&cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
 
     let mut child = pair
         .slave

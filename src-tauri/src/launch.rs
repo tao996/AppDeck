@@ -134,6 +134,7 @@ pub fn import(workspace: &Path) -> Result<ImportOutcome, String> {
                 .map(|s| s.to_string()),
             build_type: None,
             source: Some("launch-json".to_string()),
+            scope: Some("project".to_string()),
         });
     }
 

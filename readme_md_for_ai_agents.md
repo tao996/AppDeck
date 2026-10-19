@@ -438,14 +438,17 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
       "name": "Debug",
       "kind": "run",
       "flutterMode": "debug",
-      "args": []
+      "args": [],
+      "scope": "project"
     },
     {
-      "id": "tpl-build-apk",
-      "name": "Build APK",
-      "kind": "build",
-      "buildType": "apk",
-      "args": []
+      "id": "tpl-pub-get",
+      "name": "Pub Get",
+      "kind": "custom",                           // run | build | custom
+      "program": "%FLUTTER%",                     // custom：程序路径，或 %FLUTTER% 占位符
+      "args": ["pub", "get"],
+      "env": { "FLUTTER_SUPPRESS_ANALYTICS": "true" },
+      "scope": "global"                           // project | global
     }
   ],
   "projects": [
@@ -459,7 +462,7 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
         {
           "id": "cmd-1",
           "name": "Debug Dev",
-          "kind": "run",                          // run | build
+          "kind": "run",                          // run | build | custom
           "program": "lib/main_dev.dart",         // ← launch.json 用 program
           "flutterMode": "debug",                 // debug | profile | release
           "args": ["--flavor", "dev", "--dart-define=ENV=dev"],
@@ -656,6 +659,8 @@ per-project semaphore
 | A28 | 构建产物与通知 | 产物路径从 `✓ Built ...` 解析并可打开目录；结束发系统通知 |
 | A29 | 命令模板库 | 设置里可增删改模板；新增「单应用」项目自动套用模板，不再是空命令树 |
 | A30 | 按需导入模板 | 项目树「从模板导入…」支持全选/部分选择，按「名称+类型」去重 |
+| A31 | 自定义命令与环境变量 | `kind: custom` 直接执行指定程序；`%FLUTTER%` 解析为项目 flutter；`env` 注入子进程 |
+| A32 | 全局作用域 | `scope: global` 的模板出现在项目右键菜单，点击即执行且**不写入项目命令列表** |
 
 ---
 
