@@ -331,6 +331,40 @@ pub fn prefill_plan(
     ))
 }
 
+/// 大小写无关的字面替换（`%PROJECT%` / `%project%` 都认）
+fn replace_ci(hay: &str, needle: &str, val: &str) -> String {
+    let lower = hay.to_lowercase();
+    let n = needle.to_lowercase();
+    let mut out = String::new();
+    let mut i = 0usize;
+
+    while let Some(pos) = lower[i..].find(&n) {
+        out.push_str(&hay[i..i + pos]);
+        out.push_str(val);
+        i += pos + n.len();
+    }
+    out.push_str(&hay[i..]);
+    out
+}
+
+/// 展开命令里的占位符：
+/// - `%PROJECT%` 项目根目录
+/// - `%CWD%`     命令实际工作目录（已含项目根）
+/// - `%FLUTTER%` 解析出的 flutter 可执行文件
+fn expand_placeholders(
+    text: &str,
+    project_root: &std::path::Path,
+    cwd: &std::path::Path,
+    flutter: Option<&std::path::Path>,
+) -> String {
+    let mut out = replace_ci(text, "%PROJECT%", &project_root.display().to_string());
+    out = replace_ci(&out, "%CWD%", &cwd.display().to_string());
+    if let Some(f) = flutter {
+        out = replace_ci(&out, "%FLUTTER%", &f.display().to_string());
+    }
+    out
+}
+
 pub fn build_plan_for(
     state: &State,
     project: &Project,
@@ -338,8 +372,14 @@ pub fn build_plan_for(
     device_override: Option<&str>,
 ) -> Result<Plan, String> {
     let project_root = PathBuf::from(&project.path);
+
+    // cwd 先展开占位符（%PROJECT% 等），再决定要不要拼到项目根下
     let cwd = match &command.cwd {
-        Some(c) if !c.trim().is_empty() => project_root.join(c),
+        Some(c) if !c.trim().is_empty() => {
+            let expanded = expand_placeholders(c, &project_root, &project_root, None);
+            let p = PathBuf::from(&expanded);
+            if p.is_absolute() { p } else { project_root.join(p) }
+        }
         _ => project_root.clone(),
     };
     if !cwd.is_dir() {
@@ -384,16 +424,40 @@ pub fn build_plan_for(
         "custom" => {
             let raw = command.program.as_deref().unwrap_or("").trim();
             if raw.is_empty() {
-                return Err("自定义命令必须填写程序（可执行文件路径，或 %FLUTTER%）".to_string());
+                return Err(
+                    "自定义命令必须填写程序（可执行文件路径，%FLUTTER% / %PROJECT% / %CWD%）"
+                        .to_string(),
+                );
             }
 
-            let prog = if raw.eq_ignore_ascii_case("%FLUTTER%") {
-                need_flutter()?.display().to_string()
+            // 展开占位符：%FLUTTER%（按需解析） / %PROJECT% / %CWD%
+            let flutter_exe = if raw.to_lowercase().contains("%flutter%") {
+                Some(need_flutter()?)
             } else {
-                raw.to_string()
+                None
             };
+            let prog = expand_placeholders(
+                raw,
+                &project_root,
+                &cwd,
+                flutter_exe.as_deref(),
+            );
 
-            wrap_batch(prog, command.args.clone())
+            // 参数里也可能有占位符（例如 `-ScanDir %PROJECT%`）
+            let arg_list: Vec<String> = command
+                .args
+                .iter()
+                .map(|a| expand_placeholders(a, &project_root, &cwd, flutter_exe.as_deref()))
+                .collect();
+
+            // .ps1 不能直接 CreateProcess，交给 PowerShell
+            if prog.to_ascii_lowercase().ends_with(".ps1") {
+                let ps =
+                    crate::terminal::powershell_for(state.settings.terminal.path.as_deref());
+                crate::terminal::wrap_ps1(&ps, &prog, &arg_list)
+            } else {
+                wrap_batch(prog, arg_list)
+            }
         }
         kind => {
             let exe = need_flutter()?;
@@ -794,6 +858,110 @@ mod tests {
     }
 
     #[test]
+    fn custom_ps1_runs_through_powershell_with_project_placeholder() {
+        let root = std::env::temp_dir().join("fla_ps1_cmd");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("run.ps1");
+        std::fs::write(&script, b"Write-Host hi\n").unwrap();
+
+        let state = State::default();
+        let project = Project {
+            id: "p-ps1".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "single".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+        let cmd = Command {
+            id: "c1".into(),
+            name: "脚本".into(),
+            kind: "custom".into(),
+            program: Some(script.display().to_string()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["-ScanDir".into(), "%PROJECT%".into()],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("manual".into()),
+            scope: None,
+        };
+
+        let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
+        let joined = plan.args.join(" ");
+
+        // .ps1 必须交给 PowerShell，并带执行策略
+        assert!(
+            plan.program.to_ascii_lowercase().contains("powershell")
+                || plan.program.to_ascii_lowercase().ends_with("pwsh.exe"),
+            "应由 PowerShell 执行，实际: {}",
+            plan.program
+        );
+        assert!(joined.contains("-ExecutionPolicy"), "缺执行策略: {joined}");
+        assert!(joined.contains("Bypass"), "缺 Bypass: {joined}");
+        assert!(joined.contains("-File"), "缺 -File: {joined}");
+        assert!(joined.contains("run.ps1"), "脚本路径没带上: {joined}");
+
+        // %PROJECT% 展开为项目根（最后一个参数）
+        assert_eq!(
+            plan.args.last().map(|s| s.as_str()),
+            Some(root.display().to_string().as_str()),
+            "参数里的 %PROJECT% 应展开，实际: {:?}",
+            plan.args
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cwd_accepts_project_placeholder() {
+        let root = std::env::temp_dir().join("fla_cwd_ph");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+
+        let state = State::default();
+        let project = Project {
+            id: "p-cwd".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "single".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+        let cmd = Command {
+            id: "c2".into(),
+            name: "x".into(),
+            kind: "custom".into(),
+            program: Some("cmd.exe".into()),
+            cwd: Some("%PROJECT%\\sub".into()),
+            flutter_mode: None,
+            args: vec![],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("manual".into()),
+            scope: None,
+        };
+
+        let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
+        assert!(
+            plan.cwd.ends_with("sub"),
+            "cwd 里的 %PROJECT% 应展开，实际: {}",
+            plan.cwd.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn custom_command_resolves_flutter_and_carries_env() {
         let Some(ws) = fixture() else {
             eprintln!("跳过：测试素材不存在");
@@ -967,6 +1135,8 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
 
 
 

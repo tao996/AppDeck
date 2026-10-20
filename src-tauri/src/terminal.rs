@@ -137,6 +137,41 @@ pub fn wrap_run(exe: &Path, command: &str) -> (String, Vec<String>) {
     }
 }
 
+/// 选一个 PowerShell 来执行 .ps1：
+/// 设置里的终端若是 pwsh/powershell 就用它，否则依次退回 pwsh → 系统 powershell。
+pub fn powershell_for(configured: Option<&str>) -> PathBuf {
+    if let Some(c) = configured.map(str::trim).filter(|s| !s.is_empty()) {
+        let p = PathBuf::from(c);
+        let n = shell_name(&p);
+        if n == "pwsh" || n == "powershell" {
+            return p;
+        }
+    }
+
+    if let Some(p) = which("pwsh") {
+        return p;
+    }
+    system32(r"WindowsPowerShell\v1.0\powershell.exe")
+        .or_else(|| which("powershell"))
+        .unwrap_or_else(|| PathBuf::from("powershell.exe"))
+}
+
+/// 用 PowerShell 执行脚本：`-NoLogo -ExecutionPolicy Bypass -File "<script>" <args>`
+///
+/// `-ExecutionPolicy Bypass` 是必要的：系统策略若为 Restricted，脚本会被直接拒绝。
+/// 它只作用于本次进程，不改动用户机器的全局策略。
+pub fn wrap_ps1(powershell: &Path, script: &str, args: &[String]) -> (String, Vec<String>) {
+    let mut a = vec![
+        "-NoLogo".to_string(),
+        "-ExecutionPolicy".to_string(),
+        "Bypass".to_string(),
+        "-File".to_string(),
+        script.to_string(),
+    ];
+    a.extend(args.iter().cloned());
+    (powershell.display().to_string(), a)
+}
+
 /// PowerShell 单引号字面量：内部单引号翻倍，`$` 不会被展开
 pub fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -246,4 +281,5 @@ mod tests {
         assert!(args_for(Path::new("C:\\Windows\\System32\\cmd.exe")).is_empty());
     }
 }
+
 

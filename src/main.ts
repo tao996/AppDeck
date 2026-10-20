@@ -1965,6 +1965,152 @@ function splitArgs(text: string): string[] {
   return out;
 }
 
+/** 常用配置示例：新用户不知道占位符和脚本怎么写，给一份可照抄的清单 */
+function showUsageExamples(
+  apply: (ex: { program: string; args: string; cwd: string; scope: string }) => void,
+): void {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 760px">
+      <div class="modal-head">
+        <span>使用示例</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="ex-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">点示例右侧「填入」可直接写进当前表单</span>
+        <span class="flex1"></span>
+        <button class="btn primary" id="ex-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#ex-body") as HTMLDivElement;
+  const close = (): void => overlay.remove();
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#ex-close") as HTMLButtonElement).addEventListener("click", close);
+
+  const note = document.createElement("div");
+  note.className = "set-desc";
+  note.textContent =
+    "占位符：%FLUTTER% = 该项目的 flutter；%PROJECT% = 项目根目录；%CWD% = 实际工作目录。"
+    + " program / args / cwd 里都能用。";
+  body.appendChild(note);
+
+  const examples: Array<{
+    title: string;
+    desc: string;
+    program: string;
+    args: string;
+    cwd: string;
+    scope: string;
+  }> = [
+    {
+      title: "跑项目里的 PowerShell 脚本",
+      desc: "自动用 PowerShell 执行（含 -ExecutionPolicy Bypass），以项目根为工作目录",
+      program: String.raw`D:\demo\code\flutter\library\projects\jbook\build_abb.ps1`,
+      args: "",
+      cwd: "",
+      scope: "项目",
+    },
+    {
+      title: "脚本 + 传项目目录",
+      desc: "把项目根作为命名参数传进去（位置参数可能被脚本当成别的选项）",
+      program: String.raw`D:\path\to\i18n_update.ps1`,
+      args: "-ScanDir %PROJECT%",
+      cwd: "",
+      scope: "全局",
+    },
+    {
+      title: "只靠工作目录找项目",
+      desc: "脚本自己从 cwd 向上找 pubspec.yaml —— 全局模板最常用，任何项目都能跑",
+      program: String.raw`D:\path\to\tool.ps1`,
+      args: "",
+      cwd: "",
+      scope: "全局",
+    },
+    {
+      title: "用项目自己的 flutter",
+      desc: "鸿蒙工程会自动指向鸿蒙分支；配合 args 可执行任意 flutter 子命令",
+      program: "%FLUTTER%",
+      args: "pub get",
+      cwd: "",
+      scope: "全局",
+    },
+    {
+      title: "在子目录执行",
+      desc: "cwd 相对项目根，也可用 %PROJECT% 显式拼接",
+      program: "%FLUTTER%",
+      args: "pub get",
+      cwd: "%PROJECT%\\packages\\tao996",
+      scope: "项目",
+    },
+    {
+      title: "运行批处理",
+      desc: ".bat / .cmd 会自动经 cmd.exe 包装，无需自己拼 cmd /c",
+      program: String.raw`D:\path\to\build.bat`,
+      args: "--release",
+      cwd: "",
+      scope: "项目",
+    },
+  ];
+
+  for (const ex of examples) {
+    const card = document.createElement("div");
+    card.className = "ex-card";
+
+    const head = document.createElement("div");
+    head.className = "ex-head";
+
+    const title = document.createElement("span");
+    title.className = "ex-title";
+    title.textContent = ex.title;
+
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = ex.scope;
+
+    const fill = document.createElement("button");
+    fill.className = "btn";
+    fill.textContent = "填入";
+    fill.addEventListener("click", () => {
+      apply({ program: ex.program, args: ex.args, cwd: ex.cwd, scope: ex.scope });
+      close();
+      toast("已填入表单（记得点保存）");
+    });
+
+    head.append(title, chip, fill);
+    card.appendChild(head);
+
+    const desc = document.createElement("div");
+    desc.className = "set-desc";
+    desc.textContent = ex.desc;
+    card.appendChild(desc);
+
+    for (const [k, v] of [
+      ["程序", ex.program],
+      ["参数", ex.args || "（空）"],
+      ["cwd", ex.cwd || "（空 = 项目根）"],
+    ] as Array<[string, string]>) {
+      const line = document.createElement("div");
+      line.className = "ex-line";
+      const key = document.createElement("span");
+      key.className = "ex-key";
+      key.textContent = k;
+      const val = document.createElement("code");
+      val.textContent = v;
+      line.append(key, val);
+      card.appendChild(line);
+    }
+
+    body.appendChild(card);
+  }
+
+  document.body.appendChild(overlay);
+}
+
 async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> {
   const isTemplate = p === null;
   const overlay = document.createElement("div");
@@ -1979,6 +2125,7 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       <div class="modal-foot">
         <span class="modal-hint" id="cmd-hint"></span>
         <span class="flex1"></span>
+        <button class="btn" id="cmd-examples">使用示例</button>
         ${existing ? '<button class="btn" id="cmd-del">删除</button>' : ""}
         <button class="btn" id="cmd-cancel">取消</button>
         <button class="btn primary" id="cmd-save">保存</button>
@@ -2075,14 +2222,42 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       input(c1, draft.program, "%FLUTTER% 或 C:\\path\\to\\tool.exe", (v) => {
         draft.program = v;
       });
+      // 选脚本/可执行文件，省得手打长路径
+      const pick = document.createElement("button");
+      pick.className = "btn";
+      pick.textContent = "浏览…";
+      pick.title = "选择脚本或可执行文件";
+      pick.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const picked = await open({
+              multiple: false,
+              title: "选择要执行的程序",
+              filters: [
+                { name: "脚本与程序", extensions: ["ps1", "bat", "cmd", "exe"] },
+                { name: "全部文件", extensions: ["*"] },
+              ],
+              defaultPath: draft.program || undefined,
+            });
+            if (!picked) return;
+            draft.program = Array.isArray(picked) ? picked[0] : picked;
+            void build();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+      c1.appendChild(pick);
+
       const [, c2] = row("cwd");
-      input(c2, draft.cwd, "可空（相对项目根）", (v) => {
+      input(c2, draft.cwd, "可空（相对项目根，支持 %PROJECT%）", (v) => {
         draft.cwd = v;
       });
       const note = document.createElement("div");
       note.className = "set-desc";
       note.textContent =
-        "%FLUTTER% 会替换为该项目的 flutter 可执行文件；.bat / .cmd 会自动用 cmd 包装。";
+        "%FLUTTER% → 该项目的 flutter；%PROJECT% → 项目根；%CWD% → 实际工作目录。" +
+        ".ps1 自动用 PowerShell（含 -ExecutionPolicy Bypass）执行；.bat / .cmd 自动用 cmd 包装。";
       body.appendChild(note);
     } else if (draft.kind === "run") {
       const [, c1] = row("program");
@@ -2252,6 +2427,16 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#cmd-cancel") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#cmd-examples") as HTMLButtonElement).addEventListener("click", () =>
+    showUsageExamples((ex) => {
+      draft.program = ex.program;
+      draft.args = ex.args;
+      draft.cwd = ex.cwd;
+      draft.scope = ex.scope === "全局" ? "global" : "project";
+      void build();
+      toast("已填入表单，记得点「保存」");
+    }),
+  );
   overlay.addEventListener("mousedown", (e) => {
     if (e.target === overlay) close();
   });
@@ -3653,6 +3838,10 @@ async function boot(): Promise<void> {
       if (target) void openProjectTerminal(target);
     }
 
+    if (await invoke<string | null>("dev_env", { name: "FLA_EXAMPLES" })) {
+      showUsageExamples(() => {});
+    }
+
     const envHook = await invoke<string | null>("dev_env", { name: "FLA_ENV" });
     if (envHook) {
       const target = state.projects.find((x) => x.id === envHook);
@@ -3702,6 +3891,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
