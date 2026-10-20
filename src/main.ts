@@ -1619,13 +1619,36 @@ async function restoreSessions(): Promise<void> {
   }
   if (logs.length === 0) return;
 
+  // 同一身份（项目 + 命令/平台动作）只保留最新一条：
+  // 早期版本"重跑"是追加标签，会累积一堆同名死会话，恢复时全列出来只会让人分不清。
+  // id 形如 sess-<毫秒>-<序号>，按 id 比较即按时间比较。
+  const identity = (l: SessionLog): string =>
+    l.platform
+      ? `${l.projectId}|${l.platform}|${l.action}|${l.target ?? ""}`
+      : `${l.projectId}|${l.commandId ?? l.templateId ?? ""}`;
+
+  const newest = new Map<string, SessionLog>();
+  for (const l of logs) {
+    const k = identity(l);
+    const prev = newest.get(k);
+    if (!prev || l.id > prev.id) newest.set(k, l);
+  }
+  logs = Array.from(newest.values());
+
   for (const log of logs) {
+    // 老版本会话记录可能没有 kind：按它引用的命令/动作反推，
+    // 否则 run 会话会被当成其他类型（导致「重跑」不会替换标签）
+    const referenced = state.projects
+      .find((p) => p.id === log.projectId)
+      ?.commands.find((c) => c.id === log.commandId);
+    const inferredKind = log.platform ? "run" : (referenced?.kind ?? "run");
+
     const s: TermSession = {
       id: log.id,
       title: log.title,
       device: log.device || "—",
       mode: log.mode || "debug",
-      kind: log.kind || "run",
+      kind: log.kind || inferredKind,
       cwd: log.cwd || "",
       artifacts: log.artifacts ?? [],
       status: "stopped",
@@ -1663,7 +1686,9 @@ async function rerunSession(s: TermSession): Promise<void> {
       // run 会话：新开一个终端并预填命令（按 Enter 才执行），
       // 然后用它**替换**掉旧标签——flutter run 的会话没有"恢复现场"这回事，
       // 留一堆死标签只会让人分不清哪个是活的。
-      if (s.kind === "run") {
+      // 用命令本身的类型判定，而不是会话记录里的 kind——
+      // 老会话记录可能没有 kind 字段，会导致 run 走错分支（不替换标签）
+      if (cmd.kind === "run") {
         const oldId = s.id;
         try {
           const res = await invoke<StartResponse>("prefill_run", {
@@ -1698,14 +1723,22 @@ async function rerunSession(s: TermSession): Promise<void> {
 
   // 派生动作（平台菜单）：按平台重新走一遍，设备会重新解析
   if (s.platform && s.action) {
-    await runPlatformAction(project, s.platform, {
-      action: s.action,
-      command: "",
-      label: s.title,
-      target: s.target ?? null,
-      enabled: true,
-      reason: null,
-    });
+    // run 类：替换旧标签（flutter run 没有"恢复现场"，死标签只会混淆）
+    // build 类：保留旧标签，历史输出还有参考价值
+    const replaceId = s.action === "build" ? undefined : s.id;
+    await runPlatformAction(
+      project,
+      s.platform,
+      {
+        action: s.action,
+        command: "",
+        label: s.title,
+        target: s.target ?? null,
+        enabled: true,
+        reason: null,
+      },
+      replaceId,
+    );
     return;
   }
 
@@ -2608,6 +2641,8 @@ async function runPlatformAction(
   p: Proj,
   platform: string,
   a: PlatformAction,
+  /** 「重跑」时传旧会话 id：新会话挂上后再关旧的（替换而不是追加） */
+  replaceId?: string,
 ): Promise<void> {
   try {
     const res = await invoke<StartResponse>("start_platform_action", {
@@ -2629,6 +2664,7 @@ async function runPlatformAction(
         target: a.target ?? undefined,
       },
     );
+    if (replaceId) await closeSession(replaceId);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -3550,6 +3586,16 @@ async function boot(): Promise<void> {
   // D-10：恢复上次的 tab 壳与历史输出（进程不拉起）
   await restoreSessions();
 
+  // 开发期：FLA_RERUN=1 时自动对第一个恢复会话点一次「重跑」，
+  // 用于验证"替换标签"这类交互（无人值守也能截图核对）
+  if (await invoke<string | null>("dev_env", { name: "FLA_RERUN" })) {
+    const first = sessions[0];
+    if (first) {
+      activateSession(first.id);
+      window.setTimeout(() => void rerunSession(first), 600);
+    }
+  }
+
   // §14 体检：后台跑，不阻塞界面
   void refreshDoctor().then(async () => {
     if (await invoke<string | null>("dev_env", { name: "FLA_DOCTOR_DETAIL" })) {
@@ -3656,6 +3702,12 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
 
 
 
