@@ -178,18 +178,17 @@ pub fn fvm_declared(project: &Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-pub fn detect(project: &Path, custom: Option<&str>) -> FlutterInfo {
-    let (exe, source) = resolve(project, custom);
-    let Some(exe) = exe else {
-        return FlutterInfo {
-            source,
-            error: Some("未找到 flutter 可执行文件，请在设置中指定路径".to_string()),
-            ..Default::default()
-        };
-    };
-
+/// 用**指定的** exe 与环境探测版本。
+///
+/// 必须与 `ctx_for` 配套使用：只走 `resolve`（PATH/FVM）看不到鸿蒙分支，
+/// 会把鸿蒙工程显示成标准 flutter 的版本号。
+pub fn probe(exe: &Path, env: &[(String, String)], source: &str, project: &Path) -> FlutterInfo {
+    let source = source.to_string();
     let args = ["--version", "--suppress-analytics"];
-    let mut cmd = build_command(&exe, &args);
+    let mut cmd = build_command(exe, &args);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     hide_console(&mut cmd);
 
     let output = match cmd.output() {
@@ -458,7 +457,7 @@ pub fn ctx_for(
 
 #[cfg(test)]
 mod tests {
-    use super::{ctx_for, detect, env_for, fvm_env, is_harmony, resolve_for_project};
+    use super::{ctx_for, env_for, fvm_env, is_harmony, probe, resolve, resolve_for_project};
     use crate::model::{Project, State};
     use std::path::Path;
 
@@ -628,7 +627,12 @@ mod tests {
     /// 无 Flutter 的机器上直接跳过。
     #[test]
     fn detects_flutter_from_path() {
-        let info = detect(Path::new("."), None);
+        let (exe, source) = resolve(Path::new("."), None);
+        let Some(exe) = exe else {
+            eprintln!("跳过：本机未找到 flutter");
+            return;
+        };
+        let info = probe(&exe, &[], &source, Path::new("."));
 
         if info.source == "none" {
             eprintln!("跳过：本机未找到 flutter");
@@ -645,6 +649,7 @@ mod tests {
         assert!(info.dart.is_some(), "应解析出 Dart 版本");
     }
 }
+
 
 
 

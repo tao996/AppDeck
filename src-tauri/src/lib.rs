@@ -131,22 +131,23 @@ fn detect_flutter(app: AppHandle, project_id: String) -> Result<flutter::Flutter
         .find(|x| x.id == project_id)
         .ok_or_else(|| "项目不存在".to_string())?;
 
-    let custom = state
-        .settings
-        .flutter_tool
-        .custom_path
-        .clone()
-        .or_else(|| {
-            project
-                .flutter_tool
-                .as_ref()
-                .and_then(|f| f.custom_path.clone())
-        });
+    let root = PathBuf::from(&project.path);
 
-    Ok(flutter::detect(
-        PathBuf::from(&project.path).as_path(),
-        custom.as_deref(),
-    ))
+    // 必须走项目上下文：直接调 flutter::detect 只看 PATH/FVM，
+    // 会把鸿蒙工程显示成标准 flutter 的版本号（踩过）
+    match flutter::ctx_for(&state, project, &root) {
+        Ok(ctx) => Ok(flutter::probe(
+            &ctx.exe,
+            &ctx.env_with_path(),
+            &ctx.source,
+            &root,
+        )),
+        Err(e) => Ok(flutter::FlutterInfo {
+            source: "none".to_string(),
+            error: Some(e),
+            ..Default::default()
+        }),
+    }
 }
 
 /* ---------------- 会话 ---------------- */

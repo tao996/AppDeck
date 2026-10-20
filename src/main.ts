@@ -18,7 +18,8 @@ import "@xterm/xterm/css/xterm.css";
    Flutter Launcher — M2：ConPTY 终端
    ============================================================ */
 
-type FlutterSource = "fvm" | "custom" | "path" | "none";
+// harmony：鸿蒙工程改用 flutter_flutter 分支（后端 resolve_for_project 的返回值）
+type FlutterSource = "fvm" | "custom" | "path" | "harmony" | "none";
 type SessionStatus = "starting" | "running" | "stopped";
 
 interface Cmd {
@@ -279,7 +280,9 @@ function req<T extends Element>(sel: string, root: ParentNode = document): T {
 }
 
 function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (c) =>
+  // 防御：后端新增枚举值时不能让整个项目树渲染中断（踩过：source 加了 harmony，
+  // SOURCE_TEXT 没跟上，esc(undefined) 抛错导致后面的项目全部不渲染）
+  return String(s ?? "").replace(/[&<>"']/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] ?? c),
   );
 }
@@ -300,6 +303,7 @@ const SOURCE_TEXT: Record<FlutterSource, string> = {
   fvm: "FVM",
   custom: "自定义",
   path: "PATH",
+  harmony: "鸿蒙",
   none: "未检测",
 };
 
@@ -3548,6 +3552,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

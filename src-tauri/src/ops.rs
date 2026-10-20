@@ -542,7 +542,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn terminal_plan_injects_harmony_env_and_shim() {
         let root = std::env::temp_dir().join("fla_term_plan");
         let _ = std::fs::remove_dir_all(&root);
@@ -608,6 +607,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
     fn build_plan_uses_command_cwd_and_cmd_wrapper() {
         let Some(ws) = fixture() else {
             eprintln!("跳过：测试素材不存在");
@@ -895,5 +895,6 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
 
 
