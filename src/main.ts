@@ -435,7 +435,7 @@ function activateSession(id: string): void {
 
 function updateControls(): void {
   const s = activeSession();
-  const isRun = s?.status === "running" && s.mode === "debug";
+  const isRun = s?.status === "running" && s.mode === "debug" && s.kind === "run";
   req<HTMLButtonElement>("#btn-reload").disabled = !isRun;
   req<HTMLButtonElement>("#btn-restart").disabled = !isRun;
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
@@ -752,7 +752,10 @@ function mountSession(
     kind,
     cwd: res.cwd,
     artifacts: [],
-    status: "starting",
+    // 只有 `flutter run` 有明确的"就绪"标志（输出 Flutter run key commands.）。
+    // 其他类型（build / custom / terminal）没有这个标志，若从 starting 起步
+    // 就会永远黄点闪烁——终端尤其明显（shell 根本不退出）。
+    status: kind === "run" ? "starting" : "running",
     scan: "",
     projectId: origin?.projectId,
     commandId: origin?.commandId,
@@ -966,7 +969,7 @@ async function openProjectTerminal(p: Proj): Promise<void> {
       rows: 30,
       cols: 100,
     });
-    mountSession(res, "terminal", "debug", { projectId: p.id });
+    mountSession(res, "terminal", "terminal", { projectId: p.id });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -2276,6 +2279,13 @@ function renderMenuRows(parent: HTMLDivElement, rows: MenuRow[]): void {
       ${r.children ? '<span class="dm-caret">▸</span>' : ""}
     `;
 
+    // 鼠标移到任意一行：先关掉"不属于这一行"的二级菜单。
+    // 否则从「平台」滑到 iOS 这类无子项的行，旧的平台子菜单会一直挂着。
+    // 不能无脑 closeSubMenu()——本行若就在子菜单里，会把鼠标所在的菜单删掉。
+    el.addEventListener("mouseenter", () => {
+      if (subMenuEl && !subMenuEl.contains(el)) closeSubMenu();
+    });
+
     if (r.disabled) {
       el.title = r.detail ?? "";
     } else if (r.children) {
@@ -2498,6 +2508,15 @@ async function loadPlatformRows(
         (x) => x.querySelector(".dm-name")?.textContent === devSubmenu,
       );
       if (el) el.dispatchEvent(new MouseEvent("mouseenter"));
+
+      // 开发期：再"悬停"到另一行，验证旧子菜单是否被关掉
+      const hover = await invoke<string | null>("dev_env", { name: "FLA_HOVER" });
+      if (hover) {
+        const row = Array.from(
+          box.parentElement!.querySelectorAll<HTMLDivElement>(".dm-item"),
+        ).find((x) => x.querySelector(".dm-name")?.textContent === hover);
+        if (row) row.dispatchEvent(new MouseEvent("mouseenter"));
+      }
     }
   } catch (e) {
     if (projMenuEl !== menu) return;
@@ -3503,6 +3522,12 @@ async function boot(): Promise<void> {
     }
     devSubmenu = await invoke<string | null>("dev_env", { name: "FLA_SUBMENU" });
 
+    const termHook = await invoke<string | null>("dev_env", { name: "FLA_TERMINAL" });
+    if (termHook) {
+      const target = state.projects.find((x) => x.id === termHook);
+      if (target) void openProjectTerminal(target);
+    }
+
     const envHook = await invoke<string | null>("dev_env", { name: "FLA_ENV" });
     if (envHook) {
       const target = state.projects.find((x) => x.id === envHook);
@@ -3552,6 +3577,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 
