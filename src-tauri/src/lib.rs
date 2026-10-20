@@ -1,5 +1,6 @@
 mod android;
 mod apksig;
+mod cache;
 mod daemon;
 mod detect;
 mod doctor;
@@ -558,10 +559,20 @@ fn platform_matrix_impl(
     let pcache = app.state::<PlatformCache>();
 
     if !force {
+        // 1) 进程内缓存
         if let Ok(map) = pcache.0.lock() {
             if let Some(hit) = map.get(project_id) {
                 return Ok(hit.clone());
             }
+        }
+
+        // 2) 磁盘缓存（跨重启有效）
+        let disk = read_disk_cache(app);
+        if let Some(hit) = disk.platforms.get(project_id) {
+            if let Ok(mut map) = pcache.0.lock() {
+                map.insert(project_id.to_string(), hit.matrix.clone());
+            }
+            return Ok(hit.matrix.clone());
         }
     }
 
@@ -591,6 +602,7 @@ fn platform_matrix_impl(
     if let Ok(mut map) = pcache.0.lock() {
         map.insert(project_id.to_string(), matrix.clone());
     }
+    cache_matrix(app, project_id, &matrix);
 
     Ok(matrix)
 }
@@ -945,7 +957,7 @@ fn detect_toolchains() -> detect::Detected {
     detect::detect()
 }
 
-#[derive(serde::Serialize, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct EmulatorEntry {
     id: String,
@@ -954,12 +966,68 @@ struct EmulatorEntry {
     kind: String,
 }
 
-#[derive(serde::Serialize, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 struct AllEmulators {
     android: Vec<EmulatorEntry>,
     harmony: Vec<EmulatorEntry>,
     notes: Vec<String>,
+}
+
+/* ---------------- 磁盘缓存（跨重启有效） ---------------- */
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct DiskCache {
+    platforms: std::collections::HashMap<String, CachedMatrix>,
+    emulators: Option<CachedEmulators>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedMatrix {
+    saved_at: u64,
+    matrix: platforms::PlatformMatrix,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedEmulators {
+    saved_at: u64,
+    payload: AllEmulators,
+}
+
+fn read_disk_cache(app: &AppHandle) -> DiskCache {
+    cache::path_of(app)
+        .map(|p| cache::load::<DiskCache>(&p))
+        .unwrap_or_default()
+}
+
+fn write_disk_cache(app: &AppHandle, c: &DiskCache) {
+    if let Ok(p) = cache::path_of(app) {
+        let _ = cache::save(&p, c);
+    }
+}
+
+fn cache_matrix(app: &AppHandle, project_id: &str, matrix: &platforms::PlatformMatrix) {
+    let mut disk = read_disk_cache(app);
+    disk.platforms.insert(
+        project_id.to_string(),
+        CachedMatrix {
+            saved_at: logs::now_ms(),
+            matrix: matrix.clone(),
+        },
+    );
+    write_disk_cache(app, &disk);
+}
+
+fn cache_emulators(app: &AppHandle, payload: &AllEmulators) {
+    let mut disk = read_disk_cache(app);
+    disk.emulators = Some(CachedEmulators {
+        saved_at: logs::now_ms(),
+        payload: payload.clone(),
+    });
+    write_disk_cache(app, &disk);
 }
 
 /// 未显式配置时回退到自动探测结果，保证开箱即用
@@ -990,13 +1058,23 @@ fn effective_android(state: &State) -> model::AndroidSettings {
     }
 }
 
-/// 聚合两个来源：Android（emulator.exe，退化时用 flutter daemon）+ HarmonyOS（Emulator.exe -list）
+/// 聚合两个来源：Android（emulator.exe，退化时用 flutter daemon）+ HarmonyOS（Emulator.exe -list）。
+/// 结果落磁盘缓存，只有 `force`（菜单里的 ⟳）才重新检查。
 #[tauri::command]
 fn list_all_emulators(
     app: AppHandle,
     reg: tauri::State<'_, daemon::Daemons>,
     project_id: Option<String>,
+    force: Option<bool>,
 ) -> AllEmulators {
+    // 1) 命中磁盘缓存直接返回
+    if !force.unwrap_or(false) {
+        let disk = read_disk_cache(&app);
+        if let Some(hit) = disk.emulators {
+            return hit.payload;
+        }
+    }
+
     let mut out = AllEmulators::default();
 
     let state = match store::load(&app) {
@@ -1093,6 +1171,7 @@ fn list_all_emulators(
         Err(e) => out.notes.push(e),
     }
 
+    cache_emulators(&app, &out);
     out
 }
 
@@ -1195,6 +1274,8 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 

@@ -11,11 +11,14 @@ use crate::model::Project;
 use serde::Serialize;
 use std::path::Path;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformAction {
-    /// debug | profile | build
+    /// debug | profile | release | build
     pub action: String,
+    /// 菜单里直接显示的真实命令，如 `flutter run --debug`
+    pub command: String,
+    /// 中文简短说明
     pub label: String,
     /// build 时的构建目标（apk / appbundle / web / …）
     pub target: Option<String>,
@@ -23,7 +26,7 @@ pub struct PlatformAction {
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformEntry {
     pub id: String,
@@ -33,7 +36,7 @@ pub struct PlatformEntry {
     pub actions: Vec<PlatformAction>,
 }
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PlatformMatrix {
     pub platforms: Vec<PlatformEntry>,
@@ -182,8 +185,12 @@ pub fn matrix(
 
         let mut actions: Vec<PlatformAction> = Vec::new();
 
-        // 运行类：debug / profile
-        for (act, label) in [("debug", "调试运行"), ("profile", "性能分析运行")] {
+        // 运行类：debug / profile / release（三种 run 模式，菜单里直接显示真实命令）
+        for (act, label, command) in [
+            ("debug", "调试运行", "flutter run --debug"),
+            ("profile", "性能分析运行", "flutter run --profile"),
+            ("release", "发布模式运行（不打包）", "flutter run --release"),
+        ] {
             let (enabled, reason) = if !has_dir {
                 (false, Some(missing_dir()))
             } else if !host_supported {
@@ -197,6 +204,7 @@ pub fn matrix(
             };
             actions.push(PlatformAction {
                 action: act.to_string(),
+                command: command.to_string(),
                 label: label.to_string(),
                 target: None,
                 enabled,
@@ -216,6 +224,7 @@ pub fn matrix(
             };
             actions.push(PlatformAction {
                 action: "build".to_string(),
+                command: format!("flutter build {t} --release"),
                 label: target_label(t).to_string(),
                 target: Some((*t).to_string()),
                 enabled,
@@ -264,19 +273,25 @@ pub fn args_for(
     device_id: Option<&str>,
 ) -> Result<(Vec<String>, String, &'static str), String> {
     match action {
-        "debug" | "profile" => {
+        "debug" | "profile" | "release" => {
             let dev = device_id.ok_or_else(|| "没有可用设备".to_string())?;
             let mut args = vec!["run".to_string()];
-            if action == "profile" {
-                args.push("--profile".to_string());
-            }
+            let label = match action {
+                "profile" => {
+                    args.push("--profile".to_string());
+                    "性能分析运行"
+                }
+                "release" => {
+                    args.push("--release".to_string());
+                    "发布模式运行（不打包）"
+                }
+                _ => {
+                    args.push("--debug".to_string());
+                    "调试运行"
+                }
+            };
             args.push("-d".to_string());
             args.push(dev.to_string());
-            let label = if action == "profile" {
-                "性能分析运行"
-            } else {
-                "调试运行"
-            };
             Ok((args, label.to_string(), "run"))
         }
         "build" => {
@@ -372,6 +387,22 @@ mod tests {
             .filter(|a| a.action == "build")
             .collect();
         assert_eq!(android_builds.len(), 3);
+
+        let android_runs: Vec<_> = get("android")
+            .actions
+            .iter()
+            .filter(|a| a.action != "build")
+            .collect();
+        assert_eq!(android_runs.len(), 3, "应有 debug / profile / release 三种运行");
+        assert!(android_runs
+            .iter()
+            .any(|a| a.command == "flutter run --release"));
+        assert!(android_runs
+            .iter()
+            .any(|a| a.command == "flutter run --debug"));
+        assert!(android_builds
+            .iter()
+            .any(|a| a.command == "flutter build apk --release"));
         assert!(android_builds.iter().all(|a| a.enabled));
 
         // 没有 linux 设备 + 宿主不支持 → 全部不可用
@@ -427,6 +458,12 @@ mod tests {
         assert_eq!(label, "性能分析运行");
         assert_eq!(kind, "run");
 
+        // release 运行（不打包）——之前漏了这一项
+        let (args, label, kind) = args_for("android", "release", None, Some("windows")).unwrap();
+        assert_eq!(args, vec!["run", "--release", "-d", "windows"]);
+        assert!(label.contains("发布模式"));
+        assert_eq!(kind, "run");
+
         let (args, label, kind) = args_for("android", "build", Some("appbundle"), None).unwrap();
         assert_eq!(args, vec!["build", "appbundle", "--release"]);
         assert_eq!(label, "构建 AAB");
@@ -437,3 +474,4 @@ mod tests {
         assert!(args_for("android", "debug", None, None).is_err());
     }
 }
+

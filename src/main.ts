@@ -81,6 +81,8 @@ interface EmulatorEntry {
 
 interface PlatformAction {
   action: string;
+  /** 菜单里直接显示的真实命令，如 flutter run --debug */
+  command: string;
   label: string;
   target?: string | null;
   enabled: boolean;
@@ -1394,6 +1396,7 @@ async function rerunSession(s: TermSession): Promise<void> {
   if (s.platform && s.action) {
     await runPlatformAction(project, s.platform, {
       action: s.action,
+      command: "",
       label: s.title,
       target: s.target ?? null,
       enabled: true,
@@ -2207,15 +2210,16 @@ async function loadPlatformRows(
         });
         continue;
       }
-      const usable = pf.actions.filter((a) => a.enabled);
+      const usable = pf.actions.filter((a) => a.enabled).length;
+      const total = pf.actions.length;
       rows.push({
         kind: "item",
         name: pf.label,
-        detail: `${usable.length} 个动作`,
+        detail: usable === total ? `${total} 个动作` : `${usable}/${total} 可用`,
         children: pf.actions.map((a) => ({
           kind: "item" as const,
-          name: a.label,
-          detail: a.enabled ? undefined : (a.reason ?? "不可用"),
+          name: a.command,
+          detail: a.enabled ? a.label : `${a.label} · ${a.reason ?? "不可用"}`,
           disabled: !a.enabled,
           onClick: () => void runPlatformAction(p, pf.id, a),
         })),
@@ -2568,8 +2572,8 @@ function renderEmulatorBody(data: AllEmulators, error: string | null): void {
   }
 }
 
-/** 真正去查一次（首次打开或点刷新时） */
-async function loadEmulators(): Promise<void> {
+/** 真正去查一次。force=false 时后端会用磁盘缓存，跨重启也秒回。 */
+async function loadEmulators(force: boolean): Promise<void> {
   const menu = emuMenuEl;
   if (!menu) return;
 
@@ -2583,6 +2587,7 @@ async function loadEmulators(): Promise<void> {
   try {
     data = await invoke<AllEmulators>("list_all_emulators", {
       projectId: state.projects[0]?.id ?? null,
+      force,
     });
   } catch (e) {
     error = String(e);
@@ -2616,14 +2621,15 @@ function openEmulatorMenu(anchor: HTMLElement): void {
   document.body.appendChild(menu);
   emuMenuEl = menu;
 
+  // ⟳：强制重新检查电脑上的模拟器
   menu.querySelector(".dm-refresh")?.addEventListener("click", (e) => {
     e.stopPropagation();
-    void loadEmulators();
+    void loadEmulators(true);
   });
 
-  // 有缓存就直接渲染，不再查询
+  // 有内存缓存直接渲染；否则读磁盘缓存（后端），不再重新分析
   if (emulatorCache) renderEmulatorBody(emulatorCache, null);
-  else void loadEmulators();
+  else void loadEmulators(false);
 }
 
 
@@ -3125,6 +3131,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 

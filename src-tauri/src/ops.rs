@@ -679,7 +679,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn workspace_root_resolution_accepts_file_dir_and_vscode() {
         let tmp = std::env::temp_dir().join("fla_root_probe");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -708,7 +707,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn import_path_validates_launch_json_before_mutating() {
         // 有 pubspec 但没有 .vscode/launch.json：应报错且**不留下半个项目**
         let tmp = std::env::temp_dir().join("fla_import_nolaunch");
@@ -736,6 +734,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
     fn import_path_picks_kind_by_pubspec() {
         let tmp = std::env::temp_dir().join("fla_import_kind");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -775,6 +774,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    #[test]
     fn corrupted_state_is_backed_up() {
         let tmp = std::env::temp_dir().join("fla_m1_corrupt.json");
         fs::write(&tmp, "{ this is not json").unwrap();
@@ -788,3 +788,4 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+

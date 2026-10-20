@@ -49,8 +49,14 @@
 - **运行类置灰会说明原因**："没有可用设备（可先启动模拟器）"
 - **工作区项目不显示平台菜单**（根目录没有平台，跑哪个子应用是歧义的）
 - 派生动作**不落盘**；恢复后「⟳ 重跑」按平台重新解析设备
-- **结果缓存**：首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon（约十秒），
-  之后直接用缓存；右键菜单里有「重新分析平台信息」强制刷新
+- **菜单直接显示真实命令**：`flutter run --debug` / `flutter run --profile` /
+  `flutter run --release` / `flutter build apk --release` …，副行是中文说明
+- 三种运行模式齐全：调试、性能分析、**发布模式运行（不打包）**——后者容易被漏掉，
+  它是 `flutter run --release`，与 `flutter build`（只出产物、不运行）是两回事
+- **结果缓存（内存 + 磁盘）**：首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon
+  （约十秒），之后**跨重启**都直接用缓存；右键菜单里有「重新分析平台信息」强制刷新
+- 模拟器列表同样落磁盘缓存，菜单里的 ⟳ 才重新检查
+- 缓存在 `%APPDATA%\com.flutterlauncher.app\cache.json`，删掉即可强制全部重算
 - 分析在阻塞线程池执行，不会占住主线程卡界面
 
 **导入 launch.json 的判定**（`import_launch_path`）：先看目录有没有 `pubspec.yaml`——
@@ -328,6 +334,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 
