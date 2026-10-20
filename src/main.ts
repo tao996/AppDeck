@@ -491,10 +491,12 @@ function renderTabs(): void {
       (s.id === activeSessionId ? " active" : "") +
       (s.restored ? " restored" : "");
     el.title = `${STATUS_TEXT[s.status]} · ${s.device}${s.exitCode != null ? ` · 退出码 ${s.exitCode}` : ""}`;
+    // 设备位：占位符（— / 空）不渲染，否则标签上会多出一个没有意义的「—」
+    const hasDev = s.device && s.device !== "—" && s.device !== "-";
     el.innerHTML = `
       <span class="dot ${s.status === "running" ? "run" : s.status === "starting" ? "start" : "stop"}"></span>
       <span class="tab-title">${esc(s.title)}</span>
-      <span class="tab-dev">${esc(s.device)}</span>
+      ${hasDev ? `<span class="tab-dev">${esc(s.device)}</span>` : ""}
       <button class="tab-x" title="关闭会话">×</button>
     `;
     el.addEventListener("click", (e) => {
