@@ -441,10 +441,11 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
+  // 可重跑的会话：命令 / 模板 / 平台动作 / 终端
   rerun.disabled = !(
     s &&
     (s.restored || s.status === "stopped") &&
-    (s.commandId || s.templateId || (s.platform && s.action))
+    (s.commandId || s.templateId || (s.platform && s.action) || s.kind === "terminal")
   );
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
@@ -497,11 +498,17 @@ function renderTabs(): void {
       <span class="dot ${s.status === "running" ? "run" : s.status === "starting" ? "start" : "stop"}"></span>
       <span class="tab-title">${esc(s.title)}</span>
       ${hasDev ? `<span class="tab-dev">${esc(s.device)}</span>` : ""}
+      ${s.restored ? `<button class="tab-resume" title="历史输出已恢复，点此重新运行">恢复</button>` : ""}
       <button class="tab-x" title="关闭会话">×</button>
     `;
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest(".tab-x")) return;
+      if ((e.target as HTMLElement).closest(".tab-resume")) return;
       activateSession(s.id);
+    });
+    el.querySelector(".tab-resume")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void rerunSession(s);
     });
     el.querySelector(".tab-x")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -1646,6 +1653,12 @@ async function rerunSession(s: TermSession): Promise<void> {
       enabled: true,
       reason: null,
     });
+    return;
+  }
+
+  // 终端会话：重开一个终端（原来没有这个分支，导致「重跑」永远是灰的）
+  if (s.kind === "terminal") {
+    await openProjectTerminal(project);
     return;
   }
 
@@ -3579,6 +3592,8 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 

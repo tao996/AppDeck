@@ -1222,15 +1222,23 @@ select.set-input {
   font-style: italic;
 }
 
-.tab.restored::after {
-  content: "恢复";
+/* 恢复标记：做成按钮而不是伪元素，才能点（点了等于重跑） */
+.tab-resume {
   font-size: 9px;
   color: var(--fg-faint);
+  background: none;
   border: 1px solid var(--line-2);
   border-radius: 3px;
   padding: 0 3px;
   margin-left: 4px;
   line-height: 13px;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.tab-resume:hover {
+  color: #8fc6ff;
+  border-color: #3d5a7a;
 }
 
 #btn-rerun:not(:disabled) {
