@@ -279,6 +279,58 @@ pub fn build_plan(
 /// - `run` / `build`：调用 flutter，自动补 `run -d -t` 或 `build <type> --release`
 /// - `custom`：用户直接给程序与参数；`program` 支持 `%FLUTTER%` 占位符
 /// - 工作目录 = 项目根 + 命令的 `cwd`
+/// `flutter run` 的参数（供 build_plan_for 与「预填命令」共用，避免两处走偏）
+fn run_args(command: &Command, device: Option<&str>) -> Vec<String> {
+    let mut a = vec!["run".to_string()];
+    if let Some(d) = device {
+        a.push("-d".to_string());
+        a.push(d.to_string());
+    }
+    if let Some(p) = command.program.as_ref().filter(|p| !p.is_empty()) {
+        a.push("-t".to_string());
+        a.push(p.clone());
+    }
+    a.extend(command.tool_args.iter().cloned());
+    a.extend(command.args.iter().cloned());
+    a
+}
+
+/// 「预填」计划：开一个**普通交互终端**，命令只输入到提示符、不回车。
+/// 用户按 Enter 才真正执行——避免"点重跑就默默跑起来"。
+pub fn prefill_plan(
+    state: &State,
+    project: &Project,
+    command: &Command,
+) -> Result<(Plan, String), String> {
+    let cwd = match &command.cwd {
+        Some(c) if !c.trim().is_empty() => PathBuf::from(&project.path).join(c),
+        _ => PathBuf::from(&project.path),
+    };
+    if !cwd.is_dir() {
+        return Err(format!("工作目录不存在：{}", cwd.display()));
+    }
+
+    let ctx = crate::flutter::ctx_for(state, project, &cwd)?;
+    let term = crate::terminal::resolve(state.settings.terminal.path.as_deref());
+    let line = crate::terminal::command_line(
+        &term,
+        &ctx.exe.display().to_string(),
+        &run_args(command, command.device_id.as_deref()),
+    );
+
+    Ok((
+        Plan {
+            program: term.display().to_string(),
+            args: crate::terminal::args_for(&term),
+            cwd,
+            title: format!("{} · {}", project.name, command.name),
+            device: "—".to_string(),
+            env: ctx.env_with_path(),
+        },
+        line,
+    ))
+}
+
 pub fn build_plan_for(
     state: &State,
     project: &Project,
@@ -377,7 +429,16 @@ pub fn build_plan_for(
             flutter_args.extend(command.tool_args.iter().cloned());
             flutter_args.extend(command.args.iter().cloned());
 
-            wrap_batch(exe.display().to_string(), flutter_args)
+            if kind == "run" {
+                // run 走「shell + 命令 + 哨兵」：命令结束后终端仍在（可以接着用），
+                // 而 flutter run 独占终端，所以要靠哨兵判定它什么时候退出。
+                let term = crate::terminal::resolve(state.settings.terminal.path.as_deref());
+                let line =
+                    crate::terminal::command_line(&term, &exe.display().to_string(), &flutter_args);
+                crate::terminal::wrap_run(&term, &line)
+            } else {
+                wrap_batch(exe.display().to_string(), flutter_args)
+            }
         }
     };
 
@@ -631,22 +692,33 @@ mod tests {
             "实际 cwd: {}",
             plan.cwd.display()
         );
-        // .bat 经 cmd.exe /d /c 启动（不能带 /s）
-        assert_eq!(plan.program, "cmd.exe");
-        assert_eq!(plan.args[0], "/d");
-        assert_eq!(plan.args[1], "/c");
+        // run 走 shell 模式：program 是终端，命令作为文本交给 -Command，
+        // 并附带哨兵用于判定 flutter run 何时退出
+        let joined = plan.args.join(" ");
         assert!(
-            plan.args[2].to_ascii_lowercase().ends_with("flutter.bat")
-                || plan.args[2].to_ascii_lowercase().ends_with("flutter"),
-            "应指向 flutter 可执行文件，实际: {}",
-            plan.args[2]
+            ["pwsh.exe", "powershell.exe", "cmd.exe"]
+                .iter()
+                .any(|e| plan.program.to_ascii_lowercase().ends_with(e)),
+            "run 应由终端承载，实际: {}",
+            plan.program
         );
-        // flutter 子命令与参数
-        assert!(plan.args.contains(&"run".to_string()));
-        assert!(!plan.args.contains(&"--release".to_string()), "run 不该带 --release");
         assert!(
-            plan.args.iter().any(|a| a == "--dart-define=APP_CHANNEL=cn"),
-            "应保留自定义 args"
+            joined.contains("-NoExit") || joined.contains("/k"),
+            "shell 应保持交互，实际: {joined}"
+        );
+        assert!(
+            joined.contains(crate::terminal::RUN_END_MARKER),
+            "应带退出哨兵，实际: {joined}"
+        );
+        assert!(
+            joined.to_ascii_lowercase().contains("flutter"),
+            "命令行里应有 flutter，实际: {joined}"
+        );
+        assert!(joined.contains("run"), "应是 run 子命令，实际: {joined}");
+        assert!(!joined.contains("--release"), "run 不该带 --release");
+        assert!(
+            joined.contains("--dart-define=APP_CHANNEL=cn"),
+            "应保留自定义 args，实际: {joined}"
         );
         assert_eq!(plan.device, "自动");
     }

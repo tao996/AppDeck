@@ -193,6 +193,8 @@ interface StartResponse {
   cwd: string;
   program: string;
   args: string[];
+  /** 预填到终端提示符、不回车（按 Enter 才执行） */
+  prefill?: string | null;
 }
 
 interface DevAutostart {
@@ -237,6 +239,8 @@ interface TermSession {
   scan: string;
   /** 恢复自磁盘（进程未运行，禁止写 PTY） */
   restored?: boolean;
+  /** run 会话里 flutter 是否正在运行（决定热重载工具条显不显示） */
+  flutterRunning?: boolean;
   projectId?: string;
   commandId?: string;
   templateId?: string;
@@ -440,9 +444,14 @@ function activateSession(id: string): void {
 
 function updateControls(): void {
   const s = activeSession();
-  const isRun = s?.status === "running" && s.mode === "debug" && s.kind === "run";
-  req<HTMLButtonElement>("#btn-reload").disabled = !isRun;
-  req<HTMLButtonElement>("#btn-restart").disabled = !isRun;
+  // flutter 专有的一组（热重载/热重启/DevTools）：只有 run 会话且 flutter 真的在跑时才出现。
+  // 普通终端（右键「在终端中打开」）不该看到它们。
+  const running = s?.kind === "run" && s.flutterRunning === true;
+  const tools = req<HTMLSpanElement>("#flutter-tools");
+  tools.hidden = !running;
+
+  req<HTMLButtonElement>("#btn-reload").disabled = !running;
+  req<HTMLButtonElement>("#btn-restart").disabled = !running;
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
@@ -775,6 +784,15 @@ function mountSession(
   };
   sessions.push(session);
   activateSession(session.id);
+
+  // 预填：等 shell 起好再输入（不回车，用户按 Enter 才执行）
+  if (res.prefill) {
+    const text = res.prefill;
+    window.setTimeout(() => {
+      void invoke("write_session", { id: res.id, data: text }).catch(() => {});
+    }, 450);
+  }
+
   // 立刻落盘一次：即使进程还在跑就关掉应用，tab 壳也不会丢
   schedulePersist();
   requestAnimationFrame(() => {
@@ -1638,6 +1656,25 @@ async function rerunSession(s: TermSession): Promise<void> {
   if (s.commandId) {
     const cmd = project.commands.find((c) => c.id === s.commandId);
     if (cmd) {
+      // run 会话：开终端并预填命令，按 Enter 才执行
+      // （避免"点重跑就默默跑起来"，也和 shell 模式保持一致）
+      if (s.kind === "run") {
+        try {
+          const res = await invoke<StartResponse>("prefill_run", {
+            projectId: project.id,
+            commandId: cmd.id,
+            rows: 30,
+            cols: 100,
+          });
+          mountSession(res, "run", "debug", {
+            projectId: project.id,
+            commandId: cmd.id,
+          });
+        } catch (e) {
+          toast(String(e), "error");
+        }
+        return;
+      }
       await runCommand(project, cmd);
       return;
     }
@@ -1697,6 +1734,17 @@ function handleOutput(id: string, data: string): void {
 
   if (s.status !== "running" && s.scan.includes("Flutter run key commands.")) {
     s.status = "running";
+    s.flutterRunning = true;
+    renderTabs();
+    updateControls();
+  }
+
+  // 哨兵：shell 模式下 flutter run 退出时会打印（前后被 ESC[2K\r 抹掉，用户看不见）
+  const runEnd = s.scan.match(/__FLA_RUN_END__:(-?\d+)/);
+  if (runEnd && s.flutterRunning) {
+    s.flutterRunning = false;
+    s.status = "stopped";
+    s.exitCode = Number(runEnd[1]);
     renderTabs();
     updateControls();
   }
@@ -3366,10 +3414,12 @@ async function boot(): Promise<void> {
       <div class="main">
         <section class="left">
           <div class="term-controls">
-            <button class="cbtn" id="btn-reload" disabled><i class="hi">⚡</i>热重载</button>
-            <button class="cbtn" id="btn-restart" disabled><i class="hi">🔄</i>热重启</button>
+            <span class="flutter-tools" id="flutter-tools">
+              <button class="cbtn" id="btn-reload" disabled><i class="hi">⚡</i>热重载</button>
+              <button class="cbtn" id="btn-restart" disabled><i class="hi">🔄</i>热重启</button>
+              <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
+            </span>
             <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
-            <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
             <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
@@ -3594,6 +3644,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 

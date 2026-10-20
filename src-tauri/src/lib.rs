@@ -161,6 +161,9 @@ struct StartResponse {
     cwd: String,
     program: String,
     args: Vec<String>,
+    /// 「预填」用：需要输入到终端提示符、但**不回车**的命令行
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prefill: Option<String>,
 }
 
 fn session_of(
@@ -218,6 +221,7 @@ fn start_session(
         cwd: plan.cwd.display().to_string(),
         program: plan.program,
         args: plan.args,
+        prefill: None,
     })
 }
 
@@ -275,6 +279,7 @@ fn start_template_session(
         cwd: plan.cwd.display().to_string(),
         program: plan.program,
         args: plan.args,
+        prefill: None,
     })
 }
 
@@ -707,6 +712,63 @@ fn start_platform_action(
         cwd: plan.cwd.display().to_string(),
         program: plan.program,
         args: plan.args,
+        prefill: None,
+    })
+}
+
+/// 恢复的 run 会话「重跑」：开终端并把命令预填到提示符，不自动执行
+#[tauri::command]
+fn prefill_run(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    command_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    let command = project
+        .commands
+        .iter()
+        .find(|c| c.id == command_id)
+        .ok_or_else(|| "命令不存在".to_string())?;
+
+    let (plan, line) = ops::prefill_plan(&state, project, command)?;
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let id = format!("sess-{}-{seq}", logs::now_ms());
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    let pid = session.pid;
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session);
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title: plan.title,
+        device: "—".to_string(),
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+        prefill: Some(line),
     })
 }
 
@@ -763,6 +825,7 @@ fn open_terminal(
         cwd: plan.cwd.display().to_string(),
         program: plan.program,
         args: plan.args,
+        prefill: None,
     })
 }
 
@@ -995,6 +1058,7 @@ fn start_doctor_fix(
         cwd: plan.cwd.display().to_string(),
         program: plan.program,
         args: plan.args,
+        prefill: None,
     })
 }
 
@@ -1446,6 +1510,7 @@ pub fn run() {
             save_project_env,
             detect_terminals,
             open_terminal,
+            prefill_run,
             detect_toolchains,
             flutter_doctor,
             start_doctor_fix,
@@ -1460,6 +1525,8 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 
