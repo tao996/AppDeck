@@ -66,6 +66,10 @@ interface SettingsModel {
     /** 全局鸿蒙环境变量（仅注入有 ohos/ 的工程） */
     env: Record<string, string>;
   };
+  terminal: {
+    /** 终端可执行文件；留空自动探测 */
+    path: string | null;
+  };
 }
 
 interface Detected {
@@ -156,6 +160,7 @@ function defaultSettings(): SettingsModel {
       sdkPath: null,
       env: {},
     },
+    terminal: { path: null },
   };
 }
 
@@ -948,6 +953,20 @@ async function removeProject(p: Proj): Promise<void> {
 }
 
 /* ---------------- PTY 事件 ---------------- */
+
+/** 在项目目录开一个交互终端（继承项目环境）。 */
+async function openProjectTerminal(p: Proj): Promise<void> {
+  try {
+    const res = await invoke<StartResponse>("open_terminal", {
+      projectId: p.id,
+      rows: 30,
+      cols: 100,
+    });
+    mountSession(res, "terminal", "debug", { projectId: p.id });
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
 
 /* ---------------- 项目环境变量 ---------------- */
 
@@ -2384,6 +2403,13 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
     });
   }
 
+  tail.push({
+    kind: "item",
+    name: "在终端中打开",
+    detail: "注入项目环境后开一个交互终端",
+    onClick: () => void openProjectTerminal(p),
+  });
+
   if (!isCommandSet) {
     tail.push({
       kind: "item",
@@ -3156,6 +3182,74 @@ function openSettings(): void {
       };
       renderEnv();
     }
+
+    // 默认终端
+    {
+      const s = section("终端", "项目右键「在终端中打开」使用；留空则自动探测");
+      field(s, "终端程序", draft.terminal?.path ?? "", (v) => {
+        const t = (v ?? "").trim();
+        draft.terminal = { path: t === "" ? null : t };
+      });
+
+      const bar = document.createElement("div");
+      bar.className = "set-desc";
+      bar.style.display = "flex";
+      bar.style.gap = "8px";
+      bar.style.alignItems = "center";
+
+      const detectBtn = document.createElement("button");
+      detectBtn.className = "btn";
+      detectBtn.textContent = "从系统读取";
+      detectBtn.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const list = await invoke<Array<{ name: string; path: string }>>("detect_terminals");
+            if (list.length === 0) {
+              toast("没有检测到可用终端", "error");
+              return;
+            }
+            draft.terminal = { path: list[0].path };
+            const more = list.slice(1).map((x) => x.name).join("、");
+            toast(`已选择 ${list[0].name}${more ? `；系统还检测到：${more}` : ""}`);
+            build();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      const browseBtn = document.createElement("button");
+      browseBtn.className = "btn";
+      browseBtn.textContent = "浏览 exe…";
+      browseBtn.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const picked = await open({
+              multiple: false,
+              title: "选择终端可执行文件",
+              filters: [{ name: "可执行文件", extensions: ["exe"] }],
+              defaultPath: draft.terminal?.path ?? undefined,
+            });
+            if (!picked) return;
+            const p = Array.isArray(picked) ? picked[0] : picked;
+            draft.terminal = { path: p };
+            build();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      bar.append(detectBtn, browseBtn);
+      s.appendChild(bar);
+
+      const hint = document.createElement("div");
+      hint.className = "set-desc";
+      hint.textContent =
+        "打开的终端会继承项目环境：鸿蒙工程自动注入全局/项目变量并前置 PATH shim，" +
+        "可直接敲 flutter --version。";
+      s.appendChild(hint);
+    }
   };
 
   build();
@@ -3454,6 +3548,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 

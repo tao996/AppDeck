@@ -97,6 +97,16 @@ pub struct Settings {
     pub android: AndroidSettings,
     #[serde(default)]
     pub harmony: HarmonySettings,
+    #[serde(default)]
+    pub terminal: TerminalSettings,
+}
+
+/// 默认终端（项目右键「在终端中打开」使用）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TerminalSettings {
+    /// 终端可执行文件路径；留空则自动探测（pwsh > wt > powershell > cmd > bash）
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

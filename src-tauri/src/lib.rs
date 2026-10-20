@@ -15,6 +15,7 @@ mod model;
 mod ops;
 mod pty;
 mod store;
+mod terminal;
 
 use model::State;
 use std::path::PathBuf;
@@ -708,6 +709,62 @@ fn start_platform_action(
     })
 }
 
+/* ---------------- 终端 ---------------- */
+
+#[tauri::command]
+fn detect_terminals() -> Vec<terminal::TerminalCandidate> {
+    terminal::detect()
+}
+
+/// 在终端中打开项目目录，注入项目环境（鸿蒙工程会带上变量与 PATH shim）
+#[tauri::command]
+fn open_terminal(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let plan = ops::terminal_plan(&state, project, rows, cols)?;
+
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let id = format!("sess-{}-{seq}", logs::now_ms());
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    let pid = session.pid;
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session);
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title: plan.title,
+        device: "—".to_string(),
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+    })
+}
+
 /* ---------------- 备案信息 ---------------- */
 
 #[tauri::command]
@@ -1386,6 +1443,8 @@ pub fn run() {
             save_settings,
             project_env,
             save_project_env,
+            detect_terminals,
+            open_terminal,
             detect_toolchains,
             flutter_doctor,
             start_doctor_fix,
@@ -1400,6 +1459,8 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 

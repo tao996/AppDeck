@@ -394,6 +394,46 @@ pub fn build_plan_for(
 
 /// 供体检修复等场景使用：用该项目解析出的 flutter 执行给定参数。
 /// 参数由调用方**白名单**产生，不接受 doctor 输出里的任意字符串。
+/// 「在终端中打开」：起一个交互终端，**注入项目环境**（鸿蒙工程尤其需要）。
+///
+/// 这不是为了跑 flutter 命令——而是让人能在正确的环境里手敲 `flutter --version`、
+/// `flutter doctor` 这类需要现场看输出的操作。
+pub fn terminal_plan(
+    state: &State,
+    project: &Project,
+    rows: u16,
+    cols: u16,
+) -> Result<Plan, String> {
+    let _ = (rows, cols);
+
+    let cwd = PathBuf::from(&project.path);
+    if !cwd.is_dir() {
+        return Err(format!("工作目录不存在：{}", cwd.display()));
+    }
+
+    let term = crate::terminal::resolve(state.settings.terminal.path.as_deref());
+    let args = crate::terminal::args_for(&term);
+
+    // 环境：鸿蒙工程带上全局/项目变量与 PATH shim；普通项目只带 .fvmrc
+    let env = crate::flutter::ctx_for(state, project, &cwd)
+        .map(|c| c.env_with_path())
+        .unwrap_or_else(|_| crate::flutter::env_for(state, project));
+
+    let name = term
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "终端".to_string());
+
+    Ok(Plan {
+        program: term.display().to_string(),
+        args,
+        cwd,
+        title: format!("{} · {name}", project.name),
+        device: "—".to_string(),
+        env,
+    })
+}
+
 pub fn flutter_adhoc_plan(
     state: &State,
     project: &Project,
@@ -502,6 +542,72 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn terminal_plan_injects_harmony_env_and_shim() {
+        let root = std::env::temp_dir().join("fla_term_plan");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("ohos")).unwrap();
+
+        // 伪造鸿蒙 flutter 分支
+        let fake = root.join("fake_flutter");
+        std::fs::create_dir_all(fake.join("bin")).unwrap();
+        let bin = fake
+            .join("bin")
+            .join(if cfg!(windows) { "flutter.bat" } else { "flutter" });
+        std::fs::write(&bin, b"@echo off\r\n").unwrap();
+
+        let mut state = State::default();
+        state.settings.harmony.flutter_path = Some(fake.display().to_string());
+        state
+            .settings
+            .harmony
+            .env
+            .insert("DEVECO_SDK_HOME".into(), "D:/sdk".into());
+
+        let project = Project {
+            id: "proj-term".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "single".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+
+        let plan = terminal_plan(&state, &project, 30, 100).unwrap();
+
+        assert_eq!(plan.cwd, root);
+        assert!(
+            plan.env
+                .iter()
+                .any(|(k, v)| k == "DEVECO_SDK_HOME" && v == "D:/sdk"),
+            "终端应注入鸿蒙环境变量：{:?}",
+            plan.env
+        );
+
+        let path = plan
+            .env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.clone());
+        assert!(path.is_some(), "鸿蒙工程的终端应前置 PATH shim");
+        assert!(
+            path.unwrap().contains("com.flutterlauncher.app"),
+            "PATH 应包含 shim 目录"
+        );
+
+        // 收尾：shim 与临时目录
+        if let Some(dir) = plan
+            .env
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+            .map(|(_, v)| v.split(';').next().unwrap_or("").to_string())
+        {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn build_plan_uses_command_cwd_and_cmd_wrapper() {
         let Some(ws) = fixture() else {
             eprintln!("跳过：测试素材不存在");
