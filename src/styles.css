@@ -1591,3 +1591,24 @@ select.set-input {
   color: #9fd4ff;
   word-break: break-all;
 }
+
+/* 设置页底部版本信息 */
+.set-version {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  margin-right: 10px;
+}
+
+/* 普通按钮的警告色（删除这类不可逆操作） */
+.btn.danger {
+  color: #f08a8a;
+  border-color: #6b3030;
+}
+
+.btn.danger:hover {
+  color: #ff9d9d;
+  border-color: #8f3f3f;
+  background: #2a1a1a;
+}
+

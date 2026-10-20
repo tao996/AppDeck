@@ -2111,6 +2111,9 @@ function showUsageExamples(
   document.body.appendChild(overlay);
 }
 
+/** 模板库窗口开着时，保存模板后要立刻刷新列表（否则得关掉重开才看到） */
+let templateListRefresh: (() => void) | null = null;
+
 async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> {
   const isTemplate = p === null;
   const overlay = document.createElement("div");
@@ -2510,6 +2513,8 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
           : await invoke<State>("upsert_command", { projectId: p!.id, command: cmd });
         close();
         render();
+        // 模板库窗口还开着时要立刻刷新，否则要关掉重开才看得到新模板
+        if (isTemplate) templateListRefresh?.();
         toast(existing ? "已更新" : isTemplate ? "模板已保存" : "命令已添加");
       } catch (e) {
         hint.textContent = String(e);
@@ -2870,7 +2875,6 @@ function openTemplateManager(): void {
       <div class="modal-foot">
         <span class="modal-hint">新建「单应用」项目时会自动套用这些模板</span>
         <span class="flex1"></span>
-        <button class="btn" id="tpl-reset">恢复默认</button>
         <button class="btn" id="tpl-new">＋ 新建模板</button>
         <button class="btn primary" id="tpl-close">关闭</button>
       </div>
@@ -2878,14 +2882,17 @@ function openTemplateManager(): void {
   `;
   document.body.appendChild(overlay);
   const body = overlay.querySelector("#tpl-body") as HTMLDivElement;
-  const close = (): void => overlay.remove();
+  const close = (): void => {
+    templateListRefresh = null;
+    overlay.remove();
+  };
 
   const renderList = (): void => {
     body.innerHTML = "";
     if (state.commandTemplates.length === 0) {
       const e = document.createElement("div");
       e.className = "set-desc";
-      e.textContent = "模板库为空。可「新建模板」，或点「恢复默认」载入内置模板。";
+      e.textContent = "模板库为空，点「＋ 新建模板」添加。";
       body.appendChild(e);
       return;
     }
@@ -2910,7 +2917,7 @@ function openTemplateManager(): void {
       edit.addEventListener("click", () => void openCommandDialog(null, t));
 
       const del = document.createElement("button");
-      del.className = "btn";
+      del.className = "btn danger";
       del.textContent = "删除";
       del.addEventListener("click", () => {
         void (async () => {
@@ -2936,6 +2943,8 @@ function openTemplateManager(): void {
   };
 
   renderList();
+  // 让「新建/编辑模板」保存后能立刻刷新这个列表（否则得关掉重开才看到）
+  templateListRefresh = renderList;
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#tpl-close") as HTMLButtonElement).addEventListener("click", close);
@@ -2945,19 +2954,6 @@ function openTemplateManager(): void {
 
   (overlay.querySelector("#tpl-new") as HTMLButtonElement).addEventListener("click", () => {
     void openCommandDialog(null);
-  });
-
-  (overlay.querySelector("#tpl-reset") as HTMLButtonElement).addEventListener("click", () => {
-    void (async () => {
-      try {
-        state = await invoke<State>("reset_templates");
-        renderList();
-        render();
-        toast("已恢复默认模板");
-      } catch (e) {
-        toast(String(e), "error");
-      }
-    })();
   });
 }
 
@@ -3226,6 +3222,7 @@ function openSettings(): void {
       </div>
       <div class="modal-body" id="settings-body"></div>
       <div class="modal-foot">
+        <span class="set-version" id="settings-version"></span>
         <span class="modal-hint" id="settings-hint"></span>
         <span class="flex1"></span>
         <button class="btn" id="set-detect">自动检测</button>
@@ -3243,6 +3240,11 @@ function openSettings(): void {
   ) as SettingsModel;
 
   const close = (): void => overlay.remove();
+
+  // 版本信息：原来在工具栏上，移到设置页底部（固定可见，不用滚到底）
+  (
+    overlay.querySelector("#settings-version") as HTMLSpanElement
+  ).textContent = `Flutter Launcher · state schema v${state.schemaVersion}`;
 
   const section = (title: string, desc: string): HTMLDivElement => {
     const s = document.createElement("div");
@@ -3625,7 +3627,6 @@ async function boot(): Promise<void> {
         <div class="brand">
           <span class="logo">◆</span>
           <span class="title">Flutter Launcher</span>
-          <span class="badge-m0">设置 · 模拟器</span>
         </div>
         <div class="tb-center">
           <button class="btn primary" id="btn-add">＋ 添加 Flutter 项目</button>
@@ -3635,7 +3636,6 @@ async function boot(): Promise<void> {
           <button class="btn" id="btn-filing" title="安卓备案信息：选择 APK 查看包名 / MD5 / 公钥">📋 备案</button>
           <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
           <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
-          <span class="tb-meta" id="tb-meta">—</span>
           <button class="btn icon" id="btn-settings" title="设置">⚙</button>
         </div>
       </header>
@@ -3765,7 +3765,6 @@ async function boot(): Promise<void> {
   }
 
   render();
-  req<HTMLSpanElement>("#tb-meta").textContent = `schema v${state.schemaVersion}`;
   for (const p of state.projects) void refreshFlutter(p.id);
 
   // D-10：恢复上次的 tab 壳与历史输出（进程不拉起）
@@ -3891,6 +3890,11 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
 
 
 
