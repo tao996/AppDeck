@@ -72,7 +72,61 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  min-width: 260px;
+  flex: 0 0 auto;
+}
+
+/* 工具栏菜单条：紧贴 logo 右侧 */
+.tb-menu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.menu-btn {
+  font-weight: 500;
+}
+
+/* 导入下拉 */
+.import-menu {
+  min-width: 300px;
+  padding: 4px;
+}
+
+/* 覆盖 .dm-item 的竖排：导入菜单是「图标 + 名称 + 说明」一行 */
+.device-menu.import-menu .import-item {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.import-item:not(.disabled):hover {
+  background: #2b3240;
+}
+
+.import-icon {
+  width: 18px;
+  text-align: center;
+  opacity: 0.9;
+}
+
+.import-label {
+  flex: 1;
+  font-size: 12.5px;
+}
+
+.import-hint {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+}
+
+.import-item.disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .brand .logo {
@@ -1611,4 +1665,6 @@ select.set-input {
   border-color: #8f3f3f;
   background: #2a1a1a;
 }
+
+
 

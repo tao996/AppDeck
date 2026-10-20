@@ -3176,6 +3176,114 @@ async function loadEmulators(force: boolean): Promise<void> {
   renderEmulatorBody(data ?? { android: [], harmony: [], notes: [] }, error);
 }
 
+/* ---------------- 工具栏「导入」菜单 ---------------- */
+
+let importMenuEl: HTMLDivElement | null = null;
+
+function closeImportMenu(): void {
+  importMenuEl?.remove();
+  importMenuEl = null;
+}
+
+/** 工具栏的「导入」下拉：项目 / launch.json 可用，package.json 与 docker-compose 先占位 */
+function openImportMenu(anchor: HTMLElement): void {
+  if (importMenuEl) {
+    closeImportMenu();
+    return;
+  }
+
+  const rect = anchor.getBoundingClientRect();
+  const menu = document.createElement("div");
+  menu.className = "device-menu import-menu";
+  menu.style.left = `${Math.max(8, rect.left)}px`;
+  menu.style.top = `${rect.bottom + 4}px`;
+  document.body.appendChild(menu);
+  importMenuEl = menu;
+
+  type Item = {
+    icon: string;
+    label: string;
+    hint: string;
+    disabled?: boolean;
+    run?: () => void;
+  };
+
+  const items: Item[] = [
+    {
+      icon: "＋",
+      label: "添加 Flutter 项目",
+      hint: "选择项目目录",
+      run: () => void addProject(),
+    },
+    {
+      icon: "📂",
+      label: "导入 launch.json",
+      hint: ".vscode/launch.json",
+      run: () => void importLaunchPath(),
+    },
+    {
+      icon: "📦",
+      label: "导入 package.json",
+      hint: "暂未实现",
+      disabled: true,
+    },
+    {
+      icon: "🐳",
+      label: "导入 docker-compose.yaml",
+      hint: "暂未实现",
+      disabled: true,
+    },
+  ];
+
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "dm-item import-item" + (it.disabled ? " disabled" : "");
+
+    const icon = document.createElement("span");
+    icon.className = "import-icon";
+    icon.textContent = it.icon;
+
+    const label = document.createElement("span");
+    label.className = "import-label";
+    label.textContent = it.label;
+
+    const hint = document.createElement("span");
+    hint.className = "import-hint";
+    hint.textContent = it.hint;
+
+    row.append(icon, label, hint);
+
+    if (!it.disabled && it.run) {
+      row.addEventListener("click", () => {
+        closeImportMenu();
+        it.run!();
+      });
+    } else {
+      row.title = "暂未实现";
+    }
+
+    menu.appendChild(row);
+  }
+
+  const dismiss = (e: MouseEvent): void => {
+    const t = e.target as Node;
+    if (importMenuEl && !importMenuEl.contains(t) && !anchor.contains(t)) {
+      closeImportMenu();
+      document.removeEventListener("mousedown", dismiss);
+    }
+  };
+  document.addEventListener("mousedown", dismiss);
+
+  // Esc 关闭
+  const onKey = (e: KeyboardEvent): void => {
+    if (e.key === "Escape") {
+      closeImportMenu();
+      document.removeEventListener("keydown", onKey);
+    }
+  };
+  document.addEventListener("keydown", onKey);
+}
+
 function openEmulatorMenu(anchor: HTMLElement): void {
   if (emuMenuEl) {
     closeEmuMenu();
@@ -3626,12 +3734,11 @@ async function boot(): Promise<void> {
       <header class="toolbar">
         <div class="brand">
           <span class="logo">◆</span>
-          <span class="title">Flutter Launcher</span>
         </div>
-        <div class="tb-center">
-          <button class="btn primary" id="btn-add">＋ 添加 Flutter 项目</button>
-          <button class="btn" id="btn-import">📂 导入 launch.json</button>
+        <div class="tb-menu">
+          <button class="btn menu-btn" id="btn-import-menu">导入 ▾</button>
         </div>
+        <div class="tb-center"></div>
         <div class="tb-right">
           <button class="btn" id="btn-filing" title="安卓备案信息：选择 APK 查看包名 / MD5 / 公钥">📋 备案</button>
           <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
@@ -3725,8 +3832,10 @@ async function boot(): Promise<void> {
   });
   window.addEventListener("blur", closeDeviceMenu);
 
-  req<HTMLButtonElement>("#btn-add").addEventListener("click", () => void addProject());
-  req<HTMLButtonElement>("#btn-import").addEventListener("click", () => void importLaunchPath());
+  req<HTMLButtonElement>("#btn-import-menu").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openImportMenu(e.currentTarget as HTMLElement);
+  });
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
@@ -3812,6 +3921,12 @@ async function boot(): Promise<void> {
     if (await invoke<string | null>("dev_env", { name: "FLA_SETTINGS" })) {
       openSettings();
     }
+    if (await invoke<string | null>("dev_env", { name: "FLA_IMPORT_MENU" })) {
+      window.setTimeout(() => {
+        const b = document.querySelector<HTMLButtonElement>("#btn-import-menu");
+        if (b) openImportMenu(b);
+      }, 600);
+    }
     if (await invoke<string | null>("dev_env", { name: "FLA_EMU_MENU" })) {
       const anchor = document.querySelector<HTMLButtonElement>("#btn-emulators");
       if (anchor) openEmulatorMenu(anchor);
@@ -3890,6 +4005,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 
