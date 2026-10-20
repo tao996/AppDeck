@@ -60,6 +60,13 @@ const DEFS: &[Def] = &[
         targets: &["apk", "appbundle", "aar"],
     },
     Def {
+        // 鸿蒙工程：由华为 flutter 分支（flutter_flutter）构建 hap / app
+        id: "ohos",
+        label: "HarmonyOS",
+        dir: "ohos",
+        targets: &["hap", "app"],
+    },
+    Def {
         id: "ios",
         label: "iOS",
         dir: "ios",
@@ -103,6 +110,8 @@ pub fn target_label(target: &str) -> &'static str {
         "apk" => "构建 APK",
         "appbundle" => "构建 AAB",
         "aar" => "构建 AAR",
+        "hap" => "构建 HAP（鸿蒙安装包）",
+        "app" => "构建 Ohos App",
         "ios" => "构建 iOS App",
         "ipa" => "构建 IPA",
         "web" => "构建 Web",
@@ -125,7 +134,10 @@ fn classify(d: &DeviceInfo) -> Option<&'static str> {
     s.push_str(&d.id);
     let s = s.to_lowercase();
 
-    if s.contains("android") {
+// 鸿蒙要排在 ios 前面：ohos / harmony 的口径更具体
+    if s.contains("ohos") || s.contains("harmony") || s.contains("openharmony") {
+        Some("ohos")
+    } else if s.contains("android") {
         Some("android")
     } else if s.contains("ios") {
         Some("ios")
@@ -473,5 +485,59 @@ mod tests {
         assert!(args_for("web", "build", Some("apk"), None).is_err());
         assert!(args_for("android", "debug", None, None).is_err());
     }
+
+    #[test]
+    fn ohos_platform_is_recognized() {
+        // 鸿蒙设备归类：daemon 的 platformType 可能是 ohos / harmony / openharmony
+        for pt in ["ohos", "ohos-arm64", "harmony", "OpenHarmony"] {
+            assert_eq!(classify(&device("d1", pt)), Some("ohos"), "platformType={pt}");
+        }
+        assert_eq!(classify(&device("emulator-5554", "android-arm")), Some("android"));
+
+        assert_eq!(target_label("hap"), "构建 HAP（鸿蒙安装包）");
+        assert_eq!(target_label("app"), "构建 Ohos App");
+    }
+
+    #[test]
+    fn ohos_entry_appears_when_host_supports_hap() {
+        let tmp = std::env::temp_dir().join("fla_ohos_proj");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("ohos")).unwrap();
+        std::fs::create_dir_all(tmp.join("android")).unwrap();
+
+        // 鸿蒙 flutter 分支的 build --help 里含 hap / app
+        let host: Vec<String> = ["apk", "appbundle", "aar", "hap", "app"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let devices = vec![device("d1", "ohos-arm64")];
+        let m = matrix(
+            &project("single", &tmp.display().to_string()),
+            &host,
+            &devices,
+            None,
+        );
+
+        let ohos = m
+            .platforms
+            .iter()
+            .find(|p| p.id == "ohos")
+            .expect("应有 HarmonyOS 平台");
+        assert!(ohos.enabled, "有 ohos/ 目录且宿主支持 hap 时应可用");
+
+        let builds: Vec<_> = ohos.actions.iter().filter(|a| a.action == "build").collect();
+        assert_eq!(builds.len(), 2, "hap 与 app 两个构建目标");
+        assert!(builds.iter().any(|a| a.command == "flutter build hap --release"));
+
+        let run = ohos
+            .actions
+            .iter()
+            .find(|a| a.action == "debug")
+            .expect("应有调试运行");
+        assert!(run.enabled, "有 ohos 设备时运行应可用");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }
+
 

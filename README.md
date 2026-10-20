@@ -59,6 +59,16 @@
 - 缓存在 `%APPDATA%\com.flutterlauncher.app\cache.json`，删掉即可强制全部重算
 - 分析在阻塞线程池执行，不会占住主线程卡界面
 
+**HarmonyOS 工程**：目录里有 `ohos/` 就自动改用设置里的鸿蒙 flutter 分支
+（`flutter_flutter`），平台菜单因此多出 `HarmonyOS`，构建目标是 `hap` / `app`。
+标准 flutter 不认识 `ohos/`、也没有 `build hap`，所以这一步不能省。
+
+**FVM 工程**：项目根有 `.fvmrc` 就在名称后标 `FVM`。即使 SDK 不在
+`.fvm/flutter_sdk`（走 FVM 全局缓存），也能识别出这是 FVM 工程。
+
+**同名项目**：两个都叫 `jbook` 时，用最具区分度的祖先目录名做后缀——
+`jbook ‹library›` 与 `jbook ‹hm-library›`，不会在树里混淆。
+
 **导入 launch.json 的判定**（`import_launch_path`）：先看目录有没有 `pubspec.yaml`——
 有则作为**普通 Flutter 项目**导入，launch.json 的命令成为它的自定义命令；
 没有则作为**命令集**导入。命令集本身就是命令列表，右键时不显示平台也不显示全局命令。
@@ -334,6 +344,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 

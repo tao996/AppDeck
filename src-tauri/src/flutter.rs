@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command as PCommand;
 
 #[derive(Debug, Clone, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct FlutterInfo {
     pub ok: bool,
     pub version: Option<String>,
@@ -11,6 +12,9 @@ pub struct FlutterInfo {
     pub executable: Option<String>,
     /// fvm | custom | path | none
     pub source: String,
+    /// `.fvmrc` 里声明的 flutter 版本别名（如 "harmony" / "3.24.5"）。
+    /// 即使 SDK 不在 `.fvm/flutter_sdk`，也能据此在界面上标注这是 FVM 工程。
+    pub fvm_version: Option<String>,
     pub error: Option<String>,
 }
 
@@ -161,6 +165,19 @@ pub fn build_command(exe: &Path, args: &[&str]) -> PCommand {
     c
 }
 
+/// 读 `.fvmrc` 里声明的 flutter 版本（如 "harmony" / "3.24.5"）。
+///
+/// 有些工程只用 `.fvmrc` 指定版本、并不在项目内放 `.fvm/flutter_sdk`
+/// （SDK 走 FVM 全局缓存），这种情况也要能标注成 FVM 工程。
+pub fn fvm_declared(project: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(project.join(".fvmrc")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    v.get("flutter")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 pub fn detect(project: &Path, custom: Option<&str>) -> FlutterInfo {
     let (exe, source) = resolve(project, custom);
     let Some(exe) = exe else {
@@ -211,6 +228,7 @@ pub fn detect(project: &Path, custom: Option<&str>) -> FlutterInfo {
         dart,
         executable: Some(exe.display().to_string()),
         source,
+        fvm_version: fvm_declared(project),
         error: None,
     }
 }
@@ -241,4 +259,7 @@ mod tests {
         assert!(info.dart.is_some(), "应解析出 Dart 版本");
     }
 }
+
+
+
 

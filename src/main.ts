@@ -161,6 +161,8 @@ interface FlutterInfo {
   dart: string | null;
   executable: string | null;
   source: FlutterSource;
+  /** .fvmrc 声明的 flutter 版本别名（如 harmony） */
+  fvmVersion?: string | null;
   error: string | null;
 }
 
@@ -529,6 +531,26 @@ async function closeSession(id: string): Promise<void> {
   schedulePersist();
 }
 
+/** 同名项目的显示名：用最具区分度的祖先目录名加后缀。
+ *  例：flutter\library\projects\jbook 与 huawei\hm-library\projects\jbook
+ *      → jbook ‹library› / jbook ‹hm-library› */
+function projectLabel(p: Proj): string {
+  const same = state.projects.filter((x) => x.name === p.name);
+  if (same.length <= 1) return p.name;
+
+  const segs = p.path.split(/[\\/]+/).filter(Boolean);
+  for (let k = 1; k < segs.length; k++) {
+    const mine = segs[segs.length - 1 - k];
+    const clash = same.some((o) => {
+      if (o.id === p.id) return false;
+      const os = o.path.split(/[\\/]+/).filter(Boolean);
+      return os[os.length - 1 - k] === mine;
+    });
+    if (!clash) return `${p.name} ‹${mine}›`;
+  }
+  return `${p.name} ‹${p.path}›`;
+}
+
 /* ---------------- 渲染：项目树 ---------------- */
 
 function renderTree(): void {
@@ -570,10 +592,11 @@ function renderTree(): void {
     head.innerHTML = `
       <span class="chev">${isCollapsed ? "▸" : "▾"}</span>
       <span class="pico">${p.kind === "workspace" ? "🗂" : "📁"}</span>
-      <span class="pname">${esc(p.name)}</span>
+      <span class="pname">${esc(projectLabel(p))}</span>
       <span class="pmeta">
         <span class="chip kind-${p.kind}">${p.kind === "workspace" ? "工作区" : "应用"}</span>
         <span class="chip ${chipCls}">${esc(chipTxt)}</span>
+        ${info?.fvmVersion ? `<span class="chip chip-fvm" title="FVM 工程（.fvmrc 声明 ${esc(info.fvmVersion)}）">FVM</span>` : ""}
         ${verTxt ? `<span class="fver">${esc(verTxt)}</span>` : ""}
         <button class="proj-x" title="移除项目">×</button>
       </span>
@@ -2101,7 +2124,7 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
   menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 420)}px`;
   menu.innerHTML = `
     <div class="dm-head">
-      <span>${esc(p.name)}${isCommandSet ? ' <span class="dm-tag">命令集</span>' : ""}</span>
+      <span>${esc(projectLabel(p))}${isCommandSet ? ' <span class="dm-tag">命令集</span>' : ""}</span>
     </div>
     <div class="dm-body"></div>
   `;
@@ -2164,6 +2187,16 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
           }
         })();
       },
+    });
+  }
+
+  // 命令集：直接重读 .vscode/launch.json 刷新命令
+  if (isCommandSet) {
+    tail.push({
+      kind: "item",
+      name: "重新读取 launch.json",
+      detail: "按 .vscode/launch.json 刷新命令",
+      onClick: () => void importLaunch(p.id),
     });
   }
 
@@ -3130,6 +3163,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

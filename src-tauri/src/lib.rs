@@ -324,6 +324,22 @@ fn flutter_exe_for(state: &State, project_id: &str) -> Result<PathBuf, String> {
         .or_else(|| state.settings.flutter_tool.custom_path.clone());
 
     let root = PathBuf::from(&project.path);
+    // 鸿蒙工程：标准 flutter 不认识 `ohos/`，也没有 `build hap`。
+    // 有 ohos/ 目录就优先用设置里配置的鸿蒙 flutter 分支（flutter_flutter）。
+    if root.join("ohos").is_dir() {
+        if let Some(hp) = state.settings.harmony.flutter_path.as_deref() {
+            let hp = hp.trim();
+            if !hp.is_empty() {
+                let bin = PathBuf::from(hp)
+                    .join("bin")
+                    .join(if cfg!(windows) { "flutter.bat" } else { "flutter" });
+                if bin.is_file() {
+                    return Ok(bin);
+                }
+            }
+        }
+    }
+
     let (exe, _) = flutter::resolve(&root, custom.as_deref());
     exe.ok_or_else(|| "未找到 flutter 可执行文件".to_string())
 }
@@ -976,9 +992,14 @@ struct AllEmulators {
 
 /* ---------------- 磁盘缓存（跨重启有效） ---------------- */
 
-#[derive(serde::Serialize, serde::Deserialize, Default)]
+/// 缓存结构版本。**改平台定义或缓存语义时必须 +1**，否则旧缓存会挡住新逻辑。
+/// （踩过：新增 HarmonyOS 平台，但该项目的平台矩阵是旧版本缓存的，新平台不出现。）
+const DISK_CACHE_VERSION: u32 = 3;
+
+#[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct DiskCache {
+    v: u32,
     platforms: std::collections::HashMap<String, CachedMatrix>,
     emulators: Option<CachedEmulators>,
 }
@@ -998,14 +1019,28 @@ struct CachedEmulators {
 }
 
 fn read_disk_cache(app: &AppHandle) -> DiskCache {
-    cache::path_of(app)
+    let c = cache::path_of(app)
         .map(|p| cache::load::<DiskCache>(&p))
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    // 版本不符：全部丢弃，按新逻辑重算
+    if c.v != DISK_CACHE_VERSION {
+        return DiskCache {
+            v: DISK_CACHE_VERSION,
+            ..Default::default()
+        };
+    }
+
+    c
 }
 
 fn write_disk_cache(app: &AppHandle, c: &DiskCache) {
     if let Ok(p) = cache::path_of(app) {
-        let _ = cache::save(&p, c);
+        let tagged = DiskCache {
+            v: DISK_CACHE_VERSION,
+            ..c.clone()
+        };
+        let _ = cache::save(&p, &tagged);
     }
 }
 
@@ -1274,6 +1309,9 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
 
 
 
