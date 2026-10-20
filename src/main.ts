@@ -446,9 +446,13 @@ function updateControls(): void {
   const s = activeSession();
   // flutter 专有的一组（热重载/热重启/DevTools）：只有 run 会话且 flutter 真的在跑时才出现。
   // 普通终端（右键「在终端中打开」）不该看到它们。
-  const running = s?.kind === "run" && s.flutterRunning === true;
+  const running =
+    s?.kind === "run" && s.status === "running" && s.flutterRunning === true;
   const tools = req<HTMLSpanElement>("#flutter-tools");
   tools.hidden = !running;
+
+  // 普通终端不需要「停止」「重跑」——它就是个 shell，关标签即可
+  req<HTMLSpanElement>("#session-tools").hidden = s?.kind === "terminal";
 
   req<HTMLButtonElement>("#btn-reload").disabled = !running;
   req<HTMLButtonElement>("#btn-restart").disabled = !running;
@@ -1766,6 +1770,8 @@ function handleExit(id: string, code: number | null): void {
 
   s.status = "stopped";
   s.exitCode = code;
+  // 进程都没了就不可能还在跑 flutter，否则热重载工具条会一直亮着
+  s.flutterRunning = false;
   const label = code == null ? "已终止" : `退出码 ${code}`;
   s.term?.write(`\r\n\x1b[90m──── 会话结束（${label}）────\x1b[0m\r\n`);
   renderTabs();
@@ -3419,8 +3425,10 @@ async function boot(): Promise<void> {
               <button class="cbtn" id="btn-restart" disabled><i class="hi">🔄</i>热重启</button>
               <button class="cbtn" id="btn-devtools" disabled><i class="hi">🌐</i>DevTools</button>
             </span>
-            <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
-            <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
+            <span class="session-tools" id="session-tools">
+              <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
+              <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
+            </span>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
             <span class="ctx-info" id="ctx-info">等待会话</span>
@@ -3644,6 +3652,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 
