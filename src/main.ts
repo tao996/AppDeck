@@ -390,7 +390,12 @@ function ensureTerm(s: TermSession): void {
   // 键盘 → PTY（恢复的会话没有进程，绝不能写）
   term.onData((data) => {
     if (s.restored) {
-      toast("该会话已结束，点「⟳ 重跑」重新运行");
+      // 终端没有「重跑」（它只会新开窗口），所以提示要分开写
+      toast(
+        s.kind === "terminal"
+          ? "该终端已结束，点标签上的 × 关闭；需要新终端请右键项目「在终端中打开」"
+          : "该会话已结束，点「⟳ 重跑」重新运行",
+      );
       return;
     }
     void invoke("write_session", { id: s.id, data }).catch(() => {});
@@ -441,11 +446,12 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
-  // 可重跑的会话：命令 / 模板 / 平台动作 / 终端
+  // 可重跑的会话：命令 / 模板 / 平台动作。
+  // 终端不算——它的"重跑"只是新开一个窗口，容易和"恢复现场"混淆，所以不提供。
   rerun.disabled = !(
     s &&
     (s.restored || s.status === "stopped") &&
-    (s.commandId || s.templateId || (s.platform && s.action) || s.kind === "terminal")
+    (s.commandId || s.templateId || (s.platform && s.action))
   );
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
@@ -498,17 +504,11 @@ function renderTabs(): void {
       <span class="dot ${s.status === "running" ? "run" : s.status === "starting" ? "start" : "stop"}"></span>
       <span class="tab-title">${esc(s.title)}</span>
       ${hasDev ? `<span class="tab-dev">${esc(s.device)}</span>` : ""}
-      ${s.restored ? `<button class="tab-resume" title="历史输出已恢复，点此重新运行">恢复</button>` : ""}
       <button class="tab-x" title="关闭会话">×</button>
     `;
     el.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).closest(".tab-x")) return;
-      if ((e.target as HTMLElement).closest(".tab-resume")) return;
       activateSession(s.id);
-    });
-    el.querySelector(".tab-resume")?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void rerunSession(s);
     });
     el.querySelector(".tab-x")?.addEventListener("click", (e) => {
       e.stopPropagation();
@@ -833,6 +833,14 @@ function sendKey(data: string): void {
 async function stopActive(): Promise<void> {
   const s = activeSession();
   if (!s) return;
+
+  // 终端是 shell，没有 flutter run 的 `q` 退出键。发 q 只会往命令行里打一个字母，
+  // 5 秒后再被强制关闭——看起来就像"输了 q 然后崩了"。直接结束进程即可。
+  if (s.kind === "terminal") {
+    await closeSession(s.id);
+    return;
+  }
+
   sendKey("q");
   window.setTimeout(() => {
     const still = sessions.find((x) => x.id === s.id && x.status !== "stopped");
@@ -1653,12 +1661,6 @@ async function rerunSession(s: TermSession): Promise<void> {
       enabled: true,
       reason: null,
     });
-    return;
-  }
-
-  // 终端会话：重开一个终端（原来没有这个分支，导致「重跑」永远是灰的）
-  if (s.kind === "terminal") {
-    await openProjectTerminal(project);
     return;
   }
 
@@ -3592,6 +3594,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
