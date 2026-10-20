@@ -1660,9 +1660,11 @@ async function rerunSession(s: TermSession): Promise<void> {
   if (s.commandId) {
     const cmd = project.commands.find((c) => c.id === s.commandId);
     if (cmd) {
-      // run 会话：开终端并预填命令，按 Enter 才执行
-      // （避免"点重跑就默默跑起来"，也和 shell 模式保持一致）
+      // run 会话：新开一个终端并预填命令（按 Enter 才执行），
+      // 然后用它**替换**掉旧标签——flutter run 的会话没有"恢复现场"这回事，
+      // 留一堆死标签只会让人分不清哪个是活的。
       if (s.kind === "run") {
+        const oldId = s.id;
         try {
           const res = await invoke<StartResponse>("prefill_run", {
             projectId: project.id,
@@ -1670,10 +1672,12 @@ async function rerunSession(s: TermSession): Promise<void> {
             rows: 30,
             cols: 100,
           });
+          // 先挂新的（保证失败时旧标签还在），再关旧的
           mountSession(res, "run", "debug", {
             projectId: project.id,
             commandId: cmd.id,
           });
+          await closeSession(oldId);
         } catch (e) {
           toast(String(e), "error");
         }
