@@ -604,13 +604,12 @@ function renderTree(): void {
       const list = document.createElement("div");
       list.className = "cmds";
 
-      if (p.commands.length === 0) {
+      // Flutter 项目空命令是正常状态（能力在右键「平台 → 动作」），不提示；
+      // 命令集为空说明没导进来，才需要一句引导
+      if (p.commands.length === 0 && p.kind === "workspace") {
         const hint = document.createElement("div");
         hint.className = "cmd hint";
-        hint.textContent =
-          p.kind === "workspace"
-            ? "尚无命令 —— 点上方「📂 导入 launch.json」选择该目录"
-            : "暂无命令 —— 右键项目可用「平台 → 动作」运行/构建，也可点「＋ 添加命令」";
+        hint.textContent = "尚无命令 —— 点上方「📂 导入 launch.json」选择该目录";
         list.appendChild(hint);
       }
 
