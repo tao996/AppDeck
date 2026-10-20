@@ -339,6 +339,7 @@ mod tests {
             kind: kind.into(),
             flutter_tool: None,
             commands: vec![],
+            env: Default::default(),
         }
     }
 
@@ -539,5 +540,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
 
 

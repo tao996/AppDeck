@@ -244,8 +244,12 @@ pub fn parse(output: &str) -> (Vec<DoctorCheck>, Option<String>) {
     (checks, summary)
 }
 
-fn run_doctor(exe: &Path) -> Result<String, String> {
+fn run_doctor(exe: &Path, env: &[(String, String)]) -> Result<String, String> {
     let mut cmd = crate::flutter::build_command(exe, &["--suppress-analytics", "doctor"]);
+    // 鸿蒙工程要带上 DEVECO_SDK_HOME 等，否则 doctor 结果不准
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -283,8 +287,8 @@ fn run_doctor(exe: &Path) -> Result<String, String> {
     }
 }
 
-pub fn report(exe: &Path) -> DoctorReport {
-    match run_doctor(exe) {
+pub fn report(exe: &Path, env: &[(String, String)]) -> DoctorReport {
+    match run_doctor(exe, env) {
         Ok(raw) => {
             let (checks, summary) = parse(&raw);
             let issues = checks.iter().filter(|c| c.status != "ok").count();

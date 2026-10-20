@@ -717,6 +717,8 @@ per-project semaphore
 | A46 | 动作命名 | 平台子菜单显示真实命令（`flutter run --release` 等）；三种运行模式齐全 |
 | A47 | 鸿蒙工程 | 有 `ohos/` 时改用鸿蒙 flutter；平台菜单出现 HarmonyOS（hap / app） |
 | A48 | 缓存版本 | 改平台定义或菜单文案必须递增 `DISK_CACHE_VERSION`，否则旧缓存挡住新逻辑 |
+| A49 | 运行上下文统一 | 会话 / daemon / doctor / 宿主探测必须共用同一个 `FlutterCtx`（exe+env+PATH） |
+| A50 | 鸿蒙环境变量 | 仅注入有 `ohos/` 的工程；优先级 全局 < `.fvmrc` < 项目 < 命令；改设置后 daemon 必须失效重建 |
 | A45 | 导入判定 | 目录有 `pubspec.yaml` → 普通项目（命令为自定义命令）；否则 → 命令集（无平台/全局命令） |
 | A42 | MD5 口径 | MD5 = 证书 DER 的 MD5，大写冒号分隔，与 apksigner 输出一致 |
 
@@ -782,6 +784,7 @@ per-project semaphore
 | `windows` (crate) | 0.62.2 | Job Object 等 Win32 |
 | `tokio` (crate) | 1.53.3 | 异步 IO |
 | `@tauri-apps/cli` | 2.12.3 | 构建工具（本机已验证） |
+
 
 
 

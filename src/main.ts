@@ -44,6 +44,8 @@ interface Proj {
   path: string;
   kind: string;
   commands: Cmd[];
+  /** 项目级环境变量（仅鸿蒙工程注入） */
+  env?: Record<string, string>;
 }
 
 interface SettingsModel {
@@ -61,6 +63,8 @@ interface SettingsModel {
     imageRoot: string | null;
     flutterPath: string | null;
     sdkPath: string | null;
+    /** 全局鸿蒙环境变量（仅注入有 ohos/ 的工程） */
+    env: Record<string, string>;
   };
 }
 
@@ -150,6 +154,7 @@ function defaultSettings(): SettingsModel {
       imageRoot: null,
       flutterPath: null,
       sdkPath: null,
+      env: {},
     },
   };
 }
@@ -943,6 +948,195 @@ async function removeProject(p: Proj): Promise<void> {
 }
 
 /* ---------------- PTY 事件 ---------------- */
+
+/* ---------------- 项目环境变量 ---------------- */
+
+interface EnvEntry {
+  key: string;
+  value: string;
+  /** 全局 / .fvmrc / 项目 */
+  source: string;
+}
+
+interface ProjectEnvInfo {
+  harmony: boolean;
+  exe: string;
+  flutterSource: string;
+  shim: string | null;
+  entries: EnvEntry[];
+}
+
+async function openEnvDialog(p: Proj): Promise<void> {
+  let info: ProjectEnvInfo;
+  try {
+    info = await invoke<ProjectEnvInfo>("project_env", { projectId: p.id });
+  } catch (e) {
+    toast(String(e), "error");
+    return;
+  }
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 760px">
+      <div class="modal-head">
+        <span>环境变量 · ${esc(projectLabel(p))}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body" id="env-body"></div>
+      <div class="modal-foot">
+        <span class="modal-hint">${esc(p.path)}</span>
+        <span class="flex1"></span>
+        <button class="btn" id="env-reset">重置项目覆盖</button>
+        <button class="btn primary" id="env-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#env-body") as HTMLDivElement;
+  const close = (): void => overlay.remove();
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+
+  // 生效来源一览
+  const sum = document.createElement("div");
+  sum.className = "env-summary";
+  sum.innerHTML = `
+    <div class="fl-row"><span class="fl-label">flutter</span><span class="fl-value">${esc(
+      info.exe || "（未解析到）",
+    )}</span></div>
+    <div class="fl-row"><span class="fl-label">来源</span><span class="fl-value">${esc(
+      info.flutterSource || "—",
+    )}</span></div>
+    <div class="fl-row"><span class="fl-label">PATH shim</span><span class="fl-value">${esc(
+      info.shim ?? "（未生成：与 PATH 中的 flutter 相同或非鸿蒙工程）",
+    )}</span></div>
+  `;
+  body.appendChild(sum);
+
+  if (!info.harmony) {
+    const warn = document.createElement("div");
+    warn.className = "fl-banner";
+    warn.textContent =
+      "该项目没有 ohos/ 目录，不属于鸿蒙工程：下面这些变量不会注入（仅 .fvmrc 的 env 除外）。";
+    body.appendChild(warn);
+  }
+
+  const listTitle = document.createElement("div");
+  listTitle.className = "set-sub";
+  listTitle.textContent = `生效环境变量（${info.entries.length}）`;
+  body.appendChild(listTitle);
+
+  const list = document.createElement("div");
+  list.className = "env-list";
+  for (const e of info.entries) {
+    const row = document.createElement("div");
+    row.className = "env-row";
+    const k = document.createElement("span");
+    k.className = "env-tag-key";
+    k.textContent = e.key;
+    const v = document.createElement("span");
+    v.className = "env-tag-value";
+    v.textContent = e.value;
+    const src = document.createElement("span");
+    src.className = "chip env-src";
+    src.textContent = e.source;
+    row.append(k, v, src);
+    list.appendChild(row);
+  }
+  if (info.entries.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "set-desc";
+    empty.textContent = "（暂无，可在下方添加项目级变量）";
+    list.appendChild(empty);
+  }
+  body.appendChild(list);
+
+  // 项目级覆盖编辑器
+  const pTitle = document.createElement("div");
+  pTitle.className = "set-sub";
+  pTitle.textContent = "项目级变量（优先级最高）";
+  body.appendChild(pTitle);
+
+  const editBox = document.createElement("div");
+  editBox.className = "env-list";
+  body.appendChild(editBox);
+
+  const rows: Array<[string, string]> = Object.entries(p.env ?? {});
+  const collect = (): Record<string, string> => {
+    const m: Record<string, string> = {};
+    for (const [k, v] of rows) if (k.trim() !== "") m[k.trim()] = v;
+    return m;
+  };
+
+  const renderEdit = (): void => {
+    editBox.innerHTML = "";
+
+    rows.forEach(([k, v], idx) => {
+      const row = document.createElement("div");
+      row.className = "env-row";
+
+      const kEl = document.createElement("input");
+      kEl.className = "set-input env-key";
+      kEl.value = k;
+      kEl.placeholder = "KEY";
+      kEl.addEventListener("input", () => {
+        rows[idx][0] = kEl.value;
+      });
+
+      const vEl = document.createElement("input");
+      vEl.className = "set-input";
+      vEl.value = v;
+      vEl.placeholder = "value";
+      vEl.addEventListener("input", () => {
+        rows[idx][1] = vEl.value;
+      });
+
+      const del = document.createElement("button");
+      del.className = "btn";
+      del.textContent = "×";
+      del.title = "删除该变量";
+      del.addEventListener("click", () => {
+        rows.splice(idx, 1);
+        renderEdit();
+      });
+
+      row.append(kEl, vEl, del);
+      editBox.appendChild(row);
+    });
+
+    const add = document.createElement("button");
+    add.className = "btn";
+    add.textContent = "＋ 添加变量";
+    add.addEventListener("click", () => {
+      rows.push(["", ""]);
+      renderEdit();
+    });
+    editBox.appendChild(add);
+  };
+  renderEdit();
+
+  (overlay.querySelector("#env-reset") as HTMLButtonElement).addEventListener("click", () => {
+    rows.length = 0;
+    renderEdit();
+  });
+
+  (overlay.querySelector("#env-save") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        state = await invoke<State>("save_project_env", {
+          projectId: p.id,
+          env: collect(),
+        });
+        render();
+        toast("环境变量已保存（下次启动会话生效）");
+        close();
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    })();
+  });
+}
 
 /* ---------------- 备案信息（安卓） ---------------- */
 
@@ -2190,6 +2384,15 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
     });
   }
 
+  if (!isCommandSet) {
+    tail.push({
+      kind: "item",
+      name: "环境变量…",
+      detail: "鸿蒙工程的全局 / 项目级变量与 PATH shim",
+      onClick: () => void openEnvDialog(p),
+    });
+  }
+
   // 命令集：直接重读 .vscode/launch.json 刷新命令
   if (isCommandSet) {
     tail.push({
@@ -2870,6 +3073,88 @@ function openSettings(): void {
       field(s, "SDK 目录", draft.harmony.sdkPath, (v) => {
         draft.harmony.sdkPath = v;
       });
+
+      // 鸿蒙环境变量：只注入有 ohos/ 的工程
+      const envTitle = document.createElement("div");
+      envTitle.className = "set-sub";
+      envTitle.textContent = "环境变量（仅鸿蒙工程生效）";
+      s.appendChild(envTitle);
+
+      const envNote = document.createElement("div");
+      envNote.className = "set-desc";
+      envNote.textContent =
+        "如 FLUTTER_STORAGE_BASE_URL / PUB_CACHE / DEVECO_SDK_HOME / FLUTTER_GIT_URL。" +
+        "项目里 .fvmrc 的 env 会覆盖这里的同名项；项目右键「环境变量…」可再按项目覆盖。";
+      s.appendChild(envNote);
+
+      const envBox = document.createElement("div");
+      envBox.className = "env-list";
+      s.appendChild(envBox);
+
+      // 本地行数组，改完同步回 draft.harmony.env（空 KEY 不落盘）
+      const rows: Array<[string, string]> = Object.entries(draft.harmony.env ?? {});
+      const syncEnv = () => {
+        const m: Record<string, string> = {};
+        for (const [k, v] of rows) if (k.trim() !== "") m[k.trim()] = v;
+        draft.harmony.env = m;
+      };
+
+      const renderEnv = () => {
+        envBox.innerHTML = "";
+
+        rows.forEach(([k, v], idx) => {
+          const row = document.createElement("div");
+          row.className = "env-row";
+
+          const kEl = document.createElement("input");
+          kEl.className = "set-input env-key";
+          kEl.value = k;
+          kEl.placeholder = "KEY";
+          kEl.addEventListener("input", () => {
+            rows[idx][0] = kEl.value;
+            syncEnv();
+          });
+
+          const vEl = document.createElement("input");
+          vEl.className = "set-input";
+          vEl.value = v;
+          vEl.placeholder = "value";
+          vEl.addEventListener("input", () => {
+            rows[idx][1] = vEl.value;
+            syncEnv();
+          });
+
+          const del = document.createElement("button");
+          del.className = "btn";
+          del.textContent = "×";
+          del.title = "删除该变量";
+          del.addEventListener("click", () => {
+            rows.splice(idx, 1);
+            syncEnv();
+            renderEnv();
+          });
+
+          row.append(kEl, vEl, del);
+          envBox.appendChild(row);
+        });
+
+        if (rows.length === 0) {
+          const empty = document.createElement("div");
+          empty.className = "set-desc";
+          empty.textContent = "（暂无，可点下方添加）";
+          envBox.appendChild(empty);
+        }
+
+        const add = document.createElement("button");
+        add.className = "btn";
+        add.textContent = "＋ 添加变量";
+        add.addEventListener("click", () => {
+          rows.push(["", ""]);
+          renderEnv();
+        });
+        envBox.appendChild(add);
+      };
+      renderEnv();
     }
   };
 
@@ -3119,6 +3404,12 @@ async function boot(): Promise<void> {
       if (t) void openCommandDialog(null, t);
     }
     devSubmenu = await invoke<string | null>("dev_env", { name: "FLA_SUBMENU" });
+
+    const envHook = await invoke<string | null>("dev_env", { name: "FLA_ENV" });
+    if (envHook) {
+      const target = state.projects.find((x) => x.id === envHook);
+      if (target) void openEnvDialog(target);
+    }
     const filingHook = await invoke<string | null>("dev_env", { name: "FLA_FILING" });
     if (filingHook) void showFilingInfo(filingHook);
 
@@ -3163,6 +3454,10 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
 
 
 

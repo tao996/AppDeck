@@ -70,6 +70,7 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
         },
         flutter_tool: None,
         commands,
+        env: Default::default(),
     };
 
     state.projects.push(project.clone());
@@ -243,27 +244,6 @@ fn is_batch(path: &str) -> bool {
     )
 }
 
-fn resolve_flutter_exe(
-    state: &State,
-    project: &Project,
-    cwd: &std::path::Path,
-) -> Result<PathBuf, String> {
-    let custom = project
-        .flutter_tool
-        .as_ref()
-        .and_then(|f| f.custom_path.clone())
-        .or_else(|| state.settings.flutter_tool.custom_path.clone());
-
-    // FVM 的 junction 通常挂在子应用目录下，先查 cwd 再查项目根
-    let mut resolved = crate::flutter::resolve(cwd, custom.as_deref());
-    if resolved.0.is_none() {
-        resolved = crate::flutter::resolve(&PathBuf::from(&project.path), custom.as_deref());
-    }
-    resolved.0.ok_or_else(|| {
-        "未找到 flutter 可执行文件（PATH 中没有，项目也没有 .fvm/flutter_sdk）".to_string()
-    })
-}
-
 /// `.bat` / `.cmd` 不能直接 CreateProcess，用 `cmd.exe /d /c` 包一层。
 /// **不能加 `/s`**：实测会剥掉引号，含空格路径会被截断。
 fn wrap_batch(program: String, args: Vec<String>) -> (String, Vec<String>) {
@@ -320,11 +300,33 @@ pub fn build_plan_for(
         .filter(|s| !s.is_empty())
         .or_else(|| command.device_id.clone().filter(|s| !s.is_empty()));
 
-    let env: Vec<(String, String)> = command
-        .env
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    // 项目运行上下文：鸿蒙工程会换成鸿蒙 flutter、注入 env、前置 shim。
+    // 允许 None：纯自定义命令（如 git）不依赖 flutter，不该因为它缺失就跑不了。
+    let ctx = crate::flutter::ctx_for(state, project, &cwd).ok();
+
+    // 环境优先级：项目层（含鸿蒙/ fvmrc）< 命令自身
+    let mut env: Vec<(String, String)> = match &ctx {
+        Some(c) => c.env_with_path(),
+        None => crate::flutter::env_for(state, project),
+    };
+    for (k, v) in &command.env {
+        if let Some(pos) = env.iter().position(|(ek, _)| ek == k) {
+            env[pos].1 = v.clone();
+        } else {
+            env.push((k.clone(), v.clone()));
+        }
+    }
+
+    // 需要 flutter 的分支：没有上下文就直接报错
+    let need_flutter = || -> Result<PathBuf, String> {
+        match &ctx {
+            Some(c) => Ok(c.exe.clone()),
+            None => Err(
+                "未找到 flutter 可执行文件（PATH 中没有，项目也没有 .fvm/flutter_sdk）"
+                    .to_string(),
+            ),
+        }
+    };
 
     let (program, args) = match command.kind.as_str() {
         "custom" => {
@@ -334,9 +336,7 @@ pub fn build_plan_for(
             }
 
             let prog = if raw.eq_ignore_ascii_case("%FLUTTER%") {
-                resolve_flutter_exe(state, project, &cwd)?
-                    .display()
-                    .to_string()
+                need_flutter()?.display().to_string()
             } else {
                 raw.to_string()
             };
@@ -344,7 +344,7 @@ pub fn build_plan_for(
             wrap_batch(prog, command.args.clone())
         }
         kind => {
-            let exe = resolve_flutter_exe(state, project, &cwd)?;
+            let exe = need_flutter()?;
             let mut flutter_args: Vec<String> = Vec::new();
 
             if kind == "build" {
@@ -405,8 +405,9 @@ pub fn flutter_adhoc_plan(
         return Err(format!("工作目录不存在：{}", cwd.display()));
     }
 
-    let exe = resolve_flutter_exe(state, project, &cwd)?;
-    let (program, args) = wrap_batch(exe.display().to_string(), args);
+    // 平台动作一律走 flutter：必须拿到上下文（鸿蒙工程会换成鸿蒙分支并注入 env）
+    let ctx = crate::flutter::ctx_for(state, project, &cwd)?;
+    let (program, args) = wrap_batch(ctx.exe.display().to_string(), args);
 
     Ok(Plan {
         program,
@@ -414,7 +415,7 @@ pub fn flutter_adhoc_plan(
         cwd,
         title,
         device: "—".to_string(),
-        env: Vec::new(),
+        env: ctx.env_with_path(),
     })
 }
 
@@ -788,4 +789,5 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
 

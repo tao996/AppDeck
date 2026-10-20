@@ -310,40 +310,35 @@ fn kill_session(app: AppHandle, reg: tauri::State<'_, pty::Registry>, id: String
 
 /* ---------------- 设备与模拟器 ---------------- */
 
-fn flutter_exe_for(state: &State, project_id: &str) -> Result<PathBuf, String> {
+/// 项目的运行上下文（exe + 环境 + shim）。所有"跑 flutter"的入口都该用它，
+/// 否则会出现"设备列表用鸿蒙分支、构建却用标准 flutter"这种分裂。
+fn project_ctx(state: &State, project_id: &str) -> Result<flutter::Ctx, String> {
     let project = state
         .projects
         .iter()
         .find(|p| p.id == project_id)
         .ok_or_else(|| "项目不存在".to_string())?;
 
-    let custom = project
-        .flutter_tool
-        .as_ref()
-        .and_then(|f| f.custom_path.clone())
-        .or_else(|| state.settings.flutter_tool.custom_path.clone());
-
-    let root = PathBuf::from(&project.path);
-    // 鸿蒙工程：标准 flutter 不认识 `ohos/`，也没有 `build hap`。
-    // 有 ohos/ 目录就优先用设置里配置的鸿蒙 flutter 分支（flutter_flutter）。
-    if root.join("ohos").is_dir() {
-        if let Some(hp) = state.settings.harmony.flutter_path.as_deref() {
-            let hp = hp.trim();
-            if !hp.is_empty() {
-                let bin = PathBuf::from(hp)
-                    .join("bin")
-                    .join(if cfg!(windows) { "flutter.bat" } else { "flutter" });
-                if bin.is_file() {
-                    return Ok(bin);
-                }
-            }
-        }
-    }
-
-    let (exe, _) = flutter::resolve(&root, custom.as_deref());
-    exe.ok_or_else(|| "未找到 flutter 可执行文件".to_string())
+    flutter::ctx_for(state, project, &PathBuf::from(&project.path))
 }
 
+/// 有项目就用项目上下文；没有项目（如模板编辑）退回 PATH / 设置里的 flutter
+fn ctx_or_default(state: &State, project_id: Option<&str>) -> Result<flutter::Ctx, String> {
+    match project_id {
+        Some(pid) => project_ctx(state, pid),
+        None => {
+            let custom = state.settings.flutter_tool.custom_path.clone();
+            let (exe, source) = flutter::resolve(std::path::Path::new("."), custom.as_deref());
+            let exe = exe.ok_or_else(|| "未找到 flutter 可执行文件".to_string())?;
+            Ok(flutter::Ctx {
+                exe,
+                env: Vec::new(),
+                path_prepend: None,
+                source,
+            })
+        }
+    }
+}
 fn device_sink(app: &AppHandle) -> daemon::EventSink {
     let app = app.clone();
     std::sync::Arc::new(move |p: daemon::DevicesPayload| {
@@ -358,8 +353,8 @@ fn list_devices(
     project_id: String,
 ) -> Result<daemon::DevicesPayload, String> {
     let state = store::load(&app)?;
-    let exe = flutter_exe_for(&state, &project_id)?;
-    let d = daemon::get_or_start(&reg, &exe, device_sink(&app))?;
+    let ctx = project_ctx(&state, &project_id)?;
+    let d = daemon::get_or_start(&reg, &ctx.exe, &ctx.env_with_path(), device_sink(&app))?;
 
     match d.request("device.getDevices", None) {
         Ok(v) => match serde_json::from_value::<Vec<daemon::DeviceInfo>>(v) {
@@ -394,8 +389,8 @@ fn launch_emulator(
     }
 
     // 退回 flutter daemon（只认得默认 AVD 目录）
-    let exe = flutter_exe_for(&state, &project_id)?;
-    let d = daemon::get_or_start(&reg, &exe, device_sink(&app))?;
+    let ctx = project_ctx(&state, &project_id)?;
+    let d = daemon::get_or_start(&reg, &ctx.exe, &ctx.env_with_path(), device_sink(&app))?;
     d.request(
         "emulator.launch",
         Some(serde_json::json!({ "emulatorId": emulator_id })),
@@ -500,16 +495,8 @@ fn build_targets(
     project_id: Option<String>,
 ) -> Result<Vec<BuildTarget>, String> {
     let state = store::load(&app)?;
-    let exe = match project_id {
-        Some(pid) => flutter_exe_for(&state, &pid)?,
-        None => {
-            // 模板编辑时可能还没有项目：退回 PATH / 设置里的 Flutter
-            let custom = state.settings.flutter_tool.custom_path.clone();
-            flutter::resolve(std::path::Path::new("."), custom.as_deref())
-                .0
-                .ok_or_else(|| "未找到 flutter 可执行文件".to_string())?
-        }
-    };
+    let ctx = ctx_or_default(&state, project_id.as_deref())?;
+    let exe = ctx.exe;
     let key = exe.display().to_string();
 
     if let Ok(map) = cache.0.lock() {
@@ -534,7 +521,8 @@ fn host_target_names(
     project_id: &str,
 ) -> Result<Vec<String>, String> {
     let state = store::load(app)?;
-    let exe = flutter_exe_for(&state, project_id)?;
+    let ctx = project_ctx(&state, project_id)?;
+    let exe = ctx.exe;
     let key = exe.display().to_string();
 
     if let Ok(map) = cache.0.lock() {
@@ -556,8 +544,8 @@ fn devices_snapshot(
     project_id: &str,
 ) -> Result<Vec<daemon::DeviceInfo>, String> {
     let state = store::load(app)?;
-    let exe = flutter_exe_for(&state, project_id)?;
-    let d = daemon::get_or_start(reg, &exe, device_sink(app))?;
+    let ctx = project_ctx(&state, project_id)?;
+    let d = daemon::get_or_start(reg, &ctx.exe, &ctx.env_with_path(), device_sink(app))?;
     let v = d.request("device.getDevices", None)?;
     serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
 }
@@ -872,22 +860,16 @@ fn flutter_doctor(
 ) -> Result<doctor::DoctorReport, String> {
     let state = store::load(&app)?;
 
-    let exe = match project_id {
-        Some(pid) => flutter_exe_for(&state, &pid)?,
-        None => {
-            let custom = state.settings.flutter_tool.custom_path.clone();
-            flutter::resolve(std::path::Path::new("."), custom.as_deref())
-                .0
-                .ok_or_else(|| "未找到 flutter 可执行文件".to_string())?
-        }
-    };
+    let ctx = ctx_or_default(&state, project_id.as_deref())?;
+    let env = ctx.env_with_path();
+    let exe = ctx.exe;
 
     let key = exe.display().to_string();
     if let Some(hit) = doctor::cached(&cache, &key, force.unwrap_or(false)) {
         return Ok(hit);
     }
 
-    let rep = doctor::report(&exe);
+    let rep = doctor::report(&exe, &env);
     doctor::store(&cache, &key, &rep);
     Ok(rep)
 }
@@ -961,16 +943,118 @@ fn start_doctor_fix(
 /* ---------------- 设置与工具链 ---------------- */
 
 #[tauri::command]
-fn save_settings(app: AppHandle, settings: model::Settings) -> Result<State, String> {
+fn save_settings(
+    app: AppHandle,
+    reg: tauri::State<'_, daemon::Daemons>,
+    settings: model::Settings,
+) -> Result<State, String> {
     let mut state = store::load(&app)?;
     state.settings = settings;
     store::save(&app, &state)?;
+
+    // 设置可能改变鸿蒙 flutter 路径与环境变量。daemon 的环境在 spawn 时已固定，
+    // 必须丢弃让下次重新拉起；代价是下一次列设备要等几秒。
+    reg.invalidate_all();
+
     Ok(state)
 }
 
 #[tauri::command]
 fn detect_toolchains() -> detect::Detected {
     detect::detect()
+}
+
+/* ---------------- 环境变量 ---------------- */
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvEntry {
+    key: String,
+    value: String,
+    /// 全局 / .fvmrc / 项目
+    source: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectEnvInfo {
+    /// 是否鸿蒙工程（有 ohos/）——不是的话这些变量根本不注入
+    harmony: bool,
+    /// 该项目实际使用的 flutter
+    exe: String,
+    /// harmony | fvm | custom | path
+    flutter_source: String,
+    /// 生成的 PATH shim 目录（没有则为 null）
+    shim: Option<String>,
+    entries: Vec<EnvEntry>,
+}
+
+#[tauri::command]
+fn project_env(app: AppHandle, project_id: String) -> Result<ProjectEnvInfo, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let root = PathBuf::from(&project.path);
+    let harmony = flutter::is_harmony(&root);
+
+    // 优先级：全局 < .fvmrc < 项目
+    let mut map: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+
+    if harmony {
+        for (k, v) in &state.settings.harmony.env {
+            map.insert(k.clone(), (v.clone(), "全局".to_string()));
+        }
+    }
+    for (k, v) in flutter::fvm_env(&root) {
+        map.insert(k, (v, ".fvmrc".to_string()));
+    }
+    if harmony {
+        for (k, v) in &project.env {
+            map.insert(k.clone(), (v.clone(), "项目".to_string()));
+        }
+    }
+
+    let ctx = flutter::ctx_for(&state, project, &root).ok();
+
+    Ok(ProjectEnvInfo {
+        harmony,
+        exe: ctx
+            .as_ref()
+            .map(|c| c.exe.display().to_string())
+            .unwrap_or_default(),
+        flutter_source: ctx.as_ref().map(|c| c.source.clone()).unwrap_or_default(),
+        shim: ctx
+            .as_ref()
+            .and_then(|c| c.path_prepend.as_ref())
+            .map(|p| p.display().to_string()),
+        entries: map
+            .into_iter()
+            .map(|(key, (value, source))| EnvEntry { key, value, source })
+            .collect(),
+    })
+}
+
+#[tauri::command]
+fn save_project_env(
+    app: AppHandle,
+    project_id: String,
+    env: std::collections::BTreeMap<String, String>,
+) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    project.env = env;
+    store::save(&app, &state)?;
+    Ok(state)
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
@@ -1156,8 +1240,13 @@ fn list_all_emulators(
     if !android_resolved {
         let target = project_id.or_else(|| state.projects.first().map(|p| p.id.clone()));
         match target {
-            Some(pid) => match flutter_exe_for(&state, &pid) {
-                Ok(exe) => match daemon::get_or_start(&reg, &exe, device_sink(&app)) {
+            Some(pid) => match project_ctx(&state, &pid) {
+                Ok(ctx) => match daemon::get_or_start(
+                    &reg,
+                    &ctx.exe,
+                    &ctx.env_with_path(),
+                    device_sink(&app),
+                ) {
                     Ok(d) => match d.request("emulator.getEmulators", None) {
                         Ok(v) => {
                             if let Ok(list) =
@@ -1295,6 +1384,8 @@ pub fn run() {
             reset_templates,
             import_templates,
             save_settings,
+            project_env,
+            save_project_env,
             detect_toolchains,
             flutter_doctor,
             start_doctor_fix,
@@ -1309,6 +1400,12 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
+
+
+
 
 
 

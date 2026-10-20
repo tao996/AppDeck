@@ -64,6 +64,16 @@ pub struct Daemon {
 #[derive(Default)]
 pub struct Daemons(pub Mutex<HashMap<String, Arc<Daemon>>>);
 
+impl Daemons {
+    /// 丢弃所有已启动的 daemon。环境变量、flutter 路径等变化后必须调用：
+    /// daemon 的环境在 spawn 时固定，旧进程看不到新配置。
+    pub fn invalidate_all(&self) {
+        if let Ok(mut map) = self.0.lock() {
+            map.clear(); // Arc 掉光后 Daemon 的 Drop 会结束进程（Job Object 兜底）
+        }
+    }
+}
+
 /// 设备变化回调（生产环境接 Tauri 事件，测试里可以是空闭包）
 pub type EventSink = Arc<dyn Fn(DevicesPayload) + Send + Sync>;
 
@@ -208,8 +218,12 @@ fn emit_changed(
     sink(payload);
 }
 
-pub fn spawn(exe: &Path, sink: EventSink) -> Result<Daemon, String> {
+pub fn spawn(exe: &Path, env: &[(String, String)], sink: EventSink) -> Result<Daemon, String> {
     let mut cmd = flutter::build_command(exe, &["daemon"]);
+    // 鸿蒙工程要带上项目环境，否则 daemon 看到的设备/工具链是另一套
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -292,9 +306,12 @@ pub fn spawn(exe: &Path, sink: EventSink) -> Result<Daemon, String> {
 pub fn get_or_start(
     reg: &Daemons,
     exe: &Path,
+    env: &[(String, String)],
     sink: EventSink,
 ) -> Result<Arc<Daemon>, String> {
-    let key = exe.display().to_string();
+    // key 必须包含环境指纹：改了鸿蒙环境变量后要拉起新 daemon，
+    // 否则会复用带旧环境的常驻进程（环境在 spawn 时就固定了）
+    let key = format!("{}|{}", exe.display(), env_fingerprint(env));
 
     {
         let map = reg.0.lock().map_err(|_| "daemon 注册表锁失败".to_string())?;
@@ -305,13 +322,29 @@ pub fn get_or_start(
         }
     }
 
-    let daemon = Arc::new(spawn(exe, sink)?);
+    let daemon = Arc::new(spawn(exe, env, sink)?);
     reg.0
         .lock()
         .map_err(|_| "daemon 注册表锁失败".to_string())?
         .insert(key, daemon.clone());
 
     Ok(daemon)
+}
+
+/// 环境变量的稳定指纹（顺序无关）
+fn env_fingerprint(env: &[(String, String)]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut sorted: Vec<&(String, String)> = env.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut h = DefaultHasher::new();
+    for (k, v) in sorted {
+        k.hash(&mut h);
+        v.hash(&mut h);
+    }
+    h.finish()
 }
 
 #[cfg(test)]
@@ -329,7 +362,7 @@ mod tests {
         };
 
         let sink: EventSink = Arc::new(|_p: DevicesPayload| {});
-        let d = match spawn(&exe, sink) {
+        let d = match spawn(&exe, &[], sink) {
             Ok(d) => d,
             Err(e) => {
                 eprintln!("跳过：daemon 启动失败 {e}");
@@ -361,3 +394,4 @@ mod tests {
         d.kill();
     }
 }
+

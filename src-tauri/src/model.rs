@@ -135,6 +135,10 @@ pub struct HarmonySettings {
     /// 鸿蒙 SDK 路径
     #[serde(rename = "sdkPath", default)]
     pub sdk_path: Option<String>,
+    /// 全局鸿蒙环境变量（**仅注入鸿蒙工程**）：
+    /// FLUTTER_STORAGE_BASE_URL / PUB_CACHE / DEVECO_SDK_HOME / FLUTTER_GIT_URL 等
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,6 +187,10 @@ pub struct Project {
     pub flutter_tool: Option<FlutterToolSetting>,
     #[serde(default)]
     pub commands: Vec<Command>,
+    /// 项目级环境变量。**只注入鸿蒙工程（有 ohos/ 目录）**，
+    /// 优先级：全局鸿蒙 env < .fvmrc.env < 项目 env < 命令 env
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,5 +216,6 @@ impl Default for State {
         }
     }
 }
+
 
 

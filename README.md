@@ -63,6 +63,21 @@
 （`flutter_flutter`），平台菜单因此多出 `HarmonyOS`，构建目标是 `hap` / `app`。
 标准 flutter 不认识 `ohos/`、也没有 `build hap`，所以这一步不能省。
 
+**鸿蒙环境变量**：设置 → HarmonyOS 里有全局变量表（`DEVECO_SDK_HOME` / `FLUTTER_GIT_URL` 等），
+项目右键「环境变量…」可按项目覆盖。合并顺序：
+
+```
+全局鸿蒙变量  <  .fvmrc 的 env  <  项目变量  <  命令自身 env
+```
+
+**这些变量只注入有 `ohos/` 的工程**；`.fvmrc` 的 env 属于 FVM 语义，任何工程都生效。
+同一个上下文（exe + env + PATH）同时用于会话、daemon、doctor 和宿主能力探测——
+不会出现"设备列表用鸿蒙分支、构建却用标准 flutter"这种分裂。
+
+**PATH shim**：鸿蒙工程会在 `%APPDATA%\com.flutterlauncher.app\shims\<项目id>\flutter.bat`
+生成一个转发脚本并前置到 PATH。这样应用内手敲 `flutter`、以及构建链内部再调 `flutter`，
+都会落到项目自己的分支上——**不需要改你的 `$PROFILE`**。
+
 **FVM 工程**：项目根有 `.fvmrc` 就在名称后标 `FVM`。即使 SDK 不在
 `.fvm/flutter_sdk`（走 FVM 全局缓存），也能识别出这是 FVM 工程。
 
@@ -344,6 +359,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 
