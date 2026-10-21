@@ -1788,3 +1788,20 @@ select.set-input {
 }
 
 
+
+/* 设置弹窗：固定尺寸，切换分页时不再跳大小；内容超出则内部滚动 */
+.modal.settings-modal {
+  width: 760px;
+  height: min(820px, calc(100vh - 120px));
+  max-height: calc(100vh - 120px);
+}
+
+.modal.settings-modal .modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.modal.settings-modal .set-tabs {
+  flex: 0 0 auto;
+}

@@ -3850,7 +3850,7 @@ function openSettings(): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
-    <div class="modal">
+    <div class="modal settings-modal">
       <div class="modal-head">
         <span>设置</span>
         <button class="modal-x" title="关闭">×</button>
@@ -4185,6 +4185,14 @@ function openSettings(): void {
         envBox.appendChild(add);
       };
       renderEnv();
+
+      // 终端环境提示属于鸿蒙，放在这里（原来错放在「通用 → 终端」下面）
+      const termHint = document.createElement("div");
+      termHint.className = "set-desc";
+      termHint.textContent =
+        "打开的终端会继承项目环境：鸿蒙工程自动注入全局/项目变量并前置 PATH shim，" +
+        "可直接敲 flutter --version。";
+      s.appendChild(termHint);
     }
 
     // 默认终端
@@ -4248,13 +4256,6 @@ function openSettings(): void {
 
       bar.append(detectBtn, browseBtn);
       s.appendChild(bar);
-
-      const hint = document.createElement("div");
-      hint.className = "set-desc";
-      hint.textContent =
-        "打开的终端会继承项目环境：鸿蒙工程自动注入全局/项目变量并前置 PATH shim，" +
-        "可直接敲 flutter --version。";
-      s.appendChild(hint);
     }
 
     // Npm
@@ -4761,6 +4762,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
