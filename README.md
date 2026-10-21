@@ -3,13 +3,14 @@
 > 轻量级 **Flutter 应用启动器与发布管理器** —— 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
 > 界面参考 **WindTerm**：高信息密度、多标签终端、层级树导航。
 
-![界面截图](docs/shot-m3.png)
+![界面截图](docs/shot-p4.png)
 
 ---
 
 ## 当前状态
 
 **M3：设备与模拟器已接入** —— 右键命令即可看到在线设备与**未启动的模拟器**，选中设备直接开跑。
+之后又长出了两块：**多生态导入**（`package.json` / `docker-compose.yaml`）与**普通命令共用项目终端**。
 
 | 里程碑 | 内容 | 状态 |
 |---|---|---|
@@ -24,6 +25,8 @@
 | M7 | 会话恢复 + 打磨 | ✅ 完成 |
 | P1 | 平台菜单派生 + 备案信息 | ✅ 完成 |
 | P2 | 备案公钥（解析 APK 签名块） | ✅ 完成 |
+| P3 | 多生态导入（`package.json` / `docker-compose.yaml`） | ✅ 完成 |
+| P4 | 普通命令共用项目终端（不再一命令一标签） | ✅ 完成 |
 
 ### 平台菜单 + 备案信息
 
@@ -112,6 +115,68 @@
 
 ![备案信息](docs/shot-filing.png)
 
+### P3 已实现 · 多生态（npm / Docker）
+
+**同一个目录可能既是 Flutter 工程、又是前端工程、还带 compose 文件**，
+所以"生态"挂在**命令**上（`Command.source`），不挂在项目上：
+
+| 入口（工具栏「导入 ▾」） | 生成什么 |
+|---|---|
+| 导入 `package.json` | 按 `scripts` 每条生成一条命令；包管理器按 lockfile 探测（pnpm > yarn > npm），设置里可强制 |
+| 导入 `docker-compose.yaml` | 每个 service 生成 6 个动作 + 整份文件 3 个项目级动作 |
+
+**阶段分类：`kind` 一个字段同时表示"执行方式"和"阶段"**
+
+| kind | 含义 | 例子 |
+|---|---|---|
+| `run` | 长时间运行，独占终端 | `flutter run` / `npm run dev` / `docker compose logs -f` |
+| `build` | 一次性产出物，结束发通知 | `flutter build apk` / `npm run build` |
+| `custom` | 一次性、无产物 | `npm test` / `docker compose up -d` |
+
+**重新导入不覆盖你的修改**：命令按确定性 id 合并，已存在的只同步执行细节
+（**保留你改过的 kind 与名字**）；脚本或服务被删掉时只标「已失效」并划线，**不删数据**。
+
+**Docker 用服务视图，不是命令列表**：
+
+```
+🐳 phalcon-admin                     Docker
+   nginx        6 个操作      ▶     ← 双击 = 启动（up -d）
+   php          6 个操作      ▶
+   mysql        6 个操作      ▶
+
+右键服务：启动 / 停止 / 重启 / 日志 / 进入 shell / 删除容器…（二次确认，说明"卷保留"）
+右键项目：全部启动 / 全部日志 / 全部停止 / 重新读取 docker-compose.yaml
+```
+
+- 只有**这个项目真有对应文件**才显示「重新读取 xxx」（compose / package.json / launch.json 各自独立）
+- 状态栏的"N 条命令"按**树里看得见的条目**计，不把折叠的服务动作算进去
+
+### P4 已实现 · 普通命令共用项目终端
+
+`docker compose up -d` 跑完就退出。如果每条命令占一个标签，标签立刻变死、越堆越多，
+想接着敲 `docker ps` 只能再开一个。
+
+按执行方式分流：
+
+| 命令类型 | 落在哪 |
+|---|---|
+| `custom` | **项目常驻终端**：命令被"敲"进去，跑完 shell 还在，可以接着敲下一条 |
+| `run` | 独立标签，占住终端直到进程结束 |
+| `build` | 独立标签 + 结束通知 + 产物按钮 |
+
+- 同一项目的普通命令**复用同一个终端**，不会每次开新标签
+- 终端标签**恢复后直接可以输入**（历史留在上面，下面接一个新提示符）
+- 普通终端**没有"重跑"按钮**：`↑` 就是历史，Enter 直接再执行
+
+两个踩过的坑：
+
+- **不能用 `pwsh -NoExit -Command "<cmd>"`**：实测 Flutter 退出时会把 shell 一起带走。
+  必须开普通交互 shell，再把命令文本打进去（延迟 220ms，避免输入被 shell 初始化吃掉）
+- **裸程序名要解析成真实可执行文件**：Docker Desktop 的 bin 里同时躺着
+  `docker`（内容是 `#!/usr/bin/env sh`）和 `docker.exe`，直接 `CreateProcessW("docker")`
+  会命中脚本并报 `os error 193`；`npm` 同理（真正该跑的是 `npm.cmd`）。
+  现在按 PATH 依次找 `.exe` → `.cmd` → `.bat`
+
 ### 体检（§6.6 / §14）· 工具栏按钮
 
 启动后后台跑一次 `flutter doctor`，状态直接显示在工具栏按钮上，点开是完整报告：
@@ -193,11 +258,15 @@
     未配置时回退 `flutter daemon`
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
 - **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
-- **设置页**（⚙）三段：
-  - Flutter：`auto` / `custom` / `fvm` + 自定义路径
-  - Android：SDK 目录 / `emulator.exe` / AVD 目录
-  - HarmonyOS：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK
-- **一键自动检测**：不扫全盘，只用环境变量 + `hdc.exe` 反推 + 常见安装位置
+- **设置页**（⚙）分六个分页签（固定尺寸，内容长了内部滚动）：
+  - **通用**：命令模板库入口 / 会话恢复 / 终端程序
+  - **Flutter**：`auto` / `custom` / `fvm` + 自定义路径
+  - **Android**：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
+  - **鸿蒙**：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK / 全局环境变量
+  - **Npm**：包管理器（auto/npm/pnpm/yarn）/ node 目录
+  - **Docker**：docker 路径 / compose 风格（v2 / v1 / auto）
+- **一键自动检测**：不扫全盘，只用环境变量 + `hdc.exe` 反推 + 常见安装位置；
+  Flutter / Android / 鸿蒙 / Npm / Docker 一起填
 - **开箱即用**：HarmonyOS 路径未配置时自动回退到探测结果
 
 ![模拟器菜单](docs/shot-emulators-menu.png)
@@ -236,16 +305,22 @@
 cd src-tauri && cargo test
 ```
 
-43 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）。
+78 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`。
 
 诊断工具：
 ```bash
 cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 ```
 
-> **开发期钩子**（用于无人值守验证）：
+> **开发期钩子**（用于无人值守验证，不设变量时完全无副作用）：
 > - `FLA_AUTOSTART="<项目ID>|<命令ID>|<设备ID>"` 启动即运行指定命令
 > - `FLA_DEVICE_MENU="<项目ID>"` 启动即弹出设备菜单
+> - `FLA_PROJ_MENU="<项目ID>"` / `FLA_SUBMENU="<平台名>"` 启动即展开项目菜单（可指定子菜单）
+> - `FLA_ENV="<项目ID>"` 打开环境变量对话框 / `FLA_TERMINAL="<项目ID>"` 打开项目终端
+> - `FLA_SETTINGS="1|<分页名>"` 打开设置页（可指定 tab）/ `FLA_TEMPLATES` / `FLA_EXAMPLES`
+> - `FLA_IMPORT_MENU` / `FLA_SERVICE_MENU="<服务名>"` 展开导入菜单 / 服务右键菜单
+> - `FLA_IMPORT_PKG="<package.json>"` / `FLA_IMPORT_COMPOSE="<compose>"` / `FLA_REIMPORT_DOCKER=1`
+> - `FLA_RERUN=1` 对恢复的第一个会话触发重跑 / `FLA_DOCTOR_DETAIL` / `FLA_FILING`
 
 ---
 
@@ -296,15 +371,22 @@ npm run tauri build  # 打包安装程序
 │   └── vite-env.d.ts
 ├── src-tauri/                  Rust 后端
 │   ├── src/lib.rs              Tauri 命令注册
-│   ├── src/ops.rs              业务操作（添加项目 / 导入），纯函数便于测试
+│   ├── src/ops.rs              业务操作（添加项目 / 导入 / 计划拼装），纯函数便于测试
 │   ├── src/store.rs            状态读写（原子落盘 / 损坏恢复）
+│   ├── src/cache.rs            磁盘缓存（平台矩阵 / 模拟器列表）
 │   ├── src/launch.rs           launch.json 解析
+│   ├── src/npm.rs              package.json 解析（scripts → 命令、包管理器探测）
+│   ├── src/docker.rs           docker-compose 解析（services → 服务动作）
 │   ├── src/jsonc.rs            JSONC 状态机（注释 / 尾逗号）
 │   ├── src/flutter.rs          Flutter 可执行文件解析与版本探测
+│   ├── src/platforms.rs        平台 / 构建目标派生
+│   ├── src/terminal.rs         终端选择 / 命令行方言 / 可执行文件解析
 │   ├── src/pty.rs              ConPTY 会话（UTF-8 流解码 / DSR 应答 / Job Object）
 │   ├── src/daemon.rs           flutter daemon 客户端（设备 / 模拟器 / 热插拔）
+│   ├── src/apksig.rs           APK 签名块解析（备案公钥 / MD5）
+│   ├── src/doctor.rs           flutter doctor 体检
 │   ├── src/bin/pty_probe.rs    ConPTY 诊断探针
-│   ├── src/model.rs            数据模型（schemaVersion 2）
+│   ├── src/model.rs            数据模型（schemaVersion 6）
 │   ├── tauri.conf.json         窗口与应用配置
 │   └── Cargo.toml
 ├── docs/
@@ -338,7 +420,10 @@ npm run tauri build  # 打包安装程序
 4. **`.fvmrc` 的 `env` 必须透传**，`flutter` 字段可能是自定义分支名（如 `harmony`）。
 5. **任何外部进程都要挂 Job Object**，包括常驻 helper（`flutter daemon`），不只是终端会话。
    判据是"强杀应用后无残留"，不是"代码里写了 `AssignProcessToJobObject`"。
-6. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
+6. **外部程序必须解析成真实可执行文件**。Windows 上 `CreateProcessW("docker")` 会命中
+   Docker Desktop 那个无扩展名的 shell 脚本并报 `os error 193`；`npm` 同理（该跑 `npm.cmd`）。
+   一律走 `terminal::resolve_executable`。
+7. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
 
 详见规格 §3.1、§5.3 与 §16。
 
