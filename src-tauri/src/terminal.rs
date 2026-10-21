@@ -13,7 +13,7 @@ pub struct TerminalCandidate {
     pub path: String,
 }
 
-fn which(name: &str) -> Option<PathBuf> {
+pub fn which(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path) {
         for ext in ["", ".exe", ".bat", ".cmd"] {
@@ -155,15 +155,15 @@ pub fn resolve_executable(program: &str) -> String {
     let looks_like_path = p.is_absolute() || raw.contains('\\') || raw.contains('/');
 
     if looks_like_path {
-        if p.is_file() {
-            return raw.to_string();
-        }
+        // 无扩展名时**先找 .exe**：Docker Desktop 的 bin 里同时躺着
+        // `docker`（shell 脚本）和 `docker.exe`，直接返回前者就会 os error 193
         if p.extension().is_none() {
             let exe = format!("{raw}.exe");
             if Path::new(&exe).is_file() {
                 return exe;
             }
         }
+        // 有扩展名（或确实没有 .exe）就原样用
         return raw.to_string();
     }
 
@@ -353,6 +353,8 @@ mod tests {
         assert!(args_for(Path::new("C:\\Windows\\System32\\cmd.exe")).is_empty());
     }
 }
+
+
 
 
 

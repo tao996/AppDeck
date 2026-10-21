@@ -94,6 +94,8 @@ interface Detected {
   harmony: SettingsModel["harmony"];
   flutter: string | null;
   harmonyVersion: string | null;
+  npm: SettingsModel["npm"];
+  docker: SettingsModel["docker"];
   notes: string[];
 }
 
@@ -3786,7 +3788,7 @@ function openSettings(): void {
   overlay.innerHTML = `
     <div class="modal">
       <div class="modal-head">
-        <span>设置 · 工具链与模拟器目录</span>
+        <span>设置</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
       <div class="set-tabs" id="settings-tabs"></div>
@@ -4293,6 +4295,12 @@ function openSettings(): void {
         const d = await invoke<Detected>("detect_toolchains");
         draft.android = { ...draft.android, ...d.android };
         draft.harmony = { ...draft.harmony, ...d.harmony };
+        // 只在检测到值时覆盖，避免把用户手填的清空
+        if (d.npm?.nodePath) draft.npm = { ...draft.npm, nodePath: d.npm.nodePath };
+        if (d.docker?.dockerPath)
+          draft.docker = { ...draft.docker, dockerPath: d.docker.dockerPath };
+        if (d.docker?.composeStyle)
+          draft.docker = { ...draft.docker, composeStyle: d.docker.composeStyle };
         if (d.flutter) {
           draft.flutterTool.mode = "custom";
           draft.flutterTool.customPath = d.flutter;
@@ -4687,6 +4695,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
