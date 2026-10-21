@@ -10,7 +10,7 @@
 //! 本机实测输出为 `[√]` / `[!]` / `[X]`。解析器必须**同时接受两套**，
 //! 否则在中文/非 emoji 终端上永远匹配不到状态行。
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -20,9 +20,10 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const DOCTOR_TIMEOUT: Duration = Duration::from_secs(120);
-const CACHE_TTL: Duration = Duration::from_secs(300);
+// `flutter doctor` 实测 20+ 秒，5 分钟的 TTL 太短：改成半小时才重跑一次
+pub const CACHE_TTL: Duration = Duration::from_secs(1800);
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorCheck {
     /// 稳定标识，便于前端与后续动作绑定
@@ -38,7 +39,7 @@ pub struct DoctorCheck {
     pub can_run: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
@@ -423,3 +424,6 @@ Doctor summary (to see all details, run flutter doctor -v):
         assert!(summary.is_none());
     }
 }
+
+
+

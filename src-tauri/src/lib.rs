@@ -193,7 +193,7 @@ fn import_launch_path(
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn detect_flutter(app: AppHandle, project_id: String) -> Result<flutter::FlutterInfo, String> {
     let state = store::load(&app)?;
     let project = state
@@ -429,7 +429,7 @@ fn device_sink(app: &AppHandle) -> daemon::EventSink {
     })
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn list_devices(
     app: AppHandle,
     reg: tauri::State<'_, daemon::Daemons>,
@@ -457,7 +457,7 @@ fn list_devices(
     Ok(d.snapshot())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn launch_emulator(
     app: AppHandle,
     reg: tauri::State<'_, daemon::Daemons>,
@@ -571,7 +571,7 @@ fn detect_targets(exe: &std::path::Path) -> Result<Vec<BuildTarget>, String> {
     Ok(targets)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn build_targets(
     app: AppHandle,
     cache: tauri::State<'_, TargetCache>,
@@ -1042,7 +1042,7 @@ fn open_terminal(
 
 /* ---------------- 备案信息 ---------------- */
 
-#[tauri::command]
+#[tauri::command(async)]
 fn filing_info(app: AppHandle, apk: String) -> Result<filing::FilingInfo, String> {
     let state = store::load(&app)?;
     Ok(filing::inspect(&apk, &state.settings.android))
@@ -1189,7 +1189,9 @@ fn clear_session_logs(app: AppHandle) -> Result<(), String> {
 
 /* ---------------- 体检（§14 / §6.6） ---------------- */
 
-#[tauri::command]
+// `(async)` 让 Tauri 把这条命令放到线程池执行。
+// 不用它会跑在主线程上：`flutter doctor` 实测要 23 秒，界面会整段"无响应"。
+#[tauri::command(async)]
 fn flutter_doctor(
     app: AppHandle,
     cache: tauri::State<'_, doctor::Cache>,
@@ -1207,14 +1209,48 @@ fn flutter_doctor(
         return Ok(hit);
     }
 
+    // 磁盘缓存：跨重启直接给出上次结果。
+    // `flutter doctor` 实测 20+ 秒，不该每次启动都等它（要最新的点「重新检查」）。
+    if !force.unwrap_or(false) {
+        if let Some(rep) = read_cached_doctor(&app, &key) {
+            doctor::store(&cache, &key, &rep);
+            return Ok(rep);
+        }
+    }
+
     let rep = doctor::report(&exe, &env);
     doctor::store(&cache, &key, &rep);
+    write_cached_doctor(&app, &key, &rep);
     Ok(rep)
+}
+
+/// 读出上次的体检结果（同一个 flutter 可执行文件、且没过期）
+fn read_cached_doctor(app: &AppHandle, key: &str) -> Option<doctor::DoctorReport> {
+    let c = read_disk_cache(app);
+    let hit = c.doctor?;
+    if hit.key != key {
+        return None;
+    }
+    let age = logs::now_ms().saturating_sub(hit.saved_at);
+    if age > doctor::CACHE_TTL.as_millis() as u64 {
+        return None;
+    }
+    Some(hit.report)
+}
+
+fn write_cached_doctor(app: &AppHandle, key: &str, rep: &doctor::DoctorReport) {
+    let mut c = read_disk_cache(app);
+    c.doctor = Some(CachedDoctor {
+        saved_at: logs::now_ms(),
+        key: key.to_string(),
+        report: rep.clone(),
+    });
+    write_disk_cache(app, &c);
 }
 
 /// 在终端里执行体检给出的修复动作。
 /// **白名单**：只认预定义字符串，绝不执行 doctor 输出里的任意命令。
-#[tauri::command]
+#[tauri::command(async)]
 fn start_doctor_fix(
     app: AppHandle,
     reg: tauri::State<'_, pty::Registry>,
@@ -1299,7 +1335,7 @@ fn save_settings(
     Ok(state)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn detect_toolchains() -> detect::Detected {
     detect::detect()
 }
@@ -1426,6 +1462,18 @@ struct DiskCache {
     v: u32,
     platforms: std::collections::HashMap<String, CachedMatrix>,
     emulators: Option<CachedEmulators>,
+    /// 体检结果落盘：`flutter doctor` 实测要 20+ 秒，
+    /// 只放内存的话每次启动都要重跑一遍
+    doctor: Option<CachedDoctor>,
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedDoctor {
+    saved_at: u64,
+    /// 按 flutter 可执行文件区分（不同项目可能用不同分支）
+    key: String,
+    report: doctor::DoctorReport,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1519,7 +1567,7 @@ fn effective_android(state: &State) -> model::AndroidSettings {
 
 /// 聚合两个来源：Android（emulator.exe，退化时用 flutter daemon）+ HarmonyOS（Emulator.exe -list）。
 /// 结果落磁盘缓存，只有 `force`（菜单里的 ⟳）才重新检查。
-#[tauri::command]
+#[tauri::command(async)]
 fn list_all_emulators(
     app: AppHandle,
     reg: tauri::State<'_, daemon::Daemons>,
@@ -1639,7 +1687,7 @@ fn list_all_emulators(
     out
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 fn launch_harmony_emulator(app: AppHandle, name: String) -> Result<(), String> {
     let state = store::load(&app)?;
     harmony::start(&effective_harmony(&state), &name)
