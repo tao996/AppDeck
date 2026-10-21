@@ -642,9 +642,18 @@ function renderTree(): void {
     // 徽章按"里面装了什么"来叫，而不是内部 kind：
     // 只有 npm 命令的项目叫「Npm」，比笼统的「工作区」准确
     const hasNpm = p.commands.some((c) => c.source === "npm");
+    const hasDocker = p.commands.some((c) => c.source === "docker");
+    const only = (src: string): boolean =>
+      p.commands.length > 0 && p.commands.every((c) => c.source === src);
     const kindLabel =
-      p.kind === "single" ? "应用" : hasNpm && p.commands.every((c) => c.source === "npm") ? "Npm" : "工作区";
-    const kindIcon = p.kind === "single" ? "📁" : hasNpm ? "📦" : "🗂";
+      p.kind === "single"
+        ? "应用"
+        : only("docker")
+          ? "Docker"
+          : only("npm")
+            ? "Npm"
+            : "工作区";
+    const kindIcon = p.kind === "single" ? "📁" : hasDocker ? "🐳" : hasNpm ? "📦" : "🗂";
 
     head.innerHTML = `
       <span class="chev">${isCollapsed ? "▸" : "▾"}</span>
@@ -698,7 +707,8 @@ function renderTree(): void {
         row.className =
           "cmd" + (selectedCommand === c.id ? " selected" : "") + (c.stale ? " stale" : "");
         const mode = c.flutterMode ?? "debug";
-        const icon = c.source === "npm" ? "⬢" : c.kind === "build" ? "📦" : "🚀";
+        const icon =
+          c.source === "npm" ? "⬢" : c.source === "docker" ? "🐳" : c.kind === "build" ? "📦" : "🚀";
         row.innerHTML = `
           <span class="cico">${icon}</span>
           <span class="cname">${esc(c.name)}</span>
@@ -1050,6 +1060,57 @@ async function importPackagePath(): Promise<void> {
     toast(`${how}「${res.projectName}」：${res.manager}${detail}`);
 
     if (res.stale.length) console.warn("[package.json] 脚本已不存在：", res.stale);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+interface ComposeImportResponse {
+  state: State;
+  projectId: string;
+  projectName: string;
+  created: boolean;
+  services: number;
+  added: string[];
+  kept: string[];
+  stale: string[];
+}
+
+/** 导入 docker-compose：每个 service 生成「启动 / 日志」，另加一条「全部停止」 */
+async function importComposePath(): Promise<void> {
+  let picked: string | string[] | null = null;
+  try {
+    picked = await open({
+      directory: false,
+      multiple: false,
+      title: "选择 docker-compose.yml（或 compose.yaml）",
+      filters: [{ name: "Compose", extensions: ["yml", "yaml"] }],
+      defaultPath: lastImportDir ?? state.projects[0]?.path ?? undefined,
+    });
+  } catch (e) {
+    toast(`打开文件选择器失败：${String(e)}`, "error");
+    return;
+  }
+  if (!picked) return;
+
+  const path = Array.isArray(picked) ? picked[0] : picked;
+  if (!path) return;
+  lastImportDir = path;
+
+  try {
+    const res = await invoke<ComposeImportResponse>("import_compose_path", { path });
+    state = res.state;
+    render();
+
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    const how = res.created ? "已导入" : "已更新";
+    const detail = parts.length ? `（${parts.join(" · ")}）` : "";
+    toast(`${how}「${res.projectName}」：${res.services} 个服务${detail}`);
+
+    if (res.stale.length) console.warn("[compose] 已消失的服务：", res.stale);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -3306,8 +3367,8 @@ function openImportMenu(anchor: HTMLElement): void {
     {
       icon: "🐳",
       label: "导入 docker-compose.yaml",
-      hint: "暂未实现",
-      disabled: true,
+      hint: "按 service 生成命令",
+      run: () => void importComposePath(),
     },
   ];
 
@@ -3885,7 +3946,9 @@ function openSettings(): void {
 
       const hint = document.createElement("div");
       hint.className = "set-desc";
-      hint.textContent = "「导入 docker-compose.yaml」目前是占位项，实现后会按 service 生成命令。";
+      hint.textContent =
+        "导入 compose 后：每个 service 生成「启动 / 日志」，整份文件再加一条「全部停止」。" +
+        "命令用确定性 id 去重，服务被删只标失效、不删数据。";
       s.appendChild(hint);
     }
   };
@@ -4168,6 +4231,23 @@ async function boot(): Promise<void> {
         })();
       }, 800);
     }
+    const composeHook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_COMPOSE" });
+    if (composeHook) {
+      window.setTimeout(() => {
+        void (async () => {
+          try {
+            const res = await invoke<ComposeImportResponse>("import_compose_path", {
+              path: composeHook,
+            });
+            state = res.state;
+            render();
+            toast(`导入「${res.projectName}」：${res.services} 个服务，新增 ${res.added.length} 条`);
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      }, 800);
+    }
     if (await invoke<string | null>("dev_env", { name: "FLA_TEMPLATES" })) {
       openTemplateManager();
     }
@@ -4242,6 +4322,13 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
+
 
 
 

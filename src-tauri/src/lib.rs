@@ -2,6 +2,7 @@ mod android;
 mod apksig;
 mod cache;
 mod daemon;
+mod docker;
 mod detect;
 mod doctor;
 mod filing;
@@ -92,6 +93,42 @@ fn import_launch(app: AppHandle, project_id: String) -> Result<ImportResponse, S
         skipped: outcome.skipped,
         warnings: outcome.warnings,
     })
+}
+
+/// 导入 docker-compose：按 service 生成「启动 / 日志 / 全部停止」
+#[tauri::command]
+fn import_compose_path(app: AppHandle, path: String) -> Result<ComposeImportResponse, String> {
+    let mut state = store::load(&app)?;
+    let (project, outcome, created, services) = ops::import_compose_from_path(&mut state, &path)?;
+    store::save(&app, &state)?;
+
+    if let Ok(mut map) = app.state::<PlatformCache>().0.lock() {
+        map.remove(&project.id);
+    }
+
+    Ok(ComposeImportResponse {
+        state,
+        project_id: project.id,
+        project_name: project.name,
+        created,
+        services,
+        added: outcome.added,
+        kept: outcome.kept,
+        stale: outcome.stale,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ComposeImportResponse {
+    state: State,
+    project_id: String,
+    project_name: String,
+    created: bool,
+    services: usize,
+    added: Vec<String>,
+    kept: Vec<String>,
+    stale: Vec<String>,
 }
 
 /// 导入 package.json：解析 scripts 生成命令（生态挂在命令上，source = "npm"）
@@ -1531,6 +1568,7 @@ pub fn run() {
             invalidate_platform_cache,
             import_launch_path,
             import_package_path,
+            import_compose_path,
             start_platform_action,
             filing_info,
             upsert_command,
@@ -1559,6 +1597,10 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
+
 
 
 

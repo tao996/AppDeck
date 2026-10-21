@@ -33,12 +33,13 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
 
     let has_pubspec = pb.join("pubspec.yaml").exists();
     let has_launch = pb.join(".vscode").join("launch.json").exists();
-    // 生态挂在命令上，所以这三种都算"项目"
+    // 生态挂在命令上，所以这四种都算"项目"
     let has_package = pb.join("package.json").exists();
-    if !has_pubspec && !has_launch && !has_package {
+    let has_compose = crate::docker::find_compose(&pb).is_some();
+    if !has_pubspec && !has_launch && !has_package && !has_compose {
         return Err(
-            "这个目录不是 Flutter 项目（无 pubspec.yaml）、工作区（无 .vscode/launch.json）\
-             或前端项目（无 package.json）"
+            "这个目录不是 Flutter 项目（无 pubspec.yaml）、工作区（无 .vscode/launch.json）、\
+             前端项目（无 package.json）或 Compose 项目（无 docker-compose.yml）"
                 .to_string(),
         );
     }
@@ -162,6 +163,82 @@ pub fn resolve_workspace_root(raw: &str) -> Result<String, String> {
 ///
 /// 与 launch.json 一致：同路径项目复用（追加命令），否则新建。
 /// 返回 (项目, 合并结果, 是否新建, 包管理器)。
+/// 导入 docker-compose：按 service 生成命令（启动 / 日志 / 全部停止）。
+///
+/// 项目根 = compose 文件所在目录，所以命令的 cwd 为空、`-f` 只带文件名。
+pub fn import_compose_from_path(
+    state: &mut State,
+    raw: &str,
+) -> Result<(Project, crate::docker::MergeOutcome, bool, usize), String> {
+    let (dir, file) = resolve_compose(raw)?;
+    let compose = crate::docker::read(&file)?;
+    let count = compose.services.len();
+
+    let docker = state
+        .settings
+        .docker
+        .docker_path
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "docker".to_string());
+    let style = state.settings.docker.compose_style.as_deref();
+
+    // **先校验再改状态**
+    let fresh = crate::docker::commands_for(&compose, "", &docker, style);
+
+    let root = normalize(&dir.display().to_string());
+    let existing = state
+        .projects
+        .iter()
+        .find(|p| normalize(&p.path).eq_ignore_ascii_case(&root))
+        .map(|p| p.id.clone());
+
+    let (id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let p = add_project_to(state, &root)?;
+            (p.id, true)
+        }
+    };
+
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let outcome = crate::docker::merge_into(project, fresh);
+    Ok((project.clone(), outcome, created, count))
+}
+
+/// 定位 compose 文件：可以选文件（.yml/.yaml）或目录（自动找常见文件名）
+fn resolve_compose(raw: &str) -> Result<(PathBuf, PathBuf), String> {
+    let p = PathBuf::from(raw.trim());
+    if p.as_os_str().is_empty() {
+        return Err("路径为空".to_string());
+    }
+
+    if p.is_file() {
+        let dir = p
+            .parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "路径无效".to_string())?;
+        return Ok((dir, p));
+    }
+
+    if p.is_dir() {
+        let f = crate::docker::find_compose(&p).ok_or_else(|| {
+            format!(
+                "{} 下没有 docker-compose.yml / docker-compose.yaml / compose.yml / compose.yaml",
+                p.display()
+            )
+        })?;
+        return Ok((p, f));
+    }
+
+    Err(format!("路径不存在：{}", p.display()))
+}
+
 pub fn import_package_from_path(
     state: &mut State,
     raw: &str,
@@ -938,6 +1015,44 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn import_compose_creates_project_with_service_commands() {
+        let root = std::env::temp_dir().join("fla_compose_import");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("docker-compose.yml"),
+            "services:\n  web:\n    image: nginx\n  db:\n    image: postgres\n",
+        )
+        .unwrap();
+
+        let mut state = State::default();
+        let (project, outcome, created, services) =
+            import_compose_from_path(&mut state, &root.display().to_string()).unwrap();
+
+        assert!(created, "只有 compose 的目录也应能建项目");
+        assert_eq!(services, 2);
+        assert_eq!(outcome.added.len(), 5, "2 服务 × 2 + down");
+
+        let up = project.commands.iter().find(|c| c.name == "web · 启动").unwrap();
+        assert_eq!(up.kind, "custom");
+        assert_eq!(
+            up.args,
+            vec!["compose", "-f", "docker-compose.yml", "up", "-d", "web"]
+        );
+
+        let logs = project.commands.iter().find(|c| c.name == "db · 日志").unwrap();
+        assert_eq!(logs.kind, "run");
+
+        // 再导一次：不重复
+        let (_, outcome2, created2, _) =
+            import_compose_from_path(&mut state, &root.display().to_string()).unwrap();
+        assert!(!created2);
+        assert!(outcome2.added.is_empty());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn import_package_creates_project_then_merges_without_duplicates() {
         let root = std::env::temp_dir().join("fla_npm_import");
         let _ = std::fs::remove_dir_all(&root);
