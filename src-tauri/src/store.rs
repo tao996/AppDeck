@@ -3,6 +3,61 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+/// 应用标识。TAURI 的 `app_config_dir()` 就是 `%APPDATA%\<identifier>`，
+/// 所以这里必须和 `tauri.conf.json` 的 identifier 保持一致。
+pub const APP_ID: &str = "cn.gu19.appdev";
+
+/// 改 identifier 之前的老目录：首次启动时把数据搬过来，
+/// 否则用户会以为"项目全丢了"（其实还在老目录里躺着）。
+const LEGACY_APP_ID: &str = "com.flutterlauncher.app";
+
+/// 老目录 → 新目录的一次性迁移。只在「新目录没有 state.json 且老目录有」时执行。
+pub fn migrate_legacy_dir(app: &AppHandle) -> Option<String> {
+    let new_dir = app.path().app_config_dir().ok()?;
+    let old_dir = new_dir.parent()?.join(LEGACY_APP_ID);
+
+    if new_dir == old_dir || new_dir.join("state.json").exists() {
+        return None;
+    }
+    if !old_dir.join("state.json").exists() {
+        return None;
+    }
+
+    fs::create_dir_all(&new_dir).ok()?;
+    for name in ["state.json", "sessions.json", "cache.json"] {
+        let from = old_dir.join(name);
+        if from.is_file() {
+            let _ = fs::copy(&from, new_dir.join(name));
+        }
+    }
+
+    // shims 里有按项目生成的 flutter.bat，一并搬
+    let old_shims = old_dir.join("shims");
+    if old_shims.is_dir() {
+        copy_dir(&old_shims, &new_dir.join("shims"));
+    }
+
+    Some(format!(
+        "已从旧目录迁移配置：{} → {}",
+        old_dir.display(),
+        new_dir.display()
+    ))
+}
+
+fn copy_dir(from: &Path, to: &Path) {
+    let _ = fs::create_dir_all(to);
+    let Ok(entries) = fs::read_dir(from) else { return };
+    for entry in entries.flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir(&src, &dst);
+        } else {
+            let _ = fs::copy(&src, &dst);
+        }
+    }
+}
+
 pub fn path_of(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app
         .path()

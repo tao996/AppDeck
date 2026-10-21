@@ -1685,6 +1685,13 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .setup(|app| {
+            // 改过 identifier：把老目录的配置搬过来（只在新目录还没有数据时执行）
+            if let Some(msg) = crate::store::migrate_legacy_dir(app.handle()) {
+                println!("[store] {msg}");
+            }
+            Ok(())
+        })
         .manage(pty::Registry::default())
         .manage(daemon::Daemons::default())
         .manage(TargetCache::default())
@@ -1740,6 +1747,7 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 
 
 

@@ -262,14 +262,15 @@ pub fn fvm_env(root: &Path) -> Vec<(String, String)> {
 fn shim_root() -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("com.flutterlauncher.app").join("shims"))
+        std::env::var_os("APPDATA")
+                .map(|p| PathBuf::from(p).join(crate::store::APP_ID).join("shims"))
     }
     #[cfg(not(windows))]
     {
         std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|p| p.join("com.flutterlauncher.app").join("shims"))
+            .map(|p| p.join(crate::store::APP_ID).join("shims"))
     }
 }
 
@@ -649,6 +650,7 @@ mod tests {
         assert!(info.dart.is_some(), "应解析出 Dart 版本");
     }
 }
+
 
 
 
