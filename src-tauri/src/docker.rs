@@ -20,7 +20,6 @@ pub const COMPOSE_NAMES: [&str; 4] = [
 #[derive(Debug, Clone)]
 pub struct Service {
     pub name: String,
-    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,14 +64,7 @@ pub fn read(compose_file: &Path) -> Result<Compose, String> {
 
     let mut out: Vec<Service> = services
         .iter()
-        .filter_map(|(k, v)| {
-            let name = k.as_str()?.to_string();
-            let image = v
-                .get("image")
-                .and_then(|i| i.as_str())
-                .map(|s| s.to_string());
-            Some(Service { name, image })
-        })
+        .filter_map(|(k, _)| k.as_str().map(|s| Service { name: s.to_string() }))
         .collect();
 
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -264,7 +256,6 @@ services:
             vec!["db", "web"],
             "应按名字排序"
         );
-        assert_eq!(c.services[1].image.as_deref(), Some("nginx:alpine"));
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -377,4 +368,5 @@ services:
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
 

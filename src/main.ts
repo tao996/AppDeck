@@ -1909,6 +1909,15 @@ interface SessionLog {
 let persistTimer: number | null = null;
 
 /** 合并高频变更，避免每次输出都序列化整个缓冲 */
+/** 输出驱动自动落盘：最多 5 秒一次，避免关窗口时丢掉最后一段输出 */
+let lastAutoSave = 0;
+function autosaveSessions(): void {
+  const now = Date.now();
+  if (now - lastAutoSave < 5000) return;
+  lastAutoSave = now;
+  void persistSessions();
+}
+
 function schedulePersist(): void {
   if (persistTimer !== null) window.clearTimeout(persistTimer);
   persistTimer = window.setTimeout(() => {
@@ -1934,7 +1943,8 @@ async function persistSessions(): Promise<void> {
     exitCode: s.exitCode ?? null,
     status: s.restored ? "stopped" : s.status,
     artifacts: s.artifacts,
-    ansi: s.serialize?.serialize() ?? "",
+    // 恢复时写进去的分隔线不能一起落盘，否则每恢复一次就多一条
+    ansi: stripRestoreMarker(s.serialize?.serialize() ?? ""),
     savedAt: Date.now(),
   }));
 
@@ -1943,6 +1953,17 @@ async function persistSessions(): Promise<void> {
   } catch {
     /* 落盘失败不打断使用 */
   }
+}
+
+/** 恢复时插入的分隔线标记（落盘前会被剥掉，避免反复累积） */
+const RESTORE_MARKER = "──── 历史输出已恢复";
+
+function stripRestoreMarker(ansi: string): string {
+  if (!ansi.includes(RESTORE_MARKER)) return ansi;
+  return ansi
+    .split(/\r?\n/)
+    .filter((line) => !line.includes(RESTORE_MARKER))
+    .join("\r\n");
 }
 
 async function restoreSessions(): Promise<void> {
@@ -2000,7 +2021,10 @@ async function restoreSessions(): Promise<void> {
     sessions.push(s);
     ensureTerm(s);
     if (log.ansi) s.term!.write(log.ansi);
-    s.term!.write("\r\n\x1b[90m──── 历史输出已恢复（进程未运行，点下方「⟳ 重跑」重新执行）────\x1b[0m\r\n");
+    // 终端标签会被重新拉起成可输入的 shell，不该再提示"点重跑"
+    const tail =
+      s.kind === "terminal" ? "────" : "（进程未运行，点下方「⟳ 重跑」重新执行）────";
+    s.term!.write(`\r\n\x1b[90m${RESTORE_MARKER}${tail}\x1b[0m\r\n`);
   }
 
   renderTabs();
@@ -4480,6 +4504,7 @@ async function boot(): Promise<void> {
 
   await listen<{ id: string; data: string }>("pty://output", (e) => {
     handleOutput(e.payload.id, e.payload.data);
+    autosaveSessions();
   });
   await listen<{ id: string; code: number | null }>("pty://exit", (e) => {
     handleExit(e.payload.id, e.payload.code);
@@ -4762,6 +4787,11 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
 
 
 

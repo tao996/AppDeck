@@ -333,6 +333,25 @@ npm run tauri dev
 
 首次会编译 Rust（约 1.5 分钟），之后前端改动由 Vite 热更新。
 
+### 打包
+
+```bash
+npm run tauri build
+```
+
+产物在 `src-tauri/target/release/bundle/`：
+
+| 产物 | 大小 | 说明 |
+|---|---|---|
+| `nsis/Flutter Launcher_0.1.0_x64-setup.exe` | 2.0 MB | 推荐，单文件安装器 |
+| `msi/Flutter Launcher_0.1.0_x64_en-US.msi` | 3.0 MB | 需要 MSI 部署时用 |
+
+- 绿色版：直接分发 `src-tauri/target/release/flutter-launcher.exe`（5.9 MB），无需安装
+- 依赖只有 **WebView2 运行时**（Win10 1803+ / Win11 已内置）
+- 版本号在 `src-tauri/tauri.conf.json` 的 `version` 字段，改完重新打包即可
+- 数据目录跟随 `identifier`：`%APPDATA%\com.flutterlauncher.app\`
+  （**改 identifier 会换目录，等于清空已有项目配置**）
+
 其他命令：
 
 ```bash
@@ -444,6 +463,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 

@@ -1316,6 +1316,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
     fn import_package_creates_project_then_merges_without_duplicates() {
         let root = std::env::temp_dir().join("fla_npm_import");
         let _ = std::fs::remove_dir_all(&root);
