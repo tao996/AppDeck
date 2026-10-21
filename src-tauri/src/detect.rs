@@ -16,7 +16,21 @@ pub struct Detected {
     pub harmony_version: Option<String>,
     pub npm: crate::model::NpmSettings,
     pub docker: crate::model::DockerSettings,
+    pub editor: crate::model::EditorSettings,
     pub notes: Vec<String>,
+}
+
+/// 默认编辑器：只认 VS Code（Code.exe，不是 PATH 里的 code.cmd 脚本）
+fn detect_editor(notes: &mut Vec<String>) -> crate::model::EditorSettings {
+    let mut out = crate::model::EditorSettings::default();
+    match crate::editor::detect(None) {
+        Some(p) => {
+            out.vscode_path = Some(p.display().to_string());
+            notes.push("编辑器：VS Code".to_string());
+        }
+        None => notes.push("未检测到 VS Code".to_string()),
+    }
+    out
 }
 
 fn env_path(key: &str) -> Option<PathBuf> {
@@ -246,6 +260,7 @@ pub fn detect() -> Detected {
     let harmony = detect_harmony(&mut notes);
     let npm = detect_npm(&mut notes);
     let docker = detect_docker(&mut notes);
+    let editor = detect_editor(&mut notes);
     let flutter = crate::flutter::resolve(Path::new("."), None)
         .0
         .map(|p| p.display().to_string());
@@ -259,6 +274,7 @@ pub fn detect() -> Detected {
         harmony_version,
         npm,
         docker,
+        editor,
         notes,
     }
 }
@@ -313,6 +329,7 @@ mod tests {
         }
     }
 }
+
 
 
 

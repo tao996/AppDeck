@@ -178,6 +178,30 @@
   会命中脚本并报 `os error 193`；`npm` 同理（真正该跑的是 `npm.cmd`）。
   现在按 PATH 依次找 `.exe` → `.cmd` → `.bat`
 
+### 终端里的路径可点（Ctrl+单击）
+
+`flutter run` 的报错栈、构建错误、`doctor`、docker 日志里都会出现位置文本，
+现在可以直接点开：
+
+| 形态 | 例子 | 打开方式 |
+|---|---|---|
+| `package:` URI | `package:tao996/src/translation/translation.dart:119:7` | VS Code 跳到 119 行第 7 列 |
+| 绝对路径 | `C:/Users/mb/jbook\screenshots\a.png`（斜杠混用是真实存在的） | 系统默认程序 |
+| 相对路径 | `lib/main.dart:12:5`（相对会话 cwd） | VS Code 跳到行列 |
+
+- **Ctrl+单击**才打开（跟随 VS Code / Android Studio 终端），避免选文字时误触
+- **右键**在链接上可「用 VS Code 打开 / 在资源管理器中定位 / 复制路径」
+- 文件不存在时提示「文件不存在：<路径>」，不做静默失败
+
+**`package:` 怎么解析**：从会话 cwd 逐级向上找 `.dart_tool/package_config.json`，
+取 `rootUri`（可能是 `file:///…` 绝对 URI，也可能是 `../../packages/foo` 相对路径），
+再拼 `lib/<剩余路径>`。所以**没跑过 `flutter pub get` 的工程点不动**。
+
+**必须是 `Code.exe`**：PATH 里的 `code` 是 `code.cmd`/无扩展名脚本，和 `npm`/`docker`
+同一个坑。`Code.exe --goto "文件:行:列"` 走 argv，没有 `cmd.exe` 的引号问题，也没有注入风险。
+
+> 限制：路径被终端宽度折成两行时不可点（单行内匹配）。
+
 ### 命令右键：按"会不会连设备"分流
 
 **不是所有命令都该弹设备菜单。** npm 的 `build`、模板里的 `Pub Get` 跟设备毫无关系，
@@ -308,7 +332,7 @@
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
 - **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
 - **设置页**（⚙）分六个分页签（固定尺寸，内容长了内部滚动）：
-  - **通用**：命令模板库入口 / 会话恢复 / 终端程序
+  - **通用**：命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（VS Code）
   - **Flutter**：`auto` / `custom` / `fvm` + 自定义路径
   - **Android**：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
   - **鸿蒙**：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK / 全局环境变量

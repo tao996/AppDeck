@@ -107,6 +107,16 @@ pub struct Settings {
     pub npm: NpmSettings,
     #[serde(default)]
     pub docker: DockerSettings,
+    #[serde(default)]
+    pub editor: EditorSettings,
+}
+
+/// 默认编辑器（目前只支持 VS Code）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EditorSettings {
+    /// `Code.exe` 的完整路径；留空表示自动探测
+    #[serde(rename = "vscodePath", default)]
+    pub vscode_path: Option<String>,
 }
 
 /// npm / Node 相关设置

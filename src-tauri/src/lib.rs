@@ -1,6 +1,8 @@
 mod android;
 mod apksig;
 mod atomic;
+mod locate;
+mod editor;
 mod cache;
 mod daemon;
 mod docker;
@@ -1708,6 +1710,39 @@ struct DevAutostart {
     device_id: Option<String>,
 }
 
+/* ---------------- 终端里的可点击位置 ---------------- */
+
+/// 解析终端里的一段位置文本（路径 / package: URI），返回磁盘位置与是否存在。
+#[tauri::command(async)]
+fn resolve_location(cwd: Option<String>, text: String) -> Option<locate::Location> {
+    let base = cwd
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .or_else(|| std::env::current_dir().ok())?;
+    locate::resolve(&base, &text)
+}
+
+/// 用 VS Code 打开文件并跳到行列。
+#[tauri::command(async)]
+fn open_in_editor(
+    app: AppHandle,
+    path: String,
+    line: Option<u32>,
+    col: Option<u32>,
+) -> Result<(), String> {
+    let state = store::load(&app)?;
+    let code = editor::detect(state.settings.editor.vscode_path.as_deref())
+        .ok_or_else(|| "没找到 VS Code，请到「设置 → 通用 → 编辑器」里指定 Code.exe".to_string())?;
+    editor::open(&code, std::path::Path::new(&path), line, col)
+}
+
+/// 自动探测到的 VS Code 路径（设置里留空时实际会用它）
+#[tauri::command(async)]
+fn detect_editor_path() -> Option<String> {
+    editor::detect(None).map(|p| p.display().to_string())
+}
+
 #[tauri::command]
 fn dev_env(name: String) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
@@ -1809,11 +1844,19 @@ pub fn run() {
             list_all_emulators,
             launch_harmony_emulator,
             dev_autostart,
-            dev_env
+            dev_env,
+            resolve_location,
+            detect_editor_path,
+            open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
+
+
 
 
 

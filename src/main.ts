@@ -1,13 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { Terminal } from "@xterm/xterm";
+import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -115,6 +116,21 @@ interface SettingsModel {
     /** auto | v2 | v1 */
     composeStyle: string | null;
   };
+  editor: {
+    /** Code.exe 的完整路径；留空自动探测 */
+    vscodePath: string | null;
+  };
+}
+
+/** 终端里一处"位置"的解析结果（后端 locate::Location） */
+interface Location {
+  raw: string;
+  path: string | null;
+  exists: boolean;
+  /** 源码类：用编辑器打开并跳行列；否则交给系统默认程序 */
+  code: boolean;
+  line: number | null;
+  col: number | null;
 }
 
 interface Detected {
@@ -124,6 +140,7 @@ interface Detected {
   harmonyVersion: string | null;
   npm: SettingsModel["npm"];
   docker: SettingsModel["docker"];
+  editor: SettingsModel["editor"];
   notes: string[];
 }
 
@@ -210,6 +227,7 @@ function defaultSettings(): SettingsModel {
     terminal: { path: null },
     npm: { manager: null, nodePath: null },
     docker: { dockerPath: null, composeStyle: null },
+    editor: { vscodePath: null },
   };
 }
 
@@ -458,6 +476,195 @@ function activeSession(): TermSession | undefined {
   return sessions.find((s) => s.id === activeSessionId);
 }
 
+/* ---------------- 终端里可点击的位置 ---------------- */
+
+/** 解析结果缓存：同一条日志反复悬停不该反复问后端 */
+const locateCache = new Map<string, Location | null>();
+
+async function locateAt(cwd: string, text: string): Promise<Location | null> {
+  const key = `${cwd}\u0000${text}`;
+  const hit = locateCache.get(key);
+  if (hit !== undefined) return hit;
+
+  let res: Location | null = null;
+  try {
+    res = await invoke<Location | null>("resolve_location", { cwd, text });
+  } catch {
+    res = null;
+  }
+  if (locateCache.size > 400) locateCache.clear();
+  locateCache.set(key, res);
+  return res;
+}
+
+/** 打开一处位置：源码交给 VS Code 跳行列，其他交给系统默认程序 */
+async function openLocation(cwd: string, raw: string): Promise<void> {
+  const loc = await locateAt(cwd, raw);
+  if (!loc?.path) {
+    toast(`无法解析路径：${raw}`, "error");
+    return;
+  }
+  if (!loc.exists) {
+    toast(`文件不存在：${loc.path}`, "error");
+    return;
+  }
+
+  if (loc.code) {
+    try {
+      await invoke("open_in_editor", { path: loc.path, line: loc.line, col: loc.col });
+    } catch (e) {
+      toast(String(e), "error");
+    }
+    return;
+  }
+
+  try {
+    await openPath(loc.path);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+async function revealLocation(cwd: string, raw: string): Promise<void> {
+  const loc = await locateAt(cwd, raw);
+  if (!loc?.path) {
+    toast(`无法解析路径：${raw}`, "error");
+    return;
+  }
+  if (!loc.exists) {
+    toast(`文件不存在：${loc.path}`, "error");
+    return;
+  }
+  try {
+    await revealItemInDir(loc.path);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** 把一行的字符下标映射到终端列号（CJK 宽字符占两格，不能按字符数直接算） */
+function mapLine(term: Terminal, y: number): { text: string; xs: number[] } | null {
+  const line = term.buffer.active.getLine(y - 1);
+  if (!line) return null;
+
+  let text = "";
+  const xs: number[] = [];
+  for (let x = 0; x < line.length; x++) {
+    const cell = line.getCell(x);
+    if (!cell) break;
+    if (cell.getWidth() === 0) continue; // 宽字符的尾格
+    const chars = cell.getChars();
+    const s = chars && chars.length ? chars : " ";
+    for (let i = 0; i < s.length; i++) xs.push(x + 1);
+    text += s;
+  }
+  return { text, xs };
+}
+
+/** 候选：`package:` URI、盘符绝对路径（行尾的 :行:列 由后端拆） */
+const LOCATE_PATTERNS: RegExp[] = [
+  /package:[A-Za-z0-9_]+\/[^\s"'<>|]+/g,
+  /[A-Za-z]:[\\/][^\s"'<>|]+/g,
+];
+
+let hoveredLink: { cwd: string; raw: string } | null = null;
+let linkMenuEl: HTMLDivElement | null = null;
+
+function closeLinkMenu(): void {
+  linkMenuEl?.remove();
+  linkMenuEl = null;
+}
+
+function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
+  closeLinkMenu();
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.max(8, Math.min(ev.clientX, window.innerWidth - 340))}px`;
+  menu.style.top = `${Math.max(8, Math.min(ev.clientY, window.innerHeight - 170))}px`;
+  menu.innerHTML = `<div class="dm-head">${esc(raw)}</div><div class="dm-body"></div>`;
+  document.body.appendChild(menu);
+  linkMenuEl = menu;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+  const item = (name: string, sub: string, fn: () => void): void => {
+    const el = document.createElement("div");
+    el.className = "dm-item";
+    el.innerHTML = `<span class="dm-name">${esc(name)}</span>${sub ? `<span class="dm-sub">${esc(sub)}</span>` : ""}`;
+    el.addEventListener("click", () => {
+      closeLinkMenu();
+      fn();
+    });
+    body.appendChild(el);
+  };
+
+  item("用 VS Code 打开", "定位到对应行", () => void openLocation(cwd, raw));
+  item("在资源管理器中定位", "选中该文件", () => void revealLocation(cwd, raw));
+  item("复制路径", "", () => {
+    void navigator.clipboard?.writeText(raw).catch(() => undefined);
+    toast("已复制");
+  });
+}
+
+/** 给终端注册"可点击位置"：Ctrl+单击打开，右键出菜单 */
+function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): void {
+  const cwd = s.cwd || "";
+
+  const provider: ILinkProvider = {
+    provideLinks(y, callback) {
+      const mapped = mapLine(term, y);
+      if (!mapped) {
+        callback(undefined);
+        return;
+      }
+
+      const { text, xs } = mapped;
+      const links: ILink[] = [];
+
+      for (const re of LOCATE_PATTERNS) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const raw = m[0].replace(/[,\u3002\uff09)\]]+$/, "");
+          if (raw.length < 4) continue;
+          const start = m.index;
+          const end = start + raw.length;
+          if (end > xs.length) continue;
+
+          links.push({
+            range: { start: { x: xs[start], y }, end: { x: xs[end - 1], y } },
+            text: raw,
+            decorations: { underline: true, pointerCursor: true },
+            activate: (event: MouseEvent) => {
+              // 跟随 VS Code / Android Studio：Ctrl+单击
+              if (!event.ctrlKey && !event.metaKey) return;
+              void openLocation(cwd, raw);
+            },
+            hover: () => {
+              hoveredLink = { cwd, raw };
+            },
+            leave: () => {
+              if (hoveredLink?.raw === raw) hoveredLink = null;
+            },
+          });
+        }
+      }
+
+      callback(links.length ? links : undefined);
+    },
+  };
+
+  term.registerLinkProvider(provider);
+
+  // 右键：悬停在链接上时给"定位 / 复制"
+  pane.addEventListener("contextmenu", (e) => {
+    const target = hoveredLink;
+    if (!target) return;
+    e.preventDefault();
+    e.stopPropagation();
+    showLinkMenu(e, target.cwd, target.raw);
+  });
+}
+
 function ensureTerm(s: TermSession): void {
   if (s.term) return;
   const holder = req<HTMLDivElement>("#term-holder");
@@ -488,6 +695,10 @@ function ensureTerm(s: TermSession): void {
   }
 
   term.open(pane);
+
+  // 终端里的路径 / package: URI 可点（Ctrl+单击打开，右键出菜单）
+  attachLinkProvider(term, pane, s);
+
   try {
     const webgl = new WebglAddon();
     webgl.onContextLoss(() => webgl.dispose());
@@ -4518,6 +4729,66 @@ function openSettings(): void {
       s.appendChild(bar);
     }
 
+    // 默认编辑器（终端里的路径可点开）
+    {
+      const s = section(
+        "编辑器",
+        "终端里的路径和 package: 链接用 Ctrl+单击打开；留空则自动探测",
+      );
+      field(s, "VS Code（Code.exe）", draft.editor?.vscodePath ?? "", (v) => {
+        const t = (v ?? "").trim();
+        draft.editor = { vscodePath: t === "" ? null : t };
+      });
+
+      const bar = document.createElement("div");
+      bar.className = "set-desc";
+      bar.style.display = "flex";
+      bar.style.gap = "8px";
+      bar.style.alignItems = "center";
+
+      const browseBtn = document.createElement("button");
+      browseBtn.className = "btn";
+      browseBtn.textContent = "浏览 Code.exe…";
+      browseBtn.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const picked = await open({
+              multiple: false,
+              title: "选择 VS Code 的 Code.exe",
+              filters: [{ name: "可执行文件", extensions: ["exe"] }],
+              defaultPath: draft.editor?.vscodePath ?? undefined,
+            });
+            if (!picked) return;
+            const p = Array.isArray(picked) ? picked[0] : picked;
+            draft.editor = { vscodePath: p };
+            build();
+            renderSettingsTabs();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      bar.append(browseBtn);
+      s.appendChild(bar);
+
+      const hint = document.createElement("div");
+      hint.className = "set-desc";
+      hint.textContent =
+        "留空则自动探测。要选 Code.exe，不是 bin 目录里的 code.cmd（后者是脚本，不能直接执行）";
+      s.appendChild(hint);
+
+      // 留空时告诉用户实际会用哪一个，免得"未配置"让人以为不能用
+      void (async () => {
+        try {
+          const auto = await invoke<string | null>("detect_editor_path");
+          if (!draft.editor?.vscodePath && auto) hint.textContent = `留空时使用：${auto}`;
+        } catch {
+          /* 探测失败就保持通用提示 */
+        }
+      })();
+    }
+
     // Npm
     {
       const s = section(
@@ -4626,6 +4897,8 @@ function openSettings(): void {
           draft.docker = { ...draft.docker, dockerPath: d.docker.dockerPath };
         if (d.docker?.composeStyle)
           draft.docker = { ...draft.docker, composeStyle: d.docker.composeStyle };
+        if (d.editor?.vscodePath)
+          draft.editor = { ...draft.editor, vscodePath: d.editor.vscodePath };
         if (d.flutter) {
           draft.flutterTool.mode = "custom";
           draft.flutterTool.customPath = d.flutter;
@@ -5032,6 +5305,10 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
 
 
 
