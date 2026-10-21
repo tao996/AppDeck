@@ -142,20 +142,10 @@ pub fn load_from(path: &Path) -> State {
     }
 }
 
-/// 原子落盘：先写临时文件，再替换。
+/// 原子落盘：唯一临时文件 + 直接改名覆盖（不留"文件不存在"的窗口）。
 pub fn save_to(path: &Path, state: &State) -> Result<(), String> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-    // 临时文件名按目标派生，避免多文件/并行写入互相覆盖
-    let tmp = path.with_extension("tmp");
     let data = serde_json::to_string_pretty(state).map_err(|e| format!("序列化失败: {e}"))?;
-    fs::write(&tmp, data).map_err(|e| format!("写入临时文件失败: {e}"))?;
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    fs::rename(&tmp, path).map_err(|e| format!("落盘失败: {e}"))?;
-    Ok(())
+    crate::atomic::write_atomic(path, &data)
 }
 
 pub fn load(app: &AppHandle) -> Result<State, String> {

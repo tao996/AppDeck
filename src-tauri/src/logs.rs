@@ -121,21 +121,9 @@ pub fn save_to(path: &Path, mut logs: Vec<SessionLog>) -> Result<(), String> {
         total -= dropped.ansi.len();
     }
 
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
-    }
-
-    // 临时文件名按目标派生：固定名字在多实例/并行测试下会互相覆盖
-    let tmp = path.with_extension("tmp");
     let data = serde_json::to_string(&Store { sessions: logs })
         .map_err(|e| format!("序列化会话失败: {e}"))?;
-    fs::write(&tmp, data).map_err(|e| format!("写入临时文件失败: {e}"))?;
-
-    if path.exists() {
-        let _ = fs::remove_file(path);
-    }
-    fs::rename(&tmp, path).map_err(|e| format!("会话落盘失败: {e}"))?;
-    Ok(())
+    crate::atomic::write_atomic(path, &data).map_err(|e| e.replace("落盘失败", "会话落盘失败"))
 }
 
 pub fn now_ms() -> u64 {

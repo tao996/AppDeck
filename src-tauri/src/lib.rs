@@ -1,5 +1,6 @@
 mod android;
 mod apksig;
+mod atomic;
 mod cache;
 mod daemon;
 mod docker;
@@ -1688,6 +1689,15 @@ fn dev_autostart() -> Option<DevAutostart> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例必须**第一个**注册：第二个实例启动时直接退出，
+        // 并把已有窗口拉到前面——否则两个进程会同时写 state.json，互相覆盖。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -1753,6 +1763,7 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 
 
 
