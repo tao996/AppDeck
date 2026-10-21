@@ -3960,7 +3960,7 @@ function openSettings(): void {
       btn.className = "btn";
       btn.textContent = "管理命令模板…";
       btn.addEventListener("click", () => {
-        close();
+        // 不关闭设置面板：模板库叠在上面，关掉后还能继续改设置
         openTemplateManager();
       });
       row.append(lab, btn);
@@ -4309,7 +4309,9 @@ function openSettings(): void {
   renderSettingsTabs();
         const parts = [...d.notes];
         if (d.harmonyVersion) parts.unshift(d.harmonyVersion);
-        hint.textContent = parts.length ? parts.join("；") : "已填入检测结果，确认后保存";
+        const msg = parts.length ? parts.join("；") : "已填入检测结果，确认后保存";
+        hint.textContent = msg;
+        hint.title = msg;
       } catch (e) {
         hint.textContent = String(e);
       }
@@ -4695,6 +4697,8 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 

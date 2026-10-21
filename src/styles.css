@@ -1105,12 +1105,31 @@ body.dragging .term-pane {
   gap: 8px;
   padding: 0 14px;
   border-top: 1px solid var(--line);
+  /* 永远不换行：提示文字过长时自己省略，别把按钮挤到第二行 */
+  flex-wrap: nowrap;
+}
+
+.modal-foot > button,
+.modal-foot .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.modal-foot .set-version {
+  flex: 0 0 auto;
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .modal-hint {
   font-size: 11.5px;
   color: var(--fg-faint);
   max-width: 360px;
+  /* 能缩能省略，但绝不撑开按钮 */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1767,4 +1786,5 @@ select.set-input {
   font-weight: 500;
   color: #cfe2ff;
 }
+
 
