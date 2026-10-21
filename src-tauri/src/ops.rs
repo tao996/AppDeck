@@ -33,9 +33,12 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
 
     let has_pubspec = pb.join("pubspec.yaml").exists();
     let has_launch = pb.join(".vscode").join("launch.json").exists();
-    if !has_pubspec && !has_launch {
+    // 生态挂在命令上，所以这三种都算"项目"
+    let has_package = pb.join("package.json").exists();
+    if !has_pubspec && !has_launch && !has_package {
         return Err(
-            "不是 Flutter 项目（无 pubspec.yaml），也不是工作区（无 .vscode/launch.json）"
+            "这个目录不是 Flutter 项目（无 pubspec.yaml）、工作区（无 .vscode/launch.json）\
+             或前端项目（无 package.json）"
                 .to_string(),
         );
     }
@@ -155,6 +158,83 @@ pub fn resolve_workspace_root(raw: &str) -> Result<String, String> {
 ///
 /// 已存在的项目只刷新命令，不重复添加。
 /// 返回 (项目, 导入结果, 是否新建)
+/// 导入 package.json：解析 scripts 生成/同步命令。
+///
+/// 与 launch.json 一致：同路径项目复用（追加命令），否则新建。
+/// 返回 (项目, 合并结果, 是否新建, 包管理器)。
+pub fn import_package_from_path(
+    state: &mut State,
+    raw: &str,
+) -> Result<(Project, crate::npm::MergeOutcome, bool, crate::npm::Manager), String> {
+    let root = resolve_package_root(raw)?;
+    let pkg = PathBuf::from(&root).join("package.json");
+
+    // **先校验再改状态**（同 launch.json 的做法）
+    let scripts = crate::npm::read_scripts(&pkg)?;
+    if scripts.is_empty() {
+        return Err(format!("{} 里没有任何 scripts", pkg.display()));
+    }
+
+    let manager = crate::npm::detect_manager(
+        &PathBuf::from(&root),
+        state.settings.npm.manager.as_deref(),
+    );
+
+    let existing = state
+        .projects
+        .iter()
+        .find(|p| normalize(&p.path).eq_ignore_ascii_case(&normalize(&root)))
+        .map(|p| p.id.clone());
+
+    let (id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let p = add_project_to(state, &root)?;
+            (p.id, true)
+        }
+    };
+
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let outcome = crate::npm::merge_into(project, &scripts, manager);
+    Ok((project.clone(), outcome, created, manager))
+}
+
+/// 定位 package.json 所在目录：可以选文件（必须是 package.json）或目录
+fn resolve_package_root(raw: &str) -> Result<String, String> {
+    let p = PathBuf::from(raw.trim());
+    if p.as_os_str().is_empty() {
+        return Err("路径为空".to_string());
+    }
+
+    let dir = if p.is_file() {
+        if !p
+            .file_name()
+            .map(|n| n.eq_ignore_ascii_case("package.json"))
+            .unwrap_or(false)
+        {
+            return Err("请选择 package.json 文件或它所在的目录".to_string());
+        }
+        p.parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "路径无效".to_string())?
+    } else {
+        p
+    };
+
+    if !dir.is_dir() {
+        return Err(format!("目录不存在：{}", dir.display()));
+    }
+    if !dir.join("package.json").is_file() {
+        return Err(format!("{} 下没有 package.json", dir.display()));
+    }
+    Ok(normalize(&dir.display().to_string()))
+}
+
 pub fn import_launch_from_path(
     state: &mut State,
     raw: &str,
@@ -858,6 +938,56 @@ mod tests {
     }
 
     #[test]
+    fn import_package_creates_project_then_merges_without_duplicates() {
+        let root = std::env::temp_dir().join("fla_npm_import");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            br#"{"name":"demo","scripts":{"dev":"vite","build":"vite build","lint":"eslint ."}}"#,
+        )
+        .unwrap();
+        std::fs::write(root.join("pnpm-lock.yaml"), b"").unwrap();
+
+        let mut state = State::default();
+        let (project, outcome, created, manager) =
+            import_package_from_path(&mut state, &root.display().to_string()).unwrap();
+
+        assert!(created, "首次导入应新建项目");
+        assert_eq!(manager, crate::npm::Manager::Pnpm, "有 pnpm-lock 就用 pnpm");
+        assert_eq!(project.commands.len(), 3);
+        assert_eq!(outcome.added.len(), 3);
+
+        let dev = project.commands.iter().find(|c| c.name == "dev").unwrap();
+        assert_eq!(dev.kind, "run", "dev 属于长时间运行");
+        assert_eq!(dev.program.as_deref(), Some("pnpm"));
+
+        let build = project.commands.iter().find(|c| c.name == "build").unwrap();
+        assert_eq!(build.kind, "build", "build 属于一次性产物");
+
+        let lint = project.commands.iter().find(|c| c.name == "lint").unwrap();
+        assert_eq!(lint.kind, "custom", "其余归为普通任务");
+
+        // 再导入一次：不应重复添加
+        let (project2, outcome2, created2, _) =
+            import_package_from_path(&mut state, &root.display().to_string()).unwrap();
+        assert!(!created2, "同一路径应复用项目");
+        assert!(outcome2.added.is_empty(), "不应重复添加命令");
+        assert_eq!(outcome2.kept.len(), 3);
+        assert_eq!(project2.commands.len(), 3);
+
+        // 直接传 package.json 文件路径也应能定位
+        let (_, _, _, mgr) = import_package_from_path(
+            &mut state,
+            &root.join("package.json").display().to_string(),
+        )
+        .unwrap();
+        assert_eq!(mgr, crate::npm::Manager::Pnpm);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn custom_ps1_runs_through_powershell_with_project_placeholder() {
         let root = std::env::temp_dir().join("fla_ps1_cmd");
         let _ = std::fs::remove_dir_all(&root);
@@ -890,6 +1020,7 @@ mod tests {
             build_type: None,
             source: Some("manual".into()),
             scope: None,
+            stale: false,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -949,6 +1080,7 @@ mod tests {
             build_type: None,
             source: Some("manual".into()),
             scope: None,
+            stale: false,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -989,6 +1121,7 @@ mod tests {
             build_type: None,
             source: Some("manual".into()),
             scope: Some("global".into()),
+            stale: false,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1135,6 +1268,9 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
+
 
 
 

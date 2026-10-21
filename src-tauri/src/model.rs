@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 /// 内置命令模板：新项目会自动套用，也可在设置里增删改
 /// 内置命令模板。
@@ -25,6 +25,7 @@ pub fn default_templates() -> Vec<Command> {
         build_type: None,
         source: Some("template".into()),
         scope: Some("global".into()),
+        stale: false,
     }]
 }
 
@@ -99,6 +100,33 @@ pub struct Settings {
     pub harmony: HarmonySettings,
     #[serde(default)]
     pub terminal: TerminalSettings,
+    #[serde(default)]
+    pub npm: NpmSettings,
+    #[serde(default)]
+    pub docker: DockerSettings,
+}
+
+/// npm / Node 相关设置
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct NpmSettings {
+    /// auto | npm | pnpm | yarn
+    /// auto：按 lockfile 探测（pnpm-lock.yaml > yarn.lock > package-lock.json > npm）
+    #[serde(default)]
+    pub manager: Option<String>,
+    /// node / npm 所在目录；留空表示用 PATH
+    #[serde(rename = "nodePath", default)]
+    pub node_path: Option<String>,
+}
+
+/// Docker 相关设置
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DockerSettings {
+    /// docker 可执行文件路径；留空表示用 PATH
+    #[serde(rename = "dockerPath", default)]
+    pub docker_path: Option<String>,
+    /// auto | v2 | v1 —— v2 是 `docker compose`，v1 是 `docker-compose`
+    #[serde(rename = "composeStyle", default)]
+    pub compose_style: Option<String>,
 }
 
 /// 默认终端（项目右键「在终端中打开」使用）
@@ -183,6 +211,9 @@ pub struct Command {
     /// project | global：全局模板可在项目右键直接执行，无需加入项目
     #[serde(default)]
     pub scope: Option<String>,
+    /// 来源已失效：npm 命令对应的 script 已从 package.json 移除（保留命令，只做标记）
+    #[serde(default)]
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -226,6 +257,9 @@ impl Default for State {
         }
     }
 }
+
+
+
 
 
 

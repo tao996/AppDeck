@@ -135,6 +135,7 @@ pub fn import(workspace: &Path) -> Result<ImportOutcome, String> {
             build_type: None,
             source: Some("launch-json".to_string()),
             scope: Some("project".to_string()),
+            stale: false,
         });
     }
 
@@ -199,4 +200,5 @@ mod tests {
         assert!(out.commands.iter().any(|c| c.name == "jbook (Google Play)"));
     }
 }
+
 

@@ -12,6 +12,7 @@ mod platforms;
 mod jsonc;
 mod launch;
 mod model;
+mod npm;
 mod ops;
 mod pty;
 mod store;
@@ -91,6 +92,38 @@ fn import_launch(app: AppHandle, project_id: String) -> Result<ImportResponse, S
         skipped: outcome.skipped,
         warnings: outcome.warnings,
     })
+}
+
+/// 导入 package.json：解析 scripts 生成命令（生态挂在命令上，source = "npm"）
+#[tauri::command]
+fn import_package_path(app: AppHandle, path: String) -> Result<NpmImportResponse, String> {
+    let mut state = store::load(&app)?;
+    let (project, outcome, created, manager) = ops::import_package_from_path(&mut state, &path)?;
+    store::save(&app, &state)?;
+
+    Ok(NpmImportResponse {
+        state,
+        project_id: project.id,
+        project_name: project.name,
+        manager: manager.exe().to_string(),
+        created,
+        added: outcome.added,
+        kept: outcome.kept,
+        stale: outcome.stale,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NpmImportResponse {
+    state: State,
+    project_id: String,
+    project_name: String,
+    manager: String,
+    created: bool,
+    added: Vec<String>,
+    kept: Vec<String>,
+    stale: Vec<String>,
 }
 
 /// 从路径导入 launch.json：目录有 pubspec.yaml 就当普通 Flutter 项目，
@@ -1497,6 +1530,7 @@ pub fn run() {
             platform_matrix,
             invalidate_platform_cache,
             import_launch_path,
+            import_package_path,
             start_platform_action,
             filing_info,
             upsert_command,
@@ -1525,6 +1559,8 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 

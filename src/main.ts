@@ -71,6 +71,16 @@ interface SettingsModel {
     /** 终端可执行文件；留空自动探测 */
     path: string | null;
   };
+  npm: {
+    /** auto | npm | pnpm | yarn */
+    manager: string | null;
+    nodePath: string | null;
+  };
+  docker: {
+    dockerPath: string | null;
+    /** auto | v2 | v1 */
+    composeStyle: string | null;
+  };
 }
 
 interface Detected {
@@ -162,6 +172,8 @@ function defaultSettings(): SettingsModel {
       env: {},
     },
     terminal: { path: null },
+    npm: { manager: null, nodePath: null },
+    docker: { dockerPath: null, composeStyle: null },
   };
 }
 
@@ -974,6 +986,58 @@ async function importLaunchPath(): Promise<void> {
     toast(`${how}${what}「${res.projectName}」：${res.imported}/${res.total} 条命令${warn}`);
 
     if (res.warnings.length) console.warn("[launch.json]", res.warnings);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+interface NpmImportResponse {
+  state: State;
+  projectId: string;
+  projectName: string;
+  manager: string;
+  created: boolean;
+  added: string[];
+  kept: string[];
+  stale: string[];
+}
+
+/** 导入 package.json：把 scripts 变成命令（dev → 长时间运行，build → 一次性产物） */
+async function importPackagePath(): Promise<void> {
+  let picked: string | string[] | null = null;
+  try {
+    picked = await open({
+      directory: false,
+      multiple: false,
+      title: "选择 package.json",
+      filters: [{ name: "package.json", extensions: ["json"] }],
+      defaultPath: lastImportDir ?? state.projects[0]?.path ?? undefined,
+    });
+  } catch (e) {
+    toast(`打开文件选择器失败：${String(e)}`, "error");
+    return;
+  }
+  if (!picked) return;
+
+  const path = Array.isArray(picked) ? picked[0] : picked;
+  if (!path) return;
+  lastImportDir = path;
+
+  try {
+    const res = await invoke<NpmImportResponse>("import_package_path", { path });
+    state = res.state;
+    render();
+    void refreshFlutter(res.projectId);
+
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    const how = res.created ? "已导入" : "已更新";
+    const detail = parts.length ? `（${parts.join(" · ")}）` : "";
+    toast(`${how}「${res.projectName}」：${res.manager}${detail}`);
+
+    if (res.stale.length) console.warn("[package.json] 脚本已不存在：", res.stale);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -3224,8 +3288,8 @@ function openImportMenu(anchor: HTMLElement): void {
     {
       icon: "📦",
       label: "导入 package.json",
-      hint: "暂未实现",
-      disabled: true,
+      hint: "按 scripts 生成命令",
+      run: () => void importPackagePath(),
     },
     {
       icon: "🐳",
@@ -3328,6 +3392,7 @@ function openSettings(): void {
         <span>设置 · 工具链与模拟器目录</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
+      <div class="set-tabs" id="settings-tabs"></div>
       <div class="modal-body" id="settings-body"></div>
       <div class="modal-foot">
         <span class="set-version" id="settings-version"></span>
@@ -3342,6 +3407,44 @@ function openSettings(): void {
   document.body.appendChild(overlay);
 
   const body = overlay.querySelector("#settings-body") as HTMLDivElement;
+  const tabsEl = overlay.querySelector("#settings-tabs") as HTMLDivElement;
+
+  // 分页：currentTab 记录当前选中的页签
+  const SETTINGS_TABS: Array<[string, string]> = [
+    ["general", "通用"],
+    ["flutter", "Flutter"],
+    ["android", "Android"],
+    ["harmony", "鸿蒙"],
+    ["npm", "Npm"],
+    ["docker", "Docker"],
+  ];
+  let currentTab = "general";
+
+  const applyTab = (): void => {
+    for (const el of Array.from(body.querySelectorAll<HTMLElement>(".set-section"))) {
+      el.hidden = el.dataset.tab !== currentTab;
+    }
+    for (const b of Array.from(tabsEl.querySelectorAll<HTMLButtonElement>(".set-tab"))) {
+      b.classList.toggle("active", b.dataset.tab === currentTab);
+    }
+  };
+
+  const renderSettingsTabs = (): void => {
+    tabsEl.innerHTML = "";
+    for (const [id, label] of SETTINGS_TABS) {
+      const b = document.createElement("button");
+      b.className = "set-tab";
+      b.dataset.tab = id;
+      b.textContent = label;
+      b.addEventListener("click", () => {
+        currentTab = id;
+        applyTab();
+      });
+      tabsEl.appendChild(b);
+    }
+    applyTab();
+  };
+
   const hint = overlay.querySelector("#settings-hint") as HTMLSpanElement;
   const draft: SettingsModel = JSON.parse(
     JSON.stringify(state.settings ?? defaultSettings()),
@@ -3357,6 +3460,15 @@ function openSettings(): void {
   const section = (title: string, desc: string): HTMLDivElement => {
     const s = document.createElement("div");
     s.className = "set-section";
+    // 分区归属按标题判定，比在 build() 里逐处标记更不容易漏
+    const TAB_OF: Record<string, string> = {
+      Flutter: "flutter",
+      Android: "android",
+      HarmonyOS: "harmony",
+      Npm: "npm",
+      Docker: "docker",
+    };
+    s.dataset.tab = TAB_OF[title] ?? "general";
     const h = document.createElement("div");
     h.className = "set-title";
     h.textContent = title;
@@ -3641,6 +3753,7 @@ function openSettings(): void {
             const more = list.slice(1).map((x) => x.name).join("、");
             toast(`已选择 ${list[0].name}${more ? `；系统还检测到：${more}` : ""}`);
             build();
+  renderSettingsTabs();
           } catch (e) {
             toast(String(e), "error");
           }
@@ -3663,6 +3776,7 @@ function openSettings(): void {
             const p = Array.isArray(picked) ? picked[0] : picked;
             draft.terminal = { path: p };
             build();
+  renderSettingsTabs();
           } catch (e) {
             toast(String(e), "error");
           }
@@ -3679,9 +3793,93 @@ function openSettings(): void {
         "可直接敲 flutter --version。";
       s.appendChild(hint);
     }
+
+    // Npm
+    {
+      const s = section(
+        "Npm",
+        "导入 package.json 时按这里的规则生成命令；分类只是猜测，可在命令里逐条改",
+      );
+
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "包管理器";
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const m of ["auto", "npm", "pnpm", "yarn"]) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m === "auto" ? "auto（按 lockfile 探测）" : m;
+        if ((draft.npm?.manager ?? "auto") === m) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        draft.npm = { ...(draft.npm ?? { nodePath: null }), manager: sel.value };
+      });
+      const cell = document.createElement("div");
+      cell.className = "set-cell";
+      cell.appendChild(sel);
+      row.append(lab, cell);
+      s.appendChild(row);
+
+      field(s, "node 目录", draft.npm?.nodePath ?? "", (v) => {
+        const t = (v ?? "").trim();
+        draft.npm = { ...(draft.npm ?? { manager: null }), nodePath: t === "" ? null : t };
+      });
+
+      const hint = document.createElement("div");
+      hint.className = "set-desc";
+      hint.textContent =
+        "auto：pnpm-lock.yaml > yarn.lock > package-lock.json > npm。" +
+        "dev/start/serve → 长时间运行；build/bundle → 一次性产物；其余 → 普通任务。";
+      s.appendChild(hint);
+    }
+
+    // Docker
+    {
+      const s = section("Docker", "docker-compose 导入尚未实现，这里先保留路径与调用风格");
+
+      field(s, "docker 路径", draft.docker?.dockerPath ?? "", (v) => {
+        const t = (v ?? "").trim();
+        draft.docker = {
+          ...(draft.docker ?? { composeStyle: null }),
+          dockerPath: t === "" ? null : t,
+        };
+      });
+
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "compose 风格";
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const m of ["auto", "v2", "v1"]) {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent =
+          m === "auto" ? "auto（优先 v2）" : m === "v2" ? "v2：docker compose" : "v1：docker-compose";
+        if ((draft.docker?.composeStyle ?? "auto") === m) o.selected = true;
+        sel.appendChild(o);
+      }
+      sel.addEventListener("change", () => {
+        draft.docker = { ...(draft.docker ?? { dockerPath: null }), composeStyle: sel.value };
+      });
+      const cell = document.createElement("div");
+      cell.className = "set-cell";
+      cell.appendChild(sel);
+      row.append(lab, cell);
+      s.appendChild(row);
+
+      const hint = document.createElement("div");
+      hint.className = "set-desc";
+      hint.textContent = "「导入 docker-compose.yaml」目前是占位项，实现后会按 service 生成命令。";
+      s.appendChild(hint);
+    }
   };
 
   build();
+  renderSettingsTabs();
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#set-cancel") as HTMLButtonElement).addEventListener("click", close);
@@ -3701,6 +3899,7 @@ function openSettings(): void {
           draft.flutterTool.customPath = d.flutter;
         }
         build();
+  renderSettingsTabs();
         const parts = [...d.notes];
         if (d.harmonyVersion) parts.unshift(d.harmonyVersion);
         hint.textContent = parts.length ? parts.join("；") : "已填入检测结果，确认后保存";
@@ -3918,8 +4117,17 @@ async function boot(): Promise<void> {
     }
 
     // 开发期：自动打开设置页 / 模拟器菜单
-    if (await invoke<string | null>("dev_env", { name: "FLA_SETTINGS" })) {
+    const settingsHook = await invoke<string | null>("dev_env", { name: "FLA_SETTINGS" });
+    if (settingsHook) {
       openSettings();
+      // FLA_SETTINGS=npm 之类：打开后自动切到指定分页，便于截图核对
+      if (settingsHook !== "1") {
+        window.setTimeout(() => {
+          document
+            .querySelector<HTMLButtonElement>(`.set-tab[data-tab="${settingsHook}"]`)
+            ?.click();
+        }, 300);
+      }
     }
     if (await invoke<string | null>("dev_env", { name: "FLA_IMPORT_MENU" })) {
       window.setTimeout(() => {
@@ -4005,6 +4213,13 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
+
 
 
 
