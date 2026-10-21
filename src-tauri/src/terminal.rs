@@ -137,7 +137,18 @@ pub fn wrap_run(exe: &Path, command: &str) -> (String, Vec<String>) {
     }
 }
 
+/// 切目录的前缀：PowerShell 用 Set-Location，cmd 用 cd /d
+pub fn cd_prefix(shell: &Path, dir: &Path) -> String {
+    let d = dir.display().to_string();
+    if shell_name(shell) == "cmd" {
+        format!("cd /d \"{d}\" & ")
+    } else {
+        format!("Set-Location -LiteralPath {}; ", ps_quote(&d))
+    }
+}
+
 /// 把裸程序名解析成**真正的可执行文件**。
+
 ///
 /// Windows 上这步是必须的：`CreateProcessW("docker")` 会先命中
 /// `C:\Program Files\Docker\Docker\resources\bin\docker` 那个没有扩展名的脚本，
@@ -353,6 +364,7 @@ mod tests {
         assert!(args_for(Path::new("C:\\Windows\\System32\\cmd.exe")).is_empty());
     }
 }
+
 
 
 

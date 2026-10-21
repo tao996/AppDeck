@@ -215,6 +215,8 @@ interface StartResponse {
   args: string[];
   /** 预填到终端提示符、不回车（按 Enter 才执行） */
   prefill?: string | null;
+  /** 复用了已有终端（前端只要聚焦，不新建标签） */
+  reused?: boolean | null;
 }
 
 interface DevAutostart {
@@ -970,6 +972,14 @@ function mountSession(
 
 async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
   selectCommand(c.id);
+
+  // 普通命令（docker up/stop、npm test…）跑完就退出，没必要占一个标签：
+  // 投递到项目的常驻终端里，跑完 shell 还在，可以接着敲
+  if (c.kind === "custom") {
+    await runInTerminal(p, c);
+    return;
+  }
+
   try {
     const res = await invoke<StartResponse>("start_session", {
       projectId: p.id,
@@ -982,6 +992,36 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
       projectId: p.id,
       commandId: c.id,
     });
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** 项目当前活着的终端（kind=terminal 且未结束） */
+function projectShell(p: Proj): TermSession | undefined {
+  return sessions.find(
+    (s) => s.kind === "terminal" && s.projectId === p.id && s.status !== "stopped",
+  );
+}
+
+/** 把一条命令打进项目的常驻终端：有就复用，没有就新开一个 shell */
+async function runInTerminal(p: Proj, c: Cmd): Promise<void> {
+  const existing = projectShell(p);
+  try {
+    const res = await invoke<StartResponse>("run_in_terminal", {
+      projectId: p.id,
+      commandId: c.id,
+      reuseSessionId: existing?.id ?? null,
+      rows: 30,
+      cols: 100,
+    });
+
+    if (res.reused && existing) {
+      activateSession(existing.id);
+      return;
+    }
+
+    mountSession(res, "terminal", "debug", { projectId: p.id });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -1964,6 +2004,30 @@ async function restoreSessions(): Promise<void> {
   }
 
   renderTabs();
+
+  // 终端标签恢复成**可以直接输入的 shell**：历史留在上面，下面接一个新提示符。
+  // （run / build 标签仍保持"只读历史 + 重跑"，因为它们绑定了具体命令）
+  for (const s of sessions) {
+    if (s.kind !== "terminal" || !s.projectId) continue;
+    void (async () => {
+      try {
+        const started = await invoke<boolean>("resume_terminal", {
+          projectId: s.projectId,
+          sessionId: s.id,
+          rows: 30,
+          cols: 100,
+        });
+        if (!started) return;
+        s.restored = false;
+        s.status = "running";
+        renderTabs();
+        updateControls();
+      } catch {
+        /* 项目已移除就保持只读历史 */
+      }
+    })();
+  }
+
   activateSession(sessions[0].id);
   renderStatus();
 }
@@ -4697,6 +4761,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

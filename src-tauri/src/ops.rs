@@ -431,7 +431,79 @@ pub fn build_plan(
     build_plan_for(state, project, command, device_override)
 }
 
+/// 把一条命令翻译成「在交互式 shell 里可以敲的一行」。
+///
+/// 用于普通命令（custom）：不再给每条命令开一个进程，
+/// 而是把它打进项目常驻的终端里，跑完 shell 还在，可以接着敲。
+/// 命令的 cwd 与项目根不同时，前面补一个 cd。
+pub fn shell_line_for(
+    state: &State,
+    project: &Project,
+    command: &Command,
+) -> Result<String, String> {
+    let project_root = PathBuf::from(&project.path);
+
+    let cwd = match &command.cwd {
+        Some(c) if !c.trim().is_empty() => {
+            let expanded = expand_placeholders(c, &project_root, &project_root, None);
+            let p = PathBuf::from(&expanded);
+            if p.is_absolute() { p } else { project_root.join(p) }
+        }
+        _ => project_root.clone(),
+    };
+
+    let (program, args) = match external_program(command) {
+        Some(x) => x,
+        None => {
+            // 自定义命令：展开占位符，.ps1 交给 PowerShell
+            let raw = command.program.as_deref().unwrap_or("").trim();
+            if raw.is_empty() {
+                return Err("命令没有填写程序".to_string());
+            }
+            let flutter_exe = if raw.to_lowercase().contains("%flutter%") {
+                Some(crate::flutter::ctx_for(state, project, &cwd)?.exe)
+            } else {
+                None
+            };
+            let prog = expand_placeholders(raw, &project_root, &cwd, flutter_exe.as_deref());
+            let arg_list: Vec<String> = command
+                .args
+                .iter()
+                .map(|a| expand_placeholders(a, &project_root, &cwd, flutter_exe.as_deref()))
+                .collect();
+
+            let prog = crate::terminal::resolve_executable(&prog);
+            if prog.to_ascii_lowercase().ends_with(".ps1") {
+                let ps = crate::terminal::powershell_for(state.settings.terminal.path.as_deref());
+                let (p, a) = crate::terminal::wrap_ps1(&ps, &prog, &arg_list);
+                (p, a)
+            } else {
+                (prog, arg_list)
+            }
+        }
+    };
+
+    let shell = crate::terminal::resolve(state.settings.terminal.path.as_deref());
+    let line = crate::terminal::command_line(&shell, &program, &args);
+
+    // cwd 不在项目根时先切目录（同一个 shell 是项目级共享的）
+    let same_dir = cwd
+        .canonicalize()
+        .ok()
+        .zip(project_root.canonicalize().ok())
+        .map(|(a, b)| a == b)
+        .unwrap_or(false);
+
+    if same_dir {
+        Ok(line)
+    } else {
+        let cd = crate::terminal::cd_prefix(&shell, &cwd);
+        Ok(format!("{cd}{line}"))
+    }
+}
+
 /// 把「项目 + 命令」翻译成可直接 spawn 的程序与参数。
+
 ///
 /// - `run` / `build`：调用 flutter，自动补 `run -d -t` 或 `build <type> --release`
 /// - `custom`：用户直接给程序与参数；`program` 支持 `%FLUTTER%` 占位符
@@ -1147,6 +1219,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
+    fn shell_line_for_docker_uses_resolved_exe() {
+        let root = std::env::temp_dir().join("fla_shell_line");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let state = State::default();
+        let project = Project {
+            id: "p-sh".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "workspace".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+        let cmd = Command {
+            id: "d1".into(),
+            name: "nginx · 启动".into(),
+            kind: "custom".into(),
+            program: Some("docker".into()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec![
+                "compose".into(),
+                "-f".into(),
+                "docker-compose.yaml".into(),
+                "up".into(),
+                "-d".into(),
+                "nginx".into(),
+            ],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("docker".into()),
+            scope: Some("project".into()),
+            stale: false,
+            group: Some("nginx".into()),
+            role: Some("up".into()),
+        };
+
+        let line = shell_line_for(&state, &project, &cmd).unwrap();
+
+        // 必须是「可执行文件 + 参数」的一行，且带上 docker 子命令
+        assert!(line.contains("compose"), "实际: {line}");
+        assert!(line.contains("up") && line.contains("-d") && line.contains("nginx"), "实际: {line}");
+        // 裸名 docker 已解析成 .exe（否则 CreateProcess 报 os error 193）
+        if crate::terminal::which("docker").is_some() {
+            assert!(
+                line.to_ascii_lowercase().contains("docker.exe"),
+                "应解析成 docker.exe，实际: {line}"
+            );
+        }
+        // cwd 等于项目根时不该出现 cd 前缀
+        assert!(!line.contains("Set-Location"), "不该有多余 cd：{line}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
     fn import_compose_creates_project_with_service_commands() {
         let root = std::env::temp_dir().join("fla_compose_import");
         let _ = std::fs::remove_dir_all(&root);
@@ -1520,6 +1652,8 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
 
 
 

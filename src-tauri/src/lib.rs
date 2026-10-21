@@ -234,6 +234,9 @@ struct StartResponse {
     /// 「预填」用：需要输入到终端提示符、但**不回车**的命令行
     #[serde(skip_serializing_if = "Option::is_none")]
     prefill: Option<String>,
+    /// 是否复用了已有终端（true 时前端只聚焦，不新建标签）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reused: Option<bool>,
 }
 
 fn session_of(
@@ -292,6 +295,7 @@ fn start_session(
         program: plan.program,
         args: plan.args,
         prefill: None,
+        reused: None,
     })
 }
 
@@ -350,6 +354,7 @@ fn start_template_session(
         program: plan.program,
         args: plan.args,
         prefill: None,
+        reused: None,
     })
 }
 
@@ -783,6 +788,139 @@ fn start_platform_action(
         program: plan.program,
         args: plan.args,
         prefill: None,
+        reused: None,
+    })
+}
+
+/// 把一个**恢复的**终端标签重新拉起来：用原来的会话 id 起一个 shell，
+/// 这样历史输出还在，下面接一个可以继续输入的提示符。
+#[tauri::command]
+fn resume_terminal(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    session_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<bool, String> {
+    // 已经在跑就别重复起
+    if session_of(&reg, &session_id).is_ok() {
+        return Ok(false);
+    }
+
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    let plan = ops::terminal_plan(&state, project, rows, cols)?;
+    let session = pty::spawn(
+        app.clone(),
+        session_id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(session_id, session);
+
+    Ok(true)
+}
+
+/// 在项目的常驻终端里执行一条普通命令（custom）。
+///
+/// 有活着的终端就**直接敲进去**，没有就新开一个 shell 再把命令打进去。
+/// 这样 `docker compose up -d` 跑完 shell 还在，可以接着 `docker ps`。
+#[tauri::command]
+fn run_in_terminal(
+    app: AppHandle,
+    reg: tauri::State<'_, pty::Registry>,
+    project_id: String,
+    command_id: String,
+    reuse_session_id: Option<String>,
+    rows: u16,
+    cols: u16,
+) -> Result<StartResponse, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    let command = project
+        .commands
+        .iter()
+        .find(|c| c.id == command_id)
+        .ok_or_else(|| "命令不存在".to_string())?;
+
+    let line = ops::shell_line_for(&state, project, command)?;
+    let title = format!("{} · 终端", project.name);
+
+    // 1) 复用已有终端
+    if let Some(id) = reuse_session_id.filter(|s| !s.trim().is_empty()) {
+        if let Ok(session) = session_of(&reg, &id) {
+            session.write(&format!("{line}\r"))?;
+            return Ok(StartResponse {
+                id,
+                pid: session.pid,
+                title,
+                device: "—".to_string(),
+                cwd: project.path.clone(),
+                program: String::new(),
+                args: Vec::new(),
+                prefill: None,
+                reused: Some(true),
+            });
+        }
+    }
+
+    // 2) 新开一个 shell，稍后把命令敲进去
+    //    延迟是为了让 shell 先把提示符准备好，避免输入被初始化过程吃掉
+    let plan = ops::terminal_plan(&state, project, rows, cols)?;
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    let id = format!("sess-{}-{seq}", logs::now_ms());
+
+    let session = pty::spawn(
+        app.clone(),
+        id.clone(),
+        &plan.program,
+        &plan.args,
+        plan.cwd.clone(),
+        &plan.env,
+        rows,
+        cols,
+    )?;
+    let pid = session.pid;
+
+    reg.0
+        .lock()
+        .map_err(|_| "会话注册表锁定失败".to_string())?
+        .insert(id.clone(), session.clone());
+
+    let writer = session.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(220));
+        let _ = writer.write(&format!("{line}\r"));
+    });
+
+    Ok(StartResponse {
+        id,
+        pid,
+        title,
+        device: "—".to_string(),
+        cwd: plan.cwd.display().to_string(),
+        program: plan.program,
+        args: plan.args,
+        prefill: None,
+        reused: Some(false),
     })
 }
 
@@ -839,6 +977,7 @@ fn prefill_run(
         program: plan.program,
         args: plan.args,
         prefill: Some(line),
+        reused: None,
     })
 }
 
@@ -896,6 +1035,7 @@ fn open_terminal(
         program: plan.program,
         args: plan.args,
         prefill: None,
+        reused: None,
     })
 }
 
@@ -1129,6 +1269,7 @@ fn start_doctor_fix(
         program: plan.program,
         args: plan.args,
         prefill: None,
+        reused: None,
     })
 }
 
@@ -1583,6 +1724,8 @@ pub fn run() {
             detect_terminals,
             open_terminal,
             prefill_run,
+            run_in_terminal,
+            resume_terminal,
             detect_toolchains,
             flutter_doctor,
             start_doctor_fix,
@@ -1597,6 +1740,11 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
+
+
 
 
 
