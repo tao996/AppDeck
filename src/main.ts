@@ -873,7 +873,7 @@ function renderTree(): void {
           e.stopPropagation();
           void runCommand(p, c);
         });
-        row.addEventListener("contextmenu", (e) => openDeviceMenu(e, p, c));
+        row.addEventListener("contextmenu", (e) => openCommandMenu(e, p, c));
         list.appendChild(row);
       }
 
@@ -2369,6 +2369,97 @@ function openServiceMenu(
   const box = document.createElement("div");
   menu.querySelector(".dm-body")!.appendChild(box);
   renderMenuRows(box, rows);
+}
+
+/**
+ * 这条命令是否真的需要挑设备。
+ *
+ * 只有「跑起来并连设备」的 flutter run 类命令才有意义；
+ * npm / docker / build / 模板命令（如 Pub Get）跟设备毫无关系，
+ * 给它们弹「自动选择 / windows / chrome / Pixel5」是纯误导。
+ */
+function needsDevice(c: Cmd): boolean {
+  if (c.kind !== "run") return false;
+  const src = (c.source ?? "").toLowerCase();
+  if (src === "npm" || src === "docker") return false;
+  // launch.json 里的命令都是 flutter run 配置，program 是空的（后端才拼 flutter run）
+  if (src === "launch-json") return true;
+  const prog = (c.program ?? "").toLowerCase();
+  return prog.includes("flutter");
+}
+
+/** 命令右键：需要设备 → 设备菜单；否则 → 普通命令菜单 */
+function openCommandMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
+  if (needsDevice(c)) {
+    openDeviceMenu(ev, p, c);
+    return;
+  }
+
+  ev.preventDefault();
+  closeDeviceMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.max(8, Math.min(ev.clientX, window.innerWidth - 320))}px`;
+  menu.style.top = `${Math.max(8, Math.min(ev.clientY, window.innerHeight - 220))}px`;
+  menu.innerHTML = `
+    <div class="dm-head">${esc(c.name)}</div>
+    <div class="dm-body"></div>
+  `;
+  document.body.appendChild(menu);
+  deviceMenuEl = menu;
+
+  const body = menu.querySelector(".dm-body") as HTMLDivElement;
+
+  const addGroup = (title: string): void => {
+    const g = document.createElement("div");
+    g.className = "dm-group";
+    g.textContent = title;
+    body.appendChild(g);
+  };
+
+  const addItem = (name: string, sub: string, onClick: () => void): void => {
+    const item = document.createElement("div");
+    item.className = "dm-item";
+    item.innerHTML = `<span class="dm-name">${esc(name)}</span>${sub ? `<span class="dm-sub">${esc(sub)}</span>` : ""}`;
+    item.addEventListener("click", () => {
+      closeDeviceMenu();
+      onClick();
+    });
+    body.appendChild(item);
+  };
+
+  // 运行提示按类型说清楚它会落在哪：普通命令进项目终端，run/build 各占一个标签
+  const where =
+    c.kind === "custom"
+      ? "在项目终端里执行（跑完还能接着敲）"
+      : c.kind === "build"
+        ? "独立标签，结束发通知、识别产物"
+        : "独立标签运行";
+
+  addItem("运行", where, () => void runCommand(p, c));
+
+  addGroup("命令");
+  addItem("编辑命令…", "名称 / 参数 / 环境变量", () => void openCommandDialog(p, c));
+  addItem("删除命令", "从项目里移除（不影响磁盘文件）", () => {
+    void (async () => {
+      const ok = await confirm(`删除命令「${c.name}」？`, {
+        title: "删除命令",
+        kind: "warning",
+      });
+      if (!ok) return;
+      try {
+        state = await invoke<State>("remove_command", {
+          projectId: p.id,
+          commandId: c.id,
+        });
+        render();
+        toast("命令已删除");
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    })();
+  });
 }
 
 function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
@@ -4717,7 +4808,8 @@ async function boot(): Promise<void> {
       const cmd = proj?.commands[0];
       if (proj && cmd) {
         const ev = new MouseEvent("contextmenu", { clientX: 1180, clientY: 210 });
-        openDeviceMenu(ev, proj, cmd);
+        // 与真实右键一致：需要设备 → 设备菜单，否则 → 命令菜单
+        openCommandMenu(ev, proj, cmd);
       }
     }
 
@@ -4899,6 +4991,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
