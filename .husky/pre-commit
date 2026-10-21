@@ -1,0 +1,10 @@
+# 提交前把关：类型 + 测试。
+#
+# 为什么不做 Prettier 自动格式化：src/main.ts 有 5000+ 行，
+# 一旦让 Prettier 全量重排，下一次改动会变成"整文件重写"的 diff，
+# 真正的逻辑改动被淹没。格式化应该单独做一次、单独提交。
+#
+# 着急时可以跳过：git commit --no-verify
+
+npm run typecheck
+npm run test
