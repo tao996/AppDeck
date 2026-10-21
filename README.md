@@ -27,6 +27,7 @@
 | P2 | 备案公钥（解析 APK 签名块） | ✅ 完成 |
 | P3 | 多生态导入（`package.json` / `docker-compose.yaml`） | ✅ 完成 |
 | P4 | 普通命令共用项目终端（不再一命令一标签） | ✅ 完成 |
+| P5 | 模板分类 / 命令右键分流 / 原子落盘 + 单实例 / 提交前把关 | ✅ 完成 |
 
 ### 平台菜单 + 备案信息
 
@@ -177,6 +178,43 @@
   会命中脚本并报 `os error 193`；`npm` 同理（真正该跑的是 `npm.cmd`）。
   现在按 PATH 依次找 `.exe` → `.cmd` → `.bat`
 
+### 命令右键：按"会不会连设备"分流
+
+**不是所有命令都该弹设备菜单。** npm 的 `build`、模板里的 `Pub Get` 跟设备毫无关系，
+给它们列「自动选择 / Windows / Chrome / Pixel 5」是纯误导。
+
+| 命令类型 | 右键菜单 |
+|---|---|
+| flutter run 类（`source=launch-json`，或 program 含 flutter，且 `kind=run`） | 自动选择 / 在线设备 / 可启动模拟器 / 编辑命令 |
+| 其余（npm、docker、build、模板） | 运行（副标题说明落点）/ 编辑命令… / 删除命令 |
+
+判定要照顾一个坑：`launch.json` 生成的命令 **program 是空的**（后端才拼 `flutter run`），
+只看 program 会把它们误判成"不需要设备"。
+
+### 数据安全：原子落盘 + 单实例
+
+- **落盘是原子替换**：临时文件名带 pid + 纳秒，写完直接 `rename` 覆盖。
+  Rust 的 `fs::rename` 在 Windows 上走 `MoveFileEx(MOVEFILE_REPLACE_EXISTING)`，
+  本身就能替换已存在文件——**不要"先删后改名"**，那会留下"state.json 不存在"的窗口，
+  这期间断电就把配置丢了
+- `state.json` 与会话记录（`sessions.json`）共用 `atomic::write_atomic`
+- **单实例**（`tauri-plugin-single-instance`）：第二个实例启动即退出，并把已有窗口拉到前面。
+  两个进程同时写同一份 `state.json`，后写的会把先写的改动整个覆盖——
+  原子写只保证文件不损坏，救不了这种语义上的丢失
+
+### 提交前把关（husky）
+
+```bash
+.husky/pre-commit
+  npm run typecheck    # tsc --noEmit
+  npm run test         # cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+约 6 秒。着急时 `git commit --no-verify` 跳过。
+
+**刻意没接 Prettier 自动格式化**：`src/main.ts` 有 5000+ 行，全量重排会让真实改动
+淹没在"整文件重写"的 diff 里；格式化应该单独做一次、单独提交。
+
 ### 体检（§6.6 / §14）· 工具栏按钮
 
 启动后后台跑一次 `flutter doctor`，状态直接显示在工具栏按钮上，点开是完整报告：
@@ -227,6 +265,9 @@
   - `global` — **项目右键即可执行，不写入项目命令列表**
 - **自动套用**：新增「单应用」项目时自动把模板实例化为该项目的命令，不再是空树
 - **按需导入**：项目树底部「⤓ 从模板导入…」，勾选后导入（支持全选 / 全不选，按名称+类型去重）
+- **分类**：模板带 `category`（Flutter / npm / Docker / 其他），决定模板库里的分组和导入时的筛选条；
+  老模板没有这个字段时按 program/args 自动推断（`%FLUTTER%`→Flutter、npm/pnpm/yarn→npm、
+  docker→docker），模板库右侧的下拉可以直接改
 - **工作区不自动套用**：monorepo 的命令来自 `launch.json`，避免污染
 
 ![命令模板库](docs/shot-templates.png)
@@ -305,7 +346,7 @@
 cd src-tauri && cargo test
 ```
 
-78 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`。
+82 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）。
 
 诊断工具：
 ```bash
@@ -391,7 +432,8 @@ npm run tauri build  # 打包安装程序
 ├── src-tauri/                  Rust 后端
 │   ├── src/lib.rs              Tauri 命令注册
 │   ├── src/ops.rs              业务操作（添加项目 / 导入 / 计划拼装），纯函数便于测试
-│   ├── src/store.rs            状态读写（原子落盘 / 损坏恢复）
+│   ├── src/store.rs            状态读写（原子落盘 / 损坏恢复 / 旧目录迁移）
+│   ├── src/atomic.rs           原子写文件（唯一临时文件 + rename 覆盖）
 │   ├── src/cache.rs            磁盘缓存（平台矩阵 / 模拟器列表）
 │   ├── src/launch.rs           launch.json 解析
 │   ├── src/npm.rs              package.json 解析（scripts → 命令、包管理器探测）
@@ -442,7 +484,9 @@ npm run tauri build  # 打包安装程序
 6. **外部程序必须解析成真实可执行文件**。Windows 上 `CreateProcessW("docker")` 会命中
    Docker Desktop 那个无扩展名的 shell 脚本并报 `os error 193`；`npm` 同理（该跑 `npm.cmd`）。
    一律走 `terminal::resolve_executable`。
-7. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
+7. **配置落盘只走 `atomic::write_atomic`**。不要自己写「临时文件 → 删原文件 → 改名」：
+   先删后改名会留下"目标文件不存在"的窗口，这期间断电就把配置丢了。
+8. **v1 不做**搜索 / 分屏 / 同步输入 / 日志落盘 / 时间戳 / 快捷命令栏。
 
 详见规格 §3.1、§5.3 与 §16。
 
@@ -463,6 +507,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 
