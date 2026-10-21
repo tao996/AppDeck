@@ -37,6 +37,8 @@ interface Cmd {
   buildType?: string | null;
   source?: string | null;
   scope?: string | null;
+  /** npm 命令对应的脚本已从 package.json 移除 */
+  stale?: boolean;
 }
 
 interface Proj {
@@ -637,12 +639,19 @@ function renderTree(): void {
     const chipTxt = loading ? "检测中…" : SOURCE_TEXT[info.source];
     const verTxt = loading ? "" : info.ok ? info.version ?? "" : "不可用";
 
+    // 徽章按"里面装了什么"来叫，而不是内部 kind：
+    // 只有 npm 命令的项目叫「Npm」，比笼统的「工作区」准确
+    const hasNpm = p.commands.some((c) => c.source === "npm");
+    const kindLabel =
+      p.kind === "single" ? "应用" : hasNpm && p.commands.every((c) => c.source === "npm") ? "Npm" : "工作区";
+    const kindIcon = p.kind === "single" ? "📁" : hasNpm ? "📦" : "🗂";
+
     head.innerHTML = `
       <span class="chev">${isCollapsed ? "▸" : "▾"}</span>
-      <span class="pico">${p.kind === "workspace" ? "🗂" : "📁"}</span>
+      <span class="pico">${kindIcon}</span>
       <span class="pname">${esc(projectLabel(p))}</span>
       <span class="pmeta">
-        <span class="chip kind-${p.kind}">${p.kind === "workspace" ? "工作区" : "应用"}</span>
+        <span class="chip kind-${p.kind}">${kindLabel}</span>
         <span class="chip ${chipCls}">${esc(chipTxt)}</span>
         ${info?.fvmVersion ? `<span class="chip chip-fvm" title="FVM 工程（.fvmrc 声明 ${esc(info.fvmVersion)}）">FVM</span>` : ""}
         ${verTxt ? `<span class="fver">${esc(verTxt)}</span>` : ""}
@@ -686,11 +695,14 @@ function renderTree(): void {
 
       for (const c of p.commands) {
         const row = document.createElement("div");
-        row.className = "cmd" + (selectedCommand === c.id ? " selected" : "");
+        row.className =
+          "cmd" + (selectedCommand === c.id ? " selected" : "") + (c.stale ? " stale" : "");
         const mode = c.flutterMode ?? "debug";
+        const icon = c.source === "npm" ? "⬢" : c.kind === "build" ? "📦" : "🚀";
         row.innerHTML = `
-          <span class="cico">${c.kind === "build" ? "📦" : "🚀"}</span>
+          <span class="cico">${icon}</span>
           <span class="cname">${esc(c.name)}</span>
+          ${c.stale ? `<span class="chip cmd-stale" title="package.json 里已没有这个脚本">已失效</span>` : ""}
           ${mode !== "debug" ? `<span class="cmd-mode">${esc(mode)}</span>` : ""}
           <span class="cnote">${esc(c.cwd ?? "")}</span>
           <button class="run-btn" title="运行此命令（也可双击该行）">▶</button>
@@ -4139,6 +4151,23 @@ async function boot(): Promise<void> {
       const anchor = document.querySelector<HTMLButtonElement>("#btn-emulators");
       if (anchor) openEmulatorMenu(anchor);
     }
+    const pkgHook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_PKG" });
+    if (pkgHook) {
+      window.setTimeout(() => {
+        void (async () => {
+          try {
+            const res = await invoke<NpmImportResponse>("import_package_path", { path: pkgHook });
+            state = res.state;
+            render();
+            toast(
+              `导入「${res.projectName}」：新增 ${res.added.length} 条（${res.added.join(", ")}）`,
+            );
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      }, 800);
+    }
     if (await invoke<string | null>("dev_env", { name: "FLA_TEMPLATES" })) {
       openTemplateManager();
     }
@@ -4213,6 +4242,8 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 
