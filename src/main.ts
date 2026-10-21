@@ -4680,21 +4680,26 @@ async function boot(): Promise<void> {
     }
     const svcHook = await invoke<string | null>("dev_env", { name: "FLA_SERVICE_MENU" });
     if (svcHook) {
-      window.setTimeout(() => {
+      // 树是异步渲染的（要先展开项目），单次 setTimeout 容易扑空 → 轮询 3 秒
+      let tries = 0;
+      const fire = (): void => {
         const row = Array.from(document.querySelectorAll<HTMLDivElement>(".cmd.svc")).find(
           (r) => r.querySelector(".cname")?.textContent === svcHook,
         );
-        if (row) {
-          const r = row.getBoundingClientRect();
-          row.dispatchEvent(
-            new MouseEvent("contextmenu", {
-              bubbles: true,
-              clientX: Math.round(r.left + 60),
-              clientY: Math.round(r.top + 10),
-            }),
-          );
+        if (!row) {
+          if (++tries < 12) window.setTimeout(fire, 250);
+          return;
         }
-      }, 900);
+        const r = row.getBoundingClientRect();
+        row.dispatchEvent(
+          new MouseEvent("contextmenu", {
+            bubbles: true,
+            clientX: Math.round(r.left + 80),
+            clientY: Math.round(r.top + 12),
+          }),
+        );
+      };
+      window.setTimeout(fire, 600);
     }
     const composeHook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_COMPOSE" });
     if (composeHook) {
@@ -4787,6 +4792,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
