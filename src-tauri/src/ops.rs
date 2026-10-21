@@ -467,13 +467,23 @@ pub fn prefill_plan(
         return Err(format!("工作目录不存在：{}", cwd.display()));
     }
 
-    let ctx = crate::flutter::ctx_for(state, project, &cwd)?;
+    let ctx = crate::flutter::ctx_for(state, project, &cwd).ok();
     let term = crate::terminal::resolve(state.settings.terminal.path.as_deref());
-    let line = crate::terminal::command_line(
-        &term,
-        &ctx.exe.display().to_string(),
-        &run_args(command, command.device_id.as_deref()),
-    );
+
+    // 外部程序（npm / docker）直接用自己的 program+args；只有 flutter 才需要 ctx
+    let (prog, arg_list) = if let Some((p, a)) = external_program(command) {
+        (p, a)
+    } else {
+        let c = ctx
+            .as_ref()
+            .ok_or_else(|| "找不到该项目的 flutter，无法生成命令".to_string())?;
+        (
+            c.exe.display().to_string(),
+            run_args(command, command.device_id.as_deref()),
+        )
+    };
+
+    let line = crate::terminal::command_line(&term, &prog, &arg_list);
 
     Ok((
         Plan {
@@ -482,13 +492,31 @@ pub fn prefill_plan(
             cwd,
             title: format!("{} · {}", project.name, command.name),
             device: "—".to_string(),
-            env: ctx.env_with_path(),
+            env: ctx.as_ref().map(|c| c.env_with_path()).unwrap_or_default(),
         },
         line,
     ))
 }
 
+/// npm / docker 这类命令是"外部程序"，不该走 flutter 分支。
+///
+/// **不能用 kind 判断**：kind=run 现在表示"开发阶段（长时间运行）"，
+/// flutter run 和 `npm run dev` / `docker compose logs -f` 都是 run，
+/// 但后者必须直接执行 program，不能拼成 `flutter run -f ...`。
+fn external_program(command: &Command) -> Option<(String, Vec<String>)> {
+    let src = command.source.as_deref().unwrap_or("");
+    if !matches!(src, "npm" | "docker") {
+        return None;
+    }
+    let prog = command.program.as_deref().unwrap_or("").trim();
+    if prog.is_empty() {
+        return None;
+    }
+    Some((prog.to_string(), command.args.clone()))
+}
+
 /// 大小写无关的字面替换（`%PROJECT%` / `%project%` 都认）
+
 fn replace_ci(hay: &str, needle: &str, val: &str) -> String {
     let lower = hay.to_lowercase();
     let n = needle.to_lowercase();
@@ -577,7 +605,13 @@ pub fn build_plan_for(
         }
     };
 
-    let (program, args) = match command.kind.as_str() {
+    // npm / docker 是"外部程序"：必须按 program+args 直接执行。
+    // **不能只看 kind**——kind=run 表示"开发阶段"，flutter run 与 npm run dev / docker logs -f
+    // 都是 run，但后者拼进 flutter 命令行就成了 `flutter run -f ...`（实测踩过）。
+    let (program, args) = if let Some((prog, list)) = external_program(command) {
+        wrap_batch(prog, list)
+    } else {
+        match command.kind.as_str() {
         "custom" => {
             let raw = command.program.as_deref().unwrap_or("").trim();
             if raw.is_empty() {
@@ -660,6 +694,7 @@ pub fn build_plan_for(
             } else {
                 wrap_batch(exe.display().to_string(), flutter_args)
             }
+        }
         }
     };
 
@@ -1015,6 +1050,76 @@ mod tests {
     }
 
     #[test]
+    fn npm_and_docker_commands_do_not_go_through_flutter() {
+        let root = std::env::temp_dir().join("fla_ext_dispatch");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let state = State::default();
+        let project = Project {
+            id: "p-ext".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "workspace".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+
+        // docker 的 logs 也是 kind=run，但必须执行 docker 而不是 flutter
+        let docker = Command {
+            id: "d1".into(),
+            name: "web · 日志".into(),
+            kind: "run".into(),
+            program: Some("docker".into()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["compose".into(), "logs".into(), "-f".into(), "web".into()],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("docker".into()),
+            scope: Some("project".into()),
+            stale: false,
+            group: Some("web".into()),
+            role: Some("logs".into()),
+        };
+        let plan = build_plan_for(&state, &project, &docker, None).unwrap();
+        assert!(
+            plan.program.eq_ignore_ascii_case("docker") || plan.program.ends_with("docker.exe"),
+            "docker 命令不该走 flutter，实际: {}",
+            plan.program
+        );
+        assert_eq!(plan.args, vec!["compose", "logs", "-f", "web"]);
+
+        // npm 的 dev 同理
+        let npm = Command {
+            id: "n1".into(),
+            name: "dev".into(),
+            kind: "run".into(),
+            program: Some("npm".into()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["run".into(), "dev".into()],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("npm".into()),
+            scope: Some("project".into()),
+            stale: false,
+            group: None,
+            role: None,
+        };
+        let plan = build_plan_for(&state, &project, &npm, None).unwrap();
+        assert!(plan.program.ends_with("npm") || plan.program.ends_with("npm.cmd"), "实际: {}", plan.program);
+        assert_eq!(plan.args, vec!["run", "dev"]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn import_compose_creates_project_with_service_commands() {
         let root = std::env::temp_dir().join("fla_compose_import");
@@ -1032,7 +1137,7 @@ mod tests {
 
         assert!(created, "只有 compose 的目录也应能建项目");
         assert_eq!(services, 2);
-        assert_eq!(outcome.added.len(), 5, "2 服务 × 2 + down");
+        assert_eq!(outcome.added.len(), 15, "2 服务 × 6 个动作 + 3 个项目级");
 
         let up = project.commands.iter().find(|c| c.name == "web · 启动").unwrap();
         assert_eq!(up.kind, "custom");
@@ -1136,6 +1241,8 @@ mod tests {
             source: Some("manual".into()),
             scope: None,
             stale: false,
+            group: None,
+            role: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1196,6 +1303,8 @@ mod tests {
             source: Some("manual".into()),
             scope: None,
             stale: false,
+            group: None,
+            role: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1237,6 +1346,8 @@ mod tests {
             source: Some("manual".into()),
             scope: Some("global".into()),
             stale: false,
+            group: None,
+            role: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1383,6 +1494,11 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
+
+
+
 
 
 

@@ -111,55 +111,15 @@ pub fn commands_for(
 
     let mut out = Vec::new();
 
-    for svc in &compose.services {
-        // up -d：启动后在后台，属于一次性动作
-        out.push(Command {
-            id: make_id("docker", &format!("up|{}", svc.name)),
-            name: format!("{} · 启动", svc.name),
-            kind: "custom".to_string(),
-            program: Some(program.clone()),
-            cwd: Some(cwd.to_string()),
-            flutter_mode: None,
-            args: base(&["up", "-d", &svc.name]),
-            env: Default::default(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: None,
-            source: Some("docker".to_string()),
-            scope: Some("project".to_string()),
-            stale: false,
-        });
-
-        // logs -f：长时间运行
-        out.push(Command {
-            id: make_id("docker", &format!("logs|{}", svc.name)),
-            name: format!("{} · 日志", svc.name),
-            kind: "run".to_string(),
-            program: Some(program.clone()),
-            cwd: Some(cwd.to_string()),
-            flutter_mode: None,
-            args: base(&["logs", "-f", &svc.name]),
-            env: Default::default(),
-            tool_args: vec![],
-            device_id: None,
-            emulator_id: None,
-            build_type: None,
-            source: Some("docker".to_string()),
-            scope: Some("project".to_string()),
-            stale: false,
-        });
-    }
-
-    // 整份文件的 down
-    out.push(Command {
-        id: make_id("docker", "down|*"),
-        name: "全部停止".to_string(),
-        kind: "custom".to_string(),
-        program: Some(program),
+    // 统一的命令构造：group=服务名（项目级动作为 None），role 决定菜单里显示成什么
+    let mk = |group: Option<&str>, role: &str, label: String, kind: &str, rest: &[&str]| Command {
+        id: make_id("docker", &format!("{role}|{}", group.unwrap_or("*"))),
+        name: label,
+        kind: kind.to_string(),
+        program: Some(program.clone()),
         cwd: Some(cwd.to_string()),
         flutter_mode: None,
-        args: base(&["down"]),
+        args: base(rest),
         env: Default::default(),
         tool_args: vec![],
         device_id: None,
@@ -168,7 +128,48 @@ pub fn commands_for(
         source: Some("docker".to_string()),
         scope: Some("project".to_string()),
         stale: false,
-    });
+        group: group.map(|s| s.to_string()),
+        role: Some(role.to_string()),
+    };
+
+    for svc in &compose.services {
+        let s = svc.name.as_str();
+        // 启动：后台运行，一次性动作
+        out.push(mk(Some(s), "up", format!("{s} · 启动"), "custom", &["up", "-d", s]));
+        // 停止：容器还在，可再启动
+        out.push(mk(Some(s), "stop", format!("{s} · 停止"), "custom", &["stop", s]));
+        // 重启：不重建容器
+        out.push(mk(
+            Some(s),
+            "restart",
+            format!("{s} · 重启"),
+            "custom",
+            &["restart", s],
+        ));
+        // 删除容器：-s 先停再删；卷保留，不可逆，需二次确认
+        out.push(mk(
+            Some(s),
+            "rm",
+            format!("{s} · 删除容器"),
+            "custom",
+            &["rm", "-f", "-s", s],
+        ));
+        // 日志：长时间运行
+        out.push(mk(Some(s), "logs", format!("{s} · 日志"), "run", &["logs", "-f", s]));
+        // 进入 shell：交互式，退出即结束
+        out.push(mk(
+            Some(s),
+            "shell",
+            format!("{s} · 进入 shell"),
+            "run",
+            &["exec", s, "sh"],
+        ));
+    }
+
+    // 项目级：整份 compose 的三个动作
+    out.push(mk(None, "up-all", "全部启动".to_string(), "custom", &["up", "-d"]));
+    out.push(mk(None, "logs-all", "全部日志".to_string(), "run", &["logs", "-f"]));
+    out.push(mk(None, "down", "全部停止".to_string(), "custom", &["down"]));
 
     out
 }
@@ -285,11 +286,13 @@ services:
         let c = read(&f).unwrap();
 
         let cmds = commands_for(&c, "", "docker", None);
-        // 2 个服务 × 2 条 + 1 条 down
-        assert_eq!(cmds.len(), 5);
+        // 2 个服务 × 6 个动作 + 3 个项目级
+        assert_eq!(cmds.len(), 15);
 
         let up_web = cmds.iter().find(|x| x.name == "web · 启动").unwrap();
         assert_eq!(up_web.kind, "custom");
+        assert_eq!(up_web.group.as_deref(), Some("web"), "应归到服务节点下");
+        assert_eq!(up_web.role.as_deref(), Some("up"));
         assert_eq!(
             up_web.args,
             vec!["compose", "-f", "docker-compose.yml", "up", "-d", "web"],
@@ -298,11 +301,32 @@ services:
 
         let logs_db = cmds.iter().find(|x| x.name == "db · 日志").unwrap();
         assert_eq!(logs_db.kind, "run", "logs -f 是长时间运行");
+        assert_eq!(logs_db.role.as_deref(), Some("logs"));
         assert!(logs_db.args.contains(&"logs".to_string()));
-        assert!(logs_db.args.contains(&"-f".to_string()));
 
+        // 服务级动作齐了：停止 / 重启 / 删除容器 / 进入 shell
+        for (name, role) in [
+            ("db · 停止", "stop"),
+            ("db · 重启", "restart"),
+            ("db · 删除容器", "rm"),
+            ("db · 进入 shell", "shell"),
+        ] {
+            let c = cmds.iter().find(|x| x.name == name).expect(name);
+            assert_eq!(c.role.as_deref(), Some(role));
+            assert_eq!(c.group.as_deref(), Some("db"));
+        }
+
+        // 删除容器要带 -s（先停再删）
+        let rm = cmds.iter().find(|x| x.name == "db · 删除容器").unwrap();
+        assert!(rm.args.contains(&"-s".to_string()), "实际: {:?}", rm.args);
+
+        // 项目级动作没有 group，进右键菜单
         let down = cmds.iter().find(|x| x.name == "全部停止").unwrap();
         assert_eq!(down.args.last().map(|s| s.as_str()), Some("down"));
+        assert!(down.group.is_none(), "项目级动作不挂在服务下");
+        assert_eq!(down.role.as_deref(), Some("down"));
+        assert!(cmds.iter().any(|x| x.name == "全部启动"));
+        assert!(cmds.iter().any(|x| x.name == "全部日志"));
 
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -327,13 +351,13 @@ services:
 
         let c = read(&f).unwrap();
         let out = merge_into(&mut p, commands_for(&c, "", "docker", None));
-        assert_eq!(out.added.len(), 5);
-        assert_eq!(p.commands.len(), 5);
+        assert_eq!(out.added.len(), 15);
+        assert_eq!(p.commands.len(), 15);
 
         // 再导一次：不应重复
         let out2 = merge_into(&mut p, commands_for(&c, "", "docker", None));
         assert!(out2.added.is_empty());
-        assert_eq!(p.commands.len(), 5);
+        assert_eq!(p.commands.len(), 15);
 
         // 去掉 db → db 的两条应被标 stale
         std::fs::write(
@@ -343,7 +367,7 @@ services:
         .unwrap();
         let c2 = read(&f).unwrap();
         let out3 = merge_into(&mut p, commands_for(&c2, "", "docker", None));
-        assert_eq!(out3.stale.len(), 2, "db 的启动/日志都该失效");
+        assert_eq!(out3.stale.len(), 6, "db 的 6 个动作都该失效");
         assert!(p.commands.iter().any(|x| x.name == "db · 启动"), "命令要保留");
         assert!(
             p.commands.iter().find(|x| x.name == "db · 启动").unwrap().stale,
@@ -353,3 +377,4 @@ services:
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+

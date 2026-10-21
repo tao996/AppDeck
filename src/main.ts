@@ -39,6 +39,10 @@ interface Cmd {
   scope?: string | null;
   /** npm 命令对应的脚本已从 package.json 移除 */
   stale?: boolean;
+  /** docker 服务名：同组命令折叠成一个服务节点 */
+  group?: string | null;
+  /** 组内角色：up | stop | restart | rm | logs | shell | up-all | logs-all | down */
+  role?: string | null;
 }
 
 interface Proj {
@@ -618,8 +622,7 @@ function renderTree(): void {
     return;
   }
 
-  const totalCmds = state.projects.reduce((n, p) => n + p.commands.length, 0);
-  countEl.textContent = `${state.projects.length} 个项目 · ${totalCmds} 条命令`;
+  countEl.textContent = `${state.projects.length} 个项目 · ${visibleEntryCount()} 条命令`;
   tree.innerHTML = "";
 
   for (const p of state.projects) {
@@ -702,7 +705,55 @@ function renderTree(): void {
         list.appendChild(hint);
       }
 
+      // docker：命令按 group 折叠成"服务"节点，动作进右键菜单
+      const serviceGroups = new Map<string, Cmd[]>();
       for (const c of p.commands) {
+        if (!c.group) continue;
+        const arr = serviceGroups.get(c.group) ?? [];
+        arr.push(c);
+        serviceGroups.set(c.group, arr);
+      }
+
+      for (const [svc, actions] of serviceGroups) {
+        const upCmd = actions.find((a) => a.role === "up");
+        const stale = actions.every((a) => a.stale);
+
+        const row = document.createElement("div");
+        row.className = "cmd svc" + (stale ? " stale" : "");
+        row.innerHTML = `
+          <span class="cico">📦</span>
+          <span class="cname">${esc(svc)}</span>
+          ${stale ? `<span class="chip cmd-stale" title="compose 里已没有这个服务">已失效</span>` : ""}
+          <span class="cnote">${actions.length} 个操作</span>
+          <button class="run-btn" title="启动该服务（也可双击）">▶</button>
+        `;
+        row.title = [
+          `服务 ${svc}`,
+          upCmd ? `双击启动：${upCmd.program ?? ""} ${upCmd.args.join(" ")}` : "",
+          "右键查看更多操作",
+        ]
+          .filter(Boolean)
+          .join("\n");
+
+        row.addEventListener("dblclick", () => {
+          if (upCmd) void runCommand(p, upCmd);
+        });
+        row.querySelector(".run-btn")?.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (upCmd) void runCommand(p, upCmd);
+        });
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openServiceMenu(e, p, svc, actions);
+        });
+        list.appendChild(row);
+      }
+
+      for (const c of p.commands) {
+        // 归到服务的动作、以及项目级动作（up-all / logs-all / down）都不进列表
+        if (c.group || c.role) continue;
+
         const row = document.createElement("div");
         row.className =
           "cmd" + (selectedCommand === c.id ? " selected" : "") + (c.stale ? " stale" : "");
@@ -756,12 +807,26 @@ function renderTree(): void {
   }
 }
 
+/** 树里真正显示的条目数：docker 命令折叠成服务节点、项目级动作藏在右键里，
+ *  所以不能直接数 commands.length（否则状态栏数字和树对不上） */
+function visibleEntryCount(): number {
+  let n = 0;
+  for (const p of state.projects) {
+    const groups = new Set<string>();
+    for (const c of p.commands) {
+      if (c.group) groups.add(c.group);
+      else if (!c.role) n += 1;
+    }
+    n += groups.size;
+  }
+  return n;
+}
+
 /* ---------------- 渲染：状态栏 ---------------- */
 
 function renderStatus(): void {
-  const cmds = state.projects.reduce((n, p) => n + p.commands.length, 0);
   const el = req<HTMLSpanElement>("#sb-state");
-  el.textContent = `${state.projects.length} 个项目 · ${cmds} 条命令`;
+  el.textContent = `${state.projects.length} 个项目 · ${visibleEntryCount()} 条命令`;
   el.title = statePath ? `状态文件：${statePath}` : "";
   const fname = statePath ? (statePath.split(/[\\/]/).pop() ?? "") : "";
   req<HTMLSpanElement>("#sb-path").textContent = fname;
@@ -1111,6 +1176,38 @@ async function importComposePath(): Promise<void> {
     toast(`${how}「${res.projectName}」：${res.services} 个服务${detail}`);
 
     if (res.stale.length) console.warn("[compose] 已消失的服务：", res.stale);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** 项目右键「重新读取 docker-compose.yaml」：路径直接给项目根，后端自己找 compose 文件 */
+async function rereadCompose(p: Proj): Promise<void> {
+  try {
+    const res = await invoke<ComposeImportResponse>("import_compose_path", { path: p.path });
+    state = res.state;
+    render();
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    toast(`「${res.projectName}」${res.services} 个服务（${parts.join(" · ") || "无变化"}）`);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** 项目右键「重新读取 package.json」 */
+async function rereadPackage(p: Proj): Promise<void> {
+  try {
+    const res = await invoke<NpmImportResponse>("import_package_path", { path: p.path });
+    state = res.state;
+    render();
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    toast(`「${res.projectName}」${res.manager}（${parts.join(" · ") || "无变化"}）`);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -1995,6 +2092,108 @@ function closeDeviceMenu(): void {
   deviceMenuEl = null;
 }
 
+/** 服务节点右键：停止 / 重启 / 删除容器 / 日志 / 进入 shell */
+function openServiceMenu(
+  ev: MouseEvent,
+  p: Proj,
+  service: string,
+  actions: Cmd[],
+): void {
+  closeAllMenus();
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 340)}px`;
+  menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 360)}px`;
+  menu.innerHTML = `
+    <div class="dm-head">
+      <span>📦 ${esc(service)} <span class="dm-tag">服务</span></span>
+    </div>
+    <div class="dm-body"></div>
+  `;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+
+  const byRole = (role: string): Cmd | undefined => actions.find((a) => a.role === role);
+
+  const rows: MenuRow[] = [];
+
+  const start = byRole("up");
+  if (start) {
+    rows.push({
+      kind: "item",
+      name: "启动",
+      detail: "up -d（后台运行）",
+      onClick: () => void runCommand(p, start),
+    });
+  }
+
+  const stop = byRole("stop");
+  if (stop) {
+    rows.push({
+      kind: "item",
+      name: "停止",
+      detail: "容器保留，可再次启动",
+      onClick: () => void runCommand(p, stop),
+    });
+  }
+
+  const restart = byRole("restart");
+  if (restart) {
+    rows.push({
+      kind: "item",
+      name: "重启",
+      detail: "不重建容器",
+      onClick: () => void runCommand(p, restart),
+    });
+  }
+
+  const logs = byRole("logs");
+  if (logs) {
+    rows.push({
+      kind: "item",
+      name: "日志",
+      detail: "logs -f，持续输出",
+      onClick: () => void runCommand(p, logs),
+    });
+  }
+
+  const shell = byRole("shell");
+  if (shell) {
+    rows.push({
+      kind: "item",
+      name: "进入 shell",
+      detail: "exec sh，退出即结束",
+      onClick: () => void runCommand(p, shell),
+    });
+  }
+
+  const rm = byRole("rm");
+  if (rm) {
+    rows.push({ kind: "sep" });
+    rows.push({
+      kind: "item",
+      name: "删除容器…",
+      detail: "rm -f -s：容器删除，卷保留",
+      onClick: () => {
+        void (async () => {
+          const ok = await confirm(
+            `删除服务「${service}」的容器？\n\n` +
+              `docker compose rm -f -s ${service}\n\n` +
+              `容器会被删除（不可撤销），数据卷默认保留。`,
+            { title: "删除容器", kind: "warning" },
+          );
+          if (ok) void runCommand(p, rm);
+        })();
+      },
+    });
+  }
+
+  const box = document.createElement("div");
+  menu.querySelector(".dm-body")!.appendChild(box);
+  renderMenuRows(box, rows);
+}
+
 function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
   ev.preventDefault();
   closeDeviceMenu();
@@ -2642,6 +2841,10 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         buildType: draft.kind === "build" ? draft.target : null,
         source: isTemplate ? "template" : "manual",
         scope: isTemplate ? draft.scope : "project",
+        // 编辑已有命令时保留来源归属，否则 docker 服务节点会被打散
+        stale: existing?.stale ?? false,
+        group: existing?.group ?? null,
+        role: existing?.role ?? null,
       };
 
       try {
@@ -2780,13 +2983,19 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
   // 命令集（无 pubspec 的 workspace）本身就是命令列表：不显示平台，也不显示全局命令
   const isCommandSet = p.kind !== "single";
 
+  // 生态判定：看它有哪些来源的命令（一个目录可能同时有 npm 和 docker）
+  const dockerCmds = p.commands.filter((c) => c.source === "docker");
+  const npmCmds = p.commands.filter((c) => c.source === "npm");
+  const launchCmds = p.commands.filter((c) => c.source === "launch-json");
+  const ecoTag = dockerCmds.length ? "Docker" : npmCmds.length ? "Npm" : "命令集";
+
   const menu = document.createElement("div");
   menu.className = "device-menu";
   menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 360)}px`;
   menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 420)}px`;
   menu.innerHTML = `
     <div class="dm-head">
-      <span>${esc(projectLabel(p))}${isCommandSet ? ' <span class="dm-tag">命令集</span>' : ""}</span>
+      <span>${esc(projectLabel(p))}${isCommandSet ? ` <span class="dm-tag">${ecoTag}</span>` : ""}</span>
     </div>
     <div class="dm-body"></div>
   `;
@@ -2794,6 +3003,46 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
   projMenuEl = menu;
 
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
+
+  // 0) Compose 项目级动作（全部启动 / 全部日志 / 全部停止）
+  if (dockerCmds.length) {
+    const pick = (role: string): Cmd | undefined =>
+      dockerCmds.find((c) => c.role === role && !c.group);
+
+    const upAll = pick("up-all");
+    const logsAll = pick("logs-all");
+    const down = pick("down");
+
+    const rows: MenuRow[] = [{ kind: "group", text: "Compose" }];
+    if (upAll) {
+      rows.push({
+        kind: "item",
+        name: "全部启动",
+        detail: "up -d，后台运行所有服务",
+        onClick: () => void runCommand(p, upAll),
+      });
+    }
+    if (logsAll) {
+      rows.push({
+        kind: "item",
+        name: "全部日志",
+        detail: "logs -f，持续输出",
+        onClick: () => void runCommand(p, logsAll),
+      });
+    }
+    if (down) {
+      rows.push({
+        kind: "item",
+        name: "全部停止",
+        detail: "down：删除容器与网络（卷保留）",
+        onClick: () => void runCommand(p, down),
+      });
+    }
+
+    const box = document.createElement("div");
+    body.appendChild(box);
+    renderMenuRows(box, rows);
+  }
 
   // 1) 平台（仅 Flutter 项目）
   if (!isCommandSet) {
@@ -2868,8 +3117,24 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
     });
   }
 
-  // 命令集：直接重读 .vscode/launch.json 刷新命令
-  if (isCommandSet) {
+  // 按项目"有什么文件"决定重读哪一份（以前一律显示 launch.json，对 docker/npm 项目是错的）
+  if (dockerCmds.length) {
+    tail.push({
+      kind: "item",
+      name: "重新读取 docker-compose.yaml",
+      detail: "按 compose 文件刷新服务列表",
+      onClick: () => void rereadCompose(p),
+    });
+  }
+  if (npmCmds.length) {
+    tail.push({
+      kind: "item",
+      name: "重新读取 package.json",
+      detail: "按 scripts 刷新命令",
+      onClick: () => void rereadPackage(p),
+    });
+  }
+  if (launchCmds.length) {
     tail.push({
       kind: "item",
       name: "重新读取 launch.json",
@@ -4231,6 +4496,47 @@ async function boot(): Promise<void> {
         })();
       }, 800);
     }
+    if (await invoke<string | null>("dev_env", { name: "FLA_REIMPORT_DOCKER" })) {
+      window.setTimeout(() => {
+        void (async () => {
+          const ids = state.projects
+            .filter((p) => p.commands.some((c) => c.source === "docker"))
+            .map((p) => p.id);
+          for (const id of ids) {
+            const proj = state.projects.find((x) => x.id === id);
+            if (!proj) continue;
+            try {
+              const res = await invoke<ComposeImportResponse>("import_compose_path", {
+                path: proj.path,
+              });
+              state = res.state;
+            } catch (e) {
+              console.warn("[docker 重读失败]", proj.path, String(e));
+            }
+          }
+          render();
+          toast(`已重读 ${ids.length} 个 docker 项目`);
+        })();
+      }, 700);
+    }
+    const svcHook = await invoke<string | null>("dev_env", { name: "FLA_SERVICE_MENU" });
+    if (svcHook) {
+      window.setTimeout(() => {
+        const row = Array.from(document.querySelectorAll<HTMLDivElement>(".cmd.svc")).find(
+          (r) => r.querySelector(".cname")?.textContent === svcHook,
+        );
+        if (row) {
+          const r = row.getBoundingClientRect();
+          row.dispatchEvent(
+            new MouseEvent("contextmenu", {
+              bubbles: true,
+              clientX: Math.round(r.left + 60),
+              clientY: Math.round(r.top + 10),
+            }),
+          );
+        }
+      }, 900);
+    }
     const composeHook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_COMPOSE" });
     if (composeHook) {
       window.setTimeout(() => {
@@ -4322,6 +4628,14 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
+
+
 
 
 

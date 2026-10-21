@@ -1715,3 +1715,14 @@ select.set-input {
   font-size: 9.5px;
   padding: 1px 5px;
 }
+
+/* docker 服务节点：与普通命令区分开 */
+.cmd.svc {
+  background: rgba(74, 158, 255, 0.06);
+  border-left: 2px solid rgba(74, 158, 255, 0.4);
+}
+
+.cmd.svc .cname {
+  font-weight: 500;
+  color: #cfe2ff;
+}

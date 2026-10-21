@@ -26,6 +26,8 @@ pub fn default_templates() -> Vec<Command> {
         source: Some("template".into()),
         scope: Some("global".into()),
         stale: false,
+        group: None,
+        role: None,
     }]
 }
 
@@ -214,6 +216,12 @@ pub struct Command {
     /// 来源已失效：npm 命令对应的 script 已从 package.json 移除（保留命令，只做标记）
     #[serde(default)]
     pub stale: bool,
+    /// 分组键：docker 里是服务名。树里把同组的命令折叠成一个节点
+    #[serde(default)]
+    pub group: Option<String>,
+    /// 组内角色：up | stop | restart | rm | logs | shell | up-all | logs-all | down
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +265,8 @@ impl Default for State {
         }
     }
 }
+
+
 
 
 
