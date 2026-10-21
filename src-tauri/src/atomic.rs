@@ -2,7 +2,11 @@
 
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// 同进程内的写锁：避免多线程同时 replace 同一目标
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// 把 `data` 原子地写到 `path`。
 ///
@@ -19,6 +23,11 @@ pub fn write_atomic(path: &Path, data: &str) -> Result<(), String> {
         fs::create_dir_all(dir).map_err(|e| format!("创建目录失败: {e}"))?;
     }
 
+    // 同进程内串行化：Windows 上两个线程同时 replace 同一个目标会报
+    // `os error 5（拒绝访问）`——并发测试实测会踩到。
+    // 跨进程由单实例插件保证，这里只需要管住自己。
+    let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
@@ -27,13 +36,24 @@ pub fn write_atomic(path: &Path, data: &str) -> Result<(), String> {
 
     fs::write(&tmp, data).map_err(|e| format!("写入临时文件失败: {e}"))?;
 
-    if let Err(e) = fs::rename(&tmp, path) {
-        // 失败别把临时文件留在目录里
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("落盘失败: {e}"));
+    // 改名可能被临时占用（杀毒 / 搜索索引 / 云同步盘），短暂重试几次
+    let mut last: Option<std::io::Error> = None;
+    for attempt in 0..4 {
+        match fs::rename(&tmp, path) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+            }
+        }
     }
 
-    Ok(())
+    // 失败别把临时文件留在目录里
+    let _ = fs::remove_file(&tmp);
+    Err(format!(
+        "落盘失败: {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 #[cfg(test)]
@@ -99,3 +119,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

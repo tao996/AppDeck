@@ -1197,6 +1197,7 @@ fn flutter_doctor(
     cache: tauri::State<'_, doctor::Cache>,
     project_id: Option<String>,
     force: Option<bool>,
+    cached_only: Option<bool>,
 ) -> Result<doctor::DoctorReport, String> {
     let state = store::load(&app)?;
 
@@ -1209,13 +1210,18 @@ fn flutter_doctor(
         return Ok(hit);
     }
 
-    // 磁盘缓存：跨重启直接给出上次结果。
-    // `flutter doctor` 实测 20+ 秒，不该每次启动都等它（要最新的点「重新检查」）。
+    // 磁盘缓存：跨重启直接用上次结果（`flutter doctor` 实测 23 秒）。
+    // 不设过期：体检只在用户点「重新检查」时才重跑。
     if !force.unwrap_or(false) {
         if let Some(rep) = read_cached_doctor(&app, &key) {
             doctor::store(&cache, &key, &rep);
             return Ok(rep);
         }
+    }
+
+    // 启动时只想拿缓存、不想触发探测：没有缓存就返回"未体检"占位（ranAt = 0）
+    if cached_only.unwrap_or(false) {
+        return Ok(doctor::DoctorReport::default());
     }
 
     let rep = doctor::report(&exe, &env);
@@ -1224,15 +1230,12 @@ fn flutter_doctor(
     Ok(rep)
 }
 
-/// 读出上次的体检结果（同一个 flutter 可执行文件、且没过期）
+/// 读出上次的体检结果（同一个 flutter 可执行文件）。
+/// 不看过期时间：什么时候重跑由用户决定。
 fn read_cached_doctor(app: &AppHandle, key: &str) -> Option<doctor::DoctorReport> {
     let c = read_disk_cache(app);
     let hit = c.doctor?;
     if hit.key != key {
-        return None;
-    }
-    let age = logs::now_ms().saturating_sub(hit.saved_at);
-    if age > doctor::CACHE_TTL.as_millis() as u64 {
         return None;
     }
     Some(hit.report)

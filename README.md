@@ -233,9 +233,11 @@
 - **在终端执行**：白名单内的修复动作（如 `flutter doctor --android-licenses`）
   可直接起一个 PTY 会话跑，许可证确认可交互输入 `y`
 - 失败时原样呈现 Flutter 自己的报错，而不是"未知错误"
-- **结果缓存 30 分钟，并且落盘**（`cache.json` 的 `doctor` 段）：
-  `flutter doctor` 实测要 **23 秒**，只放内存的话每次启动都要重跑一遍。
-  跨重启直接显示上次结果，想要最新的点「重新检查」
+- **不主动跑，只读缓存**。`flutter doctor` 实测 **23 秒**，属于"一次就好"的操作：
+  - 启动时只用磁盘缓存（`cache.json` 的 `doctor` 段），**不会**触发探测
+  - 没有缓存时按钮显示中性的 `体检`，点一下才真正运行
+  - 结果不设过期：除非用户点「重新检查」，否则一直用缓存
+  - 代价是可能看到旧结果——报告里带检查时间，介意就点一次刷新
 - **必须跑在线程池上**（`#[tauri::command(async)]`）：早期它是同步命令，
   在 Tauri v2 里同步命令跑在**主线程**——启动时界面会整整冻结 23 秒
   （Windows 直接标记"无响应"），连关闭窗口也要等它跑完（实测退出要 8-11 秒）。
@@ -325,6 +327,8 @@
 - **常驻 `flutter daemon`**：按 Flutter 可执行文件复用，`device.getDevices` + `emulator.getEmulators`
 - **能看到未启动的模拟器**：`flutter devices` 只列在线设备，`flutter emulators --machine` 根本不存在；daemon 协议才拿得到 `Pixel_5` 这类待启动项
 - **设备菜单**：右键命令弹出，分「自动选择 / 在线设备 / 可启动模拟器」；选中设备即带 `-d` 启动，选模拟器则先 `emulator.launch`
+- **设备列表只查一次**：首次打开菜单才去问 `flutter daemon`（要拉起进程，好几秒），
+  之后一直复用；要最新列表点菜单里的「⟳ 刷新设备列表」。模拟器菜单同理（标题栏 ⟳）
 - **热插拔**：监听 `device.added` / `device.removed` 事件推送，无需轮询
 - **健壮性**：daemon 超时自动杀掉重建；stderr 独立消费避免管道写满阻塞
 
@@ -516,6 +520,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 

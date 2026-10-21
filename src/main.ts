@@ -1756,10 +1756,18 @@ function renderDoctorButton(): void {
   const btn = req<HTMLButtonElement>("#btn-doctor");
   const rep = doctorReport;
 
-  if (doctorBusy || !rep) {
+  if (doctorBusy) {
     btn.className = "btn doc-btn checking";
     btn.textContent = "⏳ 体检";
     btn.title = "正在运行 flutter doctor…";
+    return;
+  }
+
+  // 没跑过：不自动触发（flutter doctor 要 20+ 秒），等用户点
+  if (!rep) {
+    btn.className = "btn doc-btn";
+    btn.textContent = "体检";
+    btn.title = "点击运行 flutter doctor（约 20 秒，结果会缓存）";
     return;
   }
 
@@ -1780,6 +1788,25 @@ function renderDoctorButton(): void {
     btn.textContent = `! 体检 ${bad.length}`;
     btn.title = `${bad.map((c) => c.name).join("、")}\n点击查看详情`;
   }
+}
+
+/**
+ * 启动时只读体检缓存，**绝不触发** `flutter doctor`（实测 20+ 秒）。
+ * 没有缓存就保持"未体检"状态，等用户点工具栏的「体检」。
+ */
+async function loadCachedDoctor(): Promise<void> {
+  try {
+    const rep = await invoke<DoctorReport>("flutter_doctor", {
+      projectId: state.projects[0]?.id ?? null,
+      force: false,
+      cachedOnly: true,
+    });
+    // ranAt === 0 表示后端没有缓存（不是"检查通过"）
+    doctorReport = rep.ranAt ? rep : null;
+  } catch {
+    doctorReport = null;
+  }
+  renderDoctorButton();
 }
 
 async function refreshDoctor(force = false): Promise<void> {
@@ -2462,6 +2489,10 @@ function openCommandMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
   });
 }
 
+/** 设备/模拟器列表：查一次就缓存，之后靠菜单里的「刷新设备列表」手动更新。
+ *  每次打开菜单都去问 flutter daemon 太浪费（首次要拉起 daemon，好几秒）。 */
+let devicePayloadCache: DevicesPayload | null = null;
+
 function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
   ev.preventDefault();
   closeDeviceMenu();
@@ -2479,14 +2510,17 @@ function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
 
   void (async () => {
-    let payload: DevicesPayload | null = null;
+    let payload: DevicesPayload | null = devicePayloadCache;
     let error: string | null = null;
-    try {
-      payload = await invoke<DevicesPayload>("list_devices", { projectId: p.id });
-    } catch (e) {
-      error = String(e);
+    if (!payload) {
+      try {
+        payload = await invoke<DevicesPayload>("list_devices", { projectId: p.id });
+        devicePayloadCache = payload;
+      } catch (e) {
+        error = String(e);
+      }
+      if (deviceMenuEl !== menu) return; // 期间已被关闭
     }
-    if (deviceMenuEl !== menu) return; // 期间已被关闭
     body.innerHTML = "";
 
     const addGroup = (title: string): void => {
@@ -2550,6 +2584,12 @@ function openDeviceMenu(ev: MouseEvent, p: Proj, c: Cmd): void {
         );
       }
     }
+
+    addGroup("设备");
+    addItem("⟳ 刷新设备列表", "重新查询（首次会拉起 flutter daemon，约几秒）", () => {
+      devicePayloadCache = null;
+      openDeviceMenu(ev, p, c);
+    });
 
     addGroup("命令");
     addItem("编辑命令…", "名称 / 设备 / 参数 / 构建目标", () => void openCommandDialog(p, c));
@@ -4784,8 +4824,9 @@ async function boot(): Promise<void> {
     }
   }
 
-  // §14 体检：后台跑，不阻塞界面
-  void refreshDoctor().then(async () => {
+  // §14 体检：**只读缓存，不主动跑**。flutter doctor 要 20+ 秒，
+  // 什么时候检查由用户点「体检」决定。
+  void loadCachedDoctor().then(async () => {
     if (await invoke<string | null>("dev_env", { name: "FLA_DOCTOR_DETAIL" })) {
       openDoctorReport();
     }
