@@ -512,7 +512,10 @@ fn external_program(command: &Command) -> Option<(String, Vec<String>)> {
     if prog.is_empty() {
         return None;
     }
-    Some((prog.to_string(), command.args.clone()))
+    Some((
+        crate::terminal::resolve_executable(prog),
+        command.args.clone(),
+    ))
 }
 
 /// 大小写无关的字面替换（`%PROJECT%` / `%project%` 都认）
@@ -642,6 +645,8 @@ pub fn build_plan_for(
                 .collect();
 
             // .ps1 不能直接 CreateProcess，交给 PowerShell
+            let prog = crate::terminal::resolve_executable(&prog);
+
             if prog.to_ascii_lowercase().ends_with(".ps1") {
                 let ps =
                     crate::terminal::powershell_for(state.settings.terminal.path.as_deref());
@@ -1115,8 +1120,29 @@ mod tests {
             role: None,
         };
         let plan = build_plan_for(&state, &project, &npm, None).unwrap();
-        assert!(plan.program.ends_with("npm") || plan.program.ends_with("npm.cmd"), "实际: {}", plan.program);
-        assert_eq!(plan.args, vec!["run", "dev"]);
+        // npm 在 Windows 上是 npm.cmd → wrap_batch 会包成 cmd.exe /d /c "npm.cmd" run dev
+        let joined = plan.args.join(" ");
+        assert!(
+            !plan.program.to_ascii_lowercase().contains("flutter")
+                && !joined.to_ascii_lowercase().contains("flutter"),
+            "npm 命令不该出现 flutter：{} {}",
+            plan.program,
+            joined
+        );
+        if plan.program.eq_ignore_ascii_case("cmd.exe") {
+            assert!(
+                joined.to_ascii_lowercase().contains("npm.cmd"),
+                "应经 cmd 包装 npm.cmd，实际: {joined}"
+            );
+            assert!(joined.contains("run") && joined.contains("dev"));
+        } else {
+            assert!(
+                plan.program.to_ascii_lowercase().ends_with("npm.exe"),
+                "实际: {}",
+                plan.program
+            );
+            assert_eq!(plan.args, vec!["run", "dev"]);
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1494,6 +1520,8 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
 
 
 

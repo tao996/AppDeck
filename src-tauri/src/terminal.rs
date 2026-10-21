@@ -137,7 +137,53 @@ pub fn wrap_run(exe: &Path, command: &str) -> (String, Vec<String>) {
     }
 }
 
+/// 把裸程序名解析成**真正的可执行文件**。
+///
+/// Windows 上这步是必须的：`CreateProcessW("docker")` 会先命中
+/// `C:\Program Files\Docker\Docker\resources\bin\docker` 那个没有扩展名的脚本，
+/// 报 os error 193（不是有效的 Win32 应用程序）。`npm` 同理（真正该跑的是 npm.cmd）。
+///
+/// 规则：按 PATH 依次找 `<name>.exe` → `<name>.cmd` → `<name>.bat`；
+/// 带路径的输入在缺扩展名时补 `.exe`；找不到就原样返回，让错误如实暴露。
+pub fn resolve_executable(program: &str) -> String {
+    let raw = program.trim();
+    if raw.is_empty() {
+        return program.to_string();
+    }
+
+    let p = Path::new(raw);
+    let looks_like_path = p.is_absolute() || raw.contains('\\') || raw.contains('/');
+
+    if looks_like_path {
+        if p.is_file() {
+            return raw.to_string();
+        }
+        if p.extension().is_none() {
+            let exe = format!("{raw}.exe");
+            if Path::new(&exe).is_file() {
+                return exe;
+            }
+        }
+        return raw.to_string();
+    }
+
+    // 裸名：自己查 PATH（.exe 优先于 .cmd/.bat）
+    if let Some(paths) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            for ext in ["exe", "cmd", "bat"] {
+                let cand = dir.join(format!("{raw}.{ext}"));
+                if cand.is_file() {
+                    return cand.display().to_string();
+                }
+            }
+        }
+    }
+
+    raw.to_string()
+}
+
 /// 选一个 PowerShell 来执行 .ps1：
+
 /// 设置里的终端若是 pwsh/powershell 就用它，否则依次退回 pwsh → 系统 powershell。
 pub fn powershell_for(configured: Option<&str>) -> PathBuf {
     if let Some(c) = configured.map(str::trim).filter(|s| !s.is_empty()) {
@@ -233,6 +279,32 @@ mod tests {
         }
     }
 
+#[test]
+    fn bare_program_resolves_to_real_executable() {
+        // 这台机器的 Docker bin 里同时有 "docker"（脚本）和 "docker.exe"，
+        // 解析必须挑 .exe，否则 CreateProcess 报 os error 193
+        if which("docker").is_some() {
+            let r = resolve_executable("docker");
+            assert!(
+                r.to_ascii_lowercase().ends_with("docker.exe"),
+                "应解析到 docker.exe，实际: {r}"
+            );
+        }
+
+        // 带路径但缺扩展名时补 .exe
+        let tmp = std::env::temp_dir().join("fla_resolve_probe");
+        let _ = std::fs::create_dir_all(&tmp);
+        let exe = tmp.join("mytool.exe");
+        std::fs::write(&exe, b"x").unwrap();
+        let input = tmp.join("mytool").display().to_string();
+        assert_eq!(resolve_executable(&input), exe.display().to_string());
+
+        // 找不到时原样返回，别假装成功
+        assert_eq!(resolve_executable("no-such-tool-xyz"), "no-such-tool-xyz");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn wrap_run_keeps_shell_alive_and_appends_sentinel() {
         let (prog, args) = wrap_run(Path::new(r"C:\ps\pwsh.exe"), "& 'flutter.bat' 'run'");
@@ -281,5 +353,7 @@ mod tests {
         assert!(args_for(Path::new("C:\\Windows\\System32\\cmd.exe")).is_empty());
     }
 }
+
+
 
 

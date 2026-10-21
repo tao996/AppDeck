@@ -312,13 +312,72 @@ function esc(s: string): string {
 function toast(msg: string, kind: "info" | "error" = "info"): void {
   const t = document.createElement("div");
   t.className = "toast" + (kind === "error" ? " error" : "");
-  t.textContent = msg;
+
+  // 错误必须能看清、能复制：错误提示不自动消失，带「复制」「关闭」，文本可选中。
+  // 有些报错很长（CreateProcessW 会把完整命令行打出来），必须能整段复制走。
+  if (kind === "error") {
+    t.classList.add("pinned");
+
+    const text = document.createElement("div");
+    text.className = "toast-text";
+    text.textContent = msg;
+
+    const bar = document.createElement("div");
+    bar.className = "toast-bar";
+
+    const copy = document.createElement("button");
+    copy.className = "toast-btn";
+    copy.textContent = "复制";
+    copy.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void (async () => {
+        try {
+          await navigator.clipboard.writeText(msg);
+          copy.textContent = "已复制";
+          window.setTimeout(() => (copy.textContent = "复制"), 1200);
+        } catch {
+          // 剪贴板不可用时：选中文本 + 再试一次 execCommand，实在不行用户 Ctrl+C
+          const range = document.createRange();
+          range.selectNodeContents(text);
+          const sel = window.getSelection();
+          sel?.removeAllRanges();
+          sel?.addRange(range);
+          try {
+            document.execCommand("copy");
+            copy.textContent = "已复制";
+            window.setTimeout(() => (copy.textContent = "复制"), 1200);
+          } catch {
+            /* 交给用户手动复制 */
+          }
+        }
+      })();
+    });
+
+    const close = document.createElement("button");
+    close.className = "toast-btn";
+    close.textContent = "关闭";
+    close.addEventListener("click", (e) => {
+      e.stopPropagation();
+      t.classList.remove("show");
+      window.setTimeout(() => t.remove(), 200);
+    });
+
+    bar.append(copy, close);
+    t.append(text, bar);
+  } else {
+    t.textContent = msg;
+  }
+
   document.body.appendChild(t);
   requestAnimationFrame(() => t.classList.add("show"));
-  window.setTimeout(() => {
-    t.classList.remove("show");
-    window.setTimeout(() => t.remove(), 220);
-  }, kind === "error" ? 3600 : 2400);
+
+  // 只有普通提示自动消失；错误留着，直到用户点关闭
+  if (kind !== "error") {
+    window.setTimeout(() => {
+      t.classList.remove("show");
+      window.setTimeout(() => t.remove(), 220);
+    }, 2400);
+  }
 }
 
 const SOURCE_TEXT: Record<FlutterSource, string> = {
@@ -4628,6 +4687,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 
