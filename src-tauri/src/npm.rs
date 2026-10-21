@@ -121,8 +121,9 @@ pub fn command_for(script: &str, manager: Manager) -> Command {
         source: Some("npm".to_string()),
         scope: Some("project".to_string()),
         stale: false,
-            group: None,
-            role: None,
+        group: None,
+        role: None,
+        category: None,
     }
 }
 
@@ -333,4 +334,5 @@ mod tests {
         let _ = HashMap::<String, String>::new();
     }
 }
+
 

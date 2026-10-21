@@ -28,6 +28,7 @@ pub fn default_templates() -> Vec<Command> {
         stale: false,
         group: None,
         role: None,
+        category: Some("flutter".into()),
     }]
 }
 
@@ -222,6 +223,10 @@ pub struct Command {
     /// 组内角色：up | stop | restart | rm | logs | shell | up-all | logs-all | down
     #[serde(default)]
     pub role: Option<String>,
+    /// 模板分类：flutter | npm | docker | custom（只对全局模板有意义）。
+    /// 为空时按 program/args 推断，见 `ops::template_category`。
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -265,6 +270,7 @@ impl Default for State {
         }
     }
 }
+
 
 
 

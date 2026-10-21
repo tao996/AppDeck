@@ -431,6 +431,43 @@ pub fn build_plan(
     build_plan_for(state, project, command, device_override)
 }
 
+/// 模板分类：flutter | npm | docker | custom。
+///
+/// 显式 `category` 优先；为空时按 program/args 推断，
+/// 这样老数据（没有这个字段）也能正确分组。
+pub fn template_category(c: &Command) -> &'static str {
+    if let Some(raw) = c.category.as_deref() {
+        let v = raw.trim().to_ascii_lowercase();
+        match v.as_str() {
+            "flutter" => return "flutter",
+            "npm" => return "npm",
+            "docker" => return "docker",
+            "custom" => return "custom",
+            _ => {}
+        }
+    }
+
+    let hay = format!(
+        "{} {}",
+        c.program.clone().unwrap_or_default(),
+        c.args.join(" ")
+    )
+    .to_ascii_lowercase();
+
+    if hay.contains("%flutter%") || hay.starts_with("flutter") || hay.contains(" flutter ") {
+        "flutter"
+    } else if ["npm", "pnpm", "yarn", "node"]
+        .iter()
+        .any(|k| hay.contains(k))
+    {
+        "npm"
+    } else if hay.contains("docker") {
+        "docker"
+    } else {
+        "custom"
+    }
+}
+
 /// 把一条命令翻译成「在交互式 shell 里可以敲的一行」。
 ///
 /// 用于普通命令（custom）：不再给每条命令开一个进程，
@@ -985,8 +1022,8 @@ mod tests {
             .map(|(_, v)| v.clone());
         assert!(path.is_some(), "鸿蒙工程的终端应前置 PATH shim");
         assert!(
-            path.unwrap().contains("com.flutterlauncher.app"),
-            "PATH 应包含 shim 目录"
+            path.unwrap().contains(crate::store::APP_ID),
+            "PATH 应包含 shim 目录（跟随 APP_ID）"
         );
 
         // 收尾：shim 与临时目录
@@ -1162,6 +1199,7 @@ mod tests {
             stale: false,
             group: Some("web".into()),
             role: Some("logs".into()),
+            category: None,
         };
         let plan = build_plan_for(&state, &project, &docker, None).unwrap();
         assert!(
@@ -1190,6 +1228,7 @@ mod tests {
             stale: false,
             group: None,
             role: None,
+            category: None,
         };
         let plan = build_plan_for(&state, &project, &npm, None).unwrap();
         // npm 在 Windows 上是 npm.cmd → wrap_batch 会包成 cmd.exe /d /c "npm.cmd" run dev
@@ -1217,6 +1256,43 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+    #[test]
+    fn template_category_prefers_explicit_then_infers() {
+        fn mk(program: &str, args: &[&str], category: Option<&str>) -> Command {
+            Command {
+                id: "t".into(),
+                name: "t".into(),
+                kind: "custom".into(),
+                program: Some(program.into()),
+                cwd: None,
+                flutter_mode: None,
+                args: args.iter().map(|s| s.to_string()).collect(),
+                env: Default::default(),
+                tool_args: vec![],
+                device_id: None,
+                emulator_id: None,
+                build_type: None,
+                source: Some("template".into()),
+                scope: Some("global".into()),
+                stale: false,
+                group: None,
+                role: None,
+                category: category.map(|s| s.to_string()),
+            }
+        }
+
+        // 没有显式分类时按 program/args 推断
+        assert_eq!(template_category(&mk("%FLUTTER%", &["pub", "get"], None)), "flutter");
+        assert_eq!(template_category(&mk("npm", &["run", "build"], None)), "npm");
+        assert_eq!(template_category(&mk("pnpm", &["test"], None)), "npm");
+        assert_eq!(template_category(&mk("docker", &["compose", "up"], None)), "docker");
+        assert_eq!(template_category(&mk("bash", &["deploy.sh"], None)), "custom");
+
+        // 显式分类优先（用户可在模板库里改）
+        assert_eq!(template_category(&mk("docker", &["compose"], Some("flutter"))), "flutter");
+        // 无法识别的值退回推断
+        assert_eq!(template_category(&mk("docker", &["compose"], Some("乱写"))), "docker");
     }
     #[test]
     fn shell_line_for_docker_uses_resolved_exe() {
@@ -1259,6 +1335,7 @@ mod tests {
             stale: false,
             group: Some("nginx".into()),
             role: Some("up".into()),
+            category: None,
         };
 
         let line = shell_line_for(&state, &project, &cmd).unwrap();
@@ -1402,6 +1479,7 @@ mod tests {
             stale: false,
             group: None,
             role: None,
+            category: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1464,6 +1542,7 @@ mod tests {
             stale: false,
             group: None,
             role: None,
+            category: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1507,6 +1586,7 @@ mod tests {
             stale: false,
             group: None,
             role: None,
+            category: None,
         };
 
         let plan = build_plan_for(&state, &project, &cmd, None).unwrap();
@@ -1653,6 +1733,8 @@ mod tests {
         let _ = fs::remove_file(&bak);
     }
 }
+
+
 
 
 

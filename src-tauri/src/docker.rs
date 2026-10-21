@@ -122,6 +122,7 @@ pub fn commands_for(
         stale: false,
         group: group.map(|s| s.to_string()),
         role: Some(role.to_string()),
+        category: None,
     };
 
     for svc in &compose.services {
@@ -368,5 +369,6 @@ services:
         let _ = std::fs::remove_dir_all(&d);
     }
 }
+
 
 

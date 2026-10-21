@@ -43,6 +43,34 @@ interface Cmd {
   group?: string | null;
   /** 组内角色：up | stop | restart | rm | logs | shell | up-all | logs-all | down */
   role?: string | null;
+  /** 模板分类：flutter | npm | docker | custom（只对全局模板有意义） */
+  category?: string | null;
+}
+
+/** 模板分类顺序与显示名 */
+const CATEGORY_ORDER = ["flutter", "npm", "docker", "custom"] as const;
+const CATEGORY_LABEL: Record<string, string> = {
+  flutter: "Flutter",
+  npm: "npm",
+  docker: "Docker",
+  custom: "其他",
+};
+
+/**
+ * 模板属于哪个分类：显式 category 优先，否则按 program/args 推断。
+ * 推断规则与后端 ops::template_category 保持一致。
+ */
+function templateCategory(t: Cmd): string {
+  const explicit = (t.category ?? "").trim().toLowerCase();
+  if (explicit in CATEGORY_LABEL) return explicit;
+
+  const hay = `${t.program ?? ""} ${(t.args ?? []).join(" ")}`.toLowerCase();
+  if (hay.includes("%flutter%") || hay.startsWith("flutter") || hay.includes(" flutter ")) {
+    return "flutter";
+  }
+  if (["npm", "pnpm", "yarn", "node"].some((k) => hay.includes(k))) return "npm";
+  if (hay.includes("docker")) return "docker";
+  return "custom";
 }
 
 interface Proj {
@@ -3448,7 +3476,25 @@ function openTemplateManager(): void {
       return;
     }
 
-    for (const t of state.commandTemplates) {
+    // 按分类分组显示（flutter → npm → docker → 其他），组内按名字排
+    const ordered = [...state.commandTemplates].sort((a, b) => {
+      const d =
+        CATEGORY_ORDER.indexOf(templateCategory(a) as (typeof CATEGORY_ORDER)[number]) -
+        CATEGORY_ORDER.indexOf(templateCategory(b) as (typeof CATEGORY_ORDER)[number]);
+      return d !== 0 ? d : a.name.localeCompare(b.name, "zh");
+    });
+
+    let lastCategory = "";
+    for (const t of ordered) {
+      const cat = templateCategory(t);
+      if (cat !== lastCategory) {
+        lastCategory = cat;
+        const head = document.createElement("div");
+        head.className = "tpl-group";
+        head.textContent = CATEGORY_LABEL[cat] ?? cat;
+        body.appendChild(head);
+      }
+
       const row = document.createElement("div");
       row.className = "tpl-row";
 
@@ -3488,7 +3534,32 @@ function openTemplateManager(): void {
         })();
       });
 
-      row.append(main, edit, del);
+      // 分类可直接改（改了就落盘，用于纠正自动推断）
+      const catSel = document.createElement("select");
+      catSel.className = "set-input tpl-cat";
+      catSel.title = "模板分类";
+      for (const c of CATEGORY_ORDER) {
+        const opt = document.createElement("option");
+        opt.value = c;
+        opt.textContent = CATEGORY_LABEL[c];
+        opt.selected = cat === c;
+        catSel.appendChild(opt);
+      }
+      catSel.addEventListener("change", () => {
+        void (async () => {
+          try {
+            state = await invoke<State>("upsert_template", {
+              template: { ...t, category: catSel.value },
+            });
+            renderList();
+            render();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      row.append(main, catSel, edit, del);
       body.appendChild(row);
     }
   };
@@ -3517,6 +3588,7 @@ function openTemplateImport(p: Proj): void {
         <span>从模板导入 · ${esc(p.name)}</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
+      <div class="imp-filter" id="imp-filter"></div>
       <div class="modal-body" id="imp-body"></div>
       <div class="modal-foot">
         <span class="modal-hint" id="imp-hint"></span>
@@ -3539,6 +3611,33 @@ function openTemplateImport(p: Proj): void {
     hint.textContent = `已选 ${selected.size} / ${state.commandTemplates.length}`;
   };
 
+  const filterBar = overlay.querySelector("#imp-filter") as HTMLDivElement;
+  let filter = "all";
+
+  const renderFilter = (): void => {
+    filterBar.innerHTML = "";
+    const opts: [string, string][] = [
+      ["all", "全部"],
+      ...CATEGORY_ORDER.map((c) => [c, CATEGORY_LABEL[c]] as [string, string]),
+    ];
+    for (const [value, label] of opts) {
+      const n =
+        value === "all"
+          ? state.commandTemplates.length
+          : state.commandTemplates.filter((t) => templateCategory(t) === value).length;
+      const chip = document.createElement("button");
+      chip.className = "chip imp-chip" + (filter === value ? " on" : "");
+      chip.textContent = n > 0 ? `${label} ${n}` : label;
+      chip.disabled = n === 0;
+      chip.addEventListener("click", () => {
+        filter = value;
+        renderFilter();
+        renderList();
+      });
+      filterBar.appendChild(chip);
+    }
+  };
+
   const renderList = (): void => {
     body.innerHTML = "";
     if (state.commandTemplates.length === 0) {
@@ -3551,6 +3650,8 @@ function openTemplateImport(p: Proj): void {
     }
 
     for (const t of state.commandTemplates) {
+      if (filter !== "all" && templateCategory(t) !== filter) continue;
+
       const row = document.createElement("label");
       row.className = "imp-row";
 
@@ -3579,6 +3680,7 @@ function openTemplateImport(p: Proj): void {
     updateHint();
   };
 
+  renderFilter();
   renderList();
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
@@ -3588,7 +3690,10 @@ function openTemplateImport(p: Proj): void {
   });
 
   (overlay.querySelector("#imp-all") as HTMLButtonElement).addEventListener("click", () => {
-    for (const t of state.commandTemplates) selected.add(t.id);
+    // 只全选当前筛选下看得见的，避免"看不见的被选中"
+    for (const t of state.commandTemplates) {
+      if (filter === "all" || templateCategory(t) === filter) selected.add(t.id);
+    }
     renderList();
   });
   (overlay.querySelector("#imp-none") as HTMLButtonElement).addEventListener("click", () => {
@@ -4423,6 +4528,7 @@ function openSettings(): void {
 
 /* ---------------- 启动 ---------------- */
 
+
 async function boot(): Promise<void> {
   const app = req<HTMLDivElement>("#app");
 
@@ -4765,8 +4871,9 @@ async function boot(): Promise<void> {
       const tpl = state.commandTemplates.find((x) => x.id === tid);
       if (proj && tpl) void runTemplate(proj, tpl);
     }
-  } catch {
-    /* 无钩子 */
+  } catch (e) {
+    // 钩子出错不能静默：否则后续钩子全被跳过，且看不出原因
+    toast("开发钩子执行失败：" + String(e), "error");
   }
 
   // 分割条
@@ -4792,6 +4899,14 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
+
+
+
+
+
 
 
 

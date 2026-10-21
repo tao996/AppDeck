@@ -1105,6 +1105,12 @@ fn upsert_template(app: AppHandle, template: model::Command) -> Result<State, St
     }
     tpl.source = Some("template".to_string());
 
+    // 没有显式分类就按 program/args 推断并固化，
+    // 模板库分组与导入过滤都读这个字段，不必每次重算
+    if tpl.category.is_none() {
+        tpl.category = Some(ops::template_category(&tpl).to_string());
+    }
+
     match state
         .command_templates
         .iter_mut()

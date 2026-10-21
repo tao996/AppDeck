@@ -138,6 +138,7 @@ pub fn import(workspace: &Path) -> Result<ImportOutcome, String> {
             stale: false,
             group: None,
             role: None,
+            category: None,
         });
     }
 
@@ -202,6 +203,7 @@ mod tests {
         assert!(out.commands.iter().any(|c| c.name == "jbook (Google Play)"));
     }
 }
+
 
 
 
