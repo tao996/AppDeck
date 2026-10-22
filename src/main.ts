@@ -4343,7 +4343,6 @@ function openSettings(): void {
         <span>设置</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
-      <div class="set-tabs" id="settings-tabs"></div>
       <div class="modal-body" id="settings-body"></div>
       <div class="modal-foot">
         <span class="set-version" id="settings-version"></span>
@@ -4358,43 +4357,22 @@ function openSettings(): void {
   document.body.appendChild(overlay);
 
   const body = overlay.querySelector("#settings-body") as HTMLDivElement;
-  const tabsEl = overlay.querySelector("#settings-tabs") as HTMLDivElement;
 
-  // 分页：currentTab 记录当前选中的页签
-  const SETTINGS_TABS: Array<[string, string]> = [
-    ["general", "通用"],
-    ["flutter", "Flutter"],
-    ["android", "Android"],
-    ["harmony", "鸿蒙"],
-    ["npm", "Npm"],
-    ["docker", "Docker"],
-  ];
-  let currentTab = "general";
-
-  const applyTab = (): void => {
-    for (const el of Array.from(body.querySelectorAll<HTMLElement>(".set-section"))) {
-      el.hidden = el.dataset.tab !== currentTab;
-    }
-    for (const b of Array.from(tabsEl.querySelectorAll<HTMLButtonElement>(".set-tab"))) {
-      b.classList.toggle("active", b.dataset.tab === currentTab);
-    }
+  // 单页滚动：所有分区按固定顺序排列（不再分页签）
+  const SECTION_ORDER: Record<string, number> = {
+    命令模板: 1,
+    会话恢复: 2,
+    终端: 3,
+    编辑器: 4,
+    Flutter: 5,
+    Android: 6,
+    HarmonyOS: 7,
+    Npm: 8,
+    Docker: 9,
   };
 
-  const renderSettingsTabs = (): void => {
-    tabsEl.innerHTML = "";
-    for (const [id, label] of SETTINGS_TABS) {
-      const b = document.createElement("button");
-      b.className = "set-tab";
-      b.dataset.tab = id;
-      b.textContent = label;
-      b.addEventListener("click", () => {
-        currentTab = id;
-        applyTab();
-      });
-      tabsEl.appendChild(b);
-    }
-    applyTab();
-  };
+  /** 上一次「自动检测」的结果；只用来在输入框下面提示，不直接改用户填的值 */
+  let detected: Detected | null = null;
 
   const hint = overlay.querySelector("#settings-hint") as HTMLSpanElement;
   const draft: SettingsModel = JSON.parse(
@@ -4411,15 +4389,9 @@ function openSettings(): void {
   const section = (title: string, desc: string): HTMLDivElement => {
     const s = document.createElement("div");
     s.className = "set-section";
-    // 分区归属按标题判定，比在 build() 里逐处标记更不容易漏
-    const TAB_OF: Record<string, string> = {
-      Flutter: "flutter",
-      Android: "android",
-      HarmonyOS: "harmony",
-      Npm: "npm",
-      Docker: "docker",
-    };
-    s.dataset.tab = TAB_OF[title] ?? "general";
+    // 单页里靠序号排序，避免 build() 里的书写顺序绑死展示顺序
+    s.dataset.pri = String(SECTION_ORDER[title] ?? 99);
+    s.dataset.title = title;
     const h = document.createElement("div");
     h.className = "set-title";
     h.textContent = title;
@@ -4434,11 +4406,58 @@ function openSettings(): void {
     return s;
   };
 
+  /**
+   * 某一项「自动检测」得到的结果。
+   * 按「分区标题 + 字段标签」对应，这样 13 个输入框不用逐个改调用。
+   */
+  const detectedValueFor = (sec: string, label: string): string | null => {
+    const d = detected;
+    if (!d) return null;
+
+    let v: string | null | undefined;
+    if (sec === "Flutter") {
+      v = label === "自定义路径" ? d.flutter : null;
+    } else if (sec === "Android") {
+      const m: Record<string, string | null | undefined> = {
+        "SDK 目录": d.android.sdkPath,
+        "emulator.exe": d.android.emulatorPath,
+        "AVD 目录": d.android.avdPath,
+        "build-tools": d.android.buildToolsPath,
+        keytool: d.android.keytoolPath,
+      };
+      v = m[label];
+    } else if (sec === "HarmonyOS") {
+      const m: Record<string, string | null | undefined> = {
+        "Emulator 目录": d.harmony.emulatorPath,
+        实例目录: d.harmony.instancePath,
+        镜像目录: d.harmony.imageRoot,
+        "Flutter 分支": d.harmony.flutterPath,
+        "SDK 目录": d.harmony.sdkPath,
+      };
+      v = m[label];
+    } else if (sec === "编辑器") {
+      v = label.startsWith("VS Code") ? d.editor.vscodePath : null;
+    } else if (sec === "Npm") {
+      v = label === "node 目录" ? d.npm.nodePath : null;
+    } else if (sec === "Docker") {
+      v = label === "docker 路径" ? d.docker.dockerPath : null;
+    }
+
+    const t = (v ?? "").trim();
+    return t ? t : null;
+  };
+
+  /**
+   * 一个输入行。
+   * 与「自动检测」结果不一致时，在下方提示检测到的值并提供「填写」按钮——
+   * 不直接覆盖，因为输入框里可能是用户手填的。
+   */
   const field = (
     parent: HTMLElement,
     label: string,
     value: string | null,
     onChange: (v: string | null) => void,
+    opts: { browse?: "dir" | "none" } = {},
   ): void => {
     const row = document.createElement("div");
     row.className = "set-row";
@@ -4452,21 +4471,49 @@ function openSettings(): void {
     input.placeholder = "未配置";
     input.addEventListener("input", () => onChange(input.value.trim() || null));
 
-    const browse = document.createElement("button");
-    browse.className = "btn";
-    browse.textContent = "浏览…";
-    browse.addEventListener("click", () => {
-      void (async () => {
-        const picked = await open({ directory: true, multiple: false, title: `选择${label}` });
-        if (typeof picked === "string") {
-          input.value = picked;
-          onChange(picked);
-        }
-      })();
-    });
+    row.append(lab, input);
 
-    row.append(lab, input, browse);
+    // 选文件（exe）的字段自带专用按钮（带扩展名过滤），这里就不再给目录选择器
+    if ((opts.browse ?? "dir") === "dir") {
+      const browse = document.createElement("button");
+      browse.className = "btn";
+      browse.textContent = "浏览…";
+      browse.addEventListener("click", () => {
+        void (async () => {
+          const picked = await open({ directory: true, multiple: false, title: `选择${label}` });
+          if (typeof picked === "string") {
+            input.value = picked;
+            onChange(picked);
+          }
+        })();
+      });
+      row.appendChild(browse);
+    }
+
     parent.appendChild(row);
+
+    const auto = (detectedValueFor(parent.dataset.title ?? "", label) ?? "").trim();
+    const current = (value ?? "").trim();
+    if (auto && auto !== current) {
+      const tip = document.createElement("div");
+      tip.className = "set-detected";
+
+      const text = document.createElement("span");
+      text.className = "set-detected-val";
+      text.textContent = `检测到：${auto}`;
+      text.title = auto;
+
+      const fill = document.createElement("button");
+      fill.className = "btn btn-tiny";
+      fill.textContent = "填写";
+      fill.addEventListener("click", () => {
+        onChange(auto);
+        build();
+      });
+
+      tip.append(text, fill);
+      parent.appendChild(tip);
+    }
   };
 
   const build = (): void => {
@@ -4686,10 +4733,16 @@ function openSettings(): void {
     // 默认终端
     {
       const s = section("终端", "项目右键「在终端中打开」使用；留空则自动探测");
-      field(s, "终端程序", draft.terminal?.path ?? "", (v) => {
-        const t = (v ?? "").trim();
-        draft.terminal = { path: t === "" ? null : t };
-      });
+      field(
+        s,
+        "终端程序",
+        draft.terminal?.path ?? "",
+        (v) => {
+          const t = (v ?? "").trim();
+          draft.terminal = { path: t === "" ? null : t };
+        },
+        { browse: "none" }, // 下面有带 exe 过滤的「浏览 exe…」
+      );
 
       const bar = document.createElement("div");
       bar.className = "set-desc";
@@ -4712,7 +4765,6 @@ function openSettings(): void {
             const more = list.slice(1).map((x) => x.name).join("、");
             toast(`已选择 ${list[0].name}${more ? `；系统还检测到：${more}` : ""}`);
             build();
-  renderSettingsTabs();
           } catch (e) {
             toast(String(e), "error");
           }
@@ -4735,7 +4787,6 @@ function openSettings(): void {
             const p = Array.isArray(picked) ? picked[0] : picked;
             draft.terminal = { path: p };
             build();
-  renderSettingsTabs();
           } catch (e) {
             toast(String(e), "error");
           }
@@ -4752,10 +4803,16 @@ function openSettings(): void {
         "编辑器",
         "终端里的路径和 package: 链接用 Ctrl+单击打开；留空则自动探测",
       );
-      field(s, "VS Code（Code.exe）", draft.editor?.vscodePath ?? "", (v) => {
-        const t = (v ?? "").trim();
-        draft.editor = { vscodePath: t === "" ? null : t };
-      });
+      field(
+        s,
+        "VS Code（Code.exe）",
+        draft.editor?.vscodePath ?? "",
+        (v) => {
+          const t = (v ?? "").trim();
+          draft.editor = { vscodePath: t === "" ? null : t };
+        },
+        { browse: "none" }, // 下面有带 exe 过滤的「浏览 Code.exe…」
+      );
 
       const bar = document.createElement("div");
       bar.className = "set-desc";
@@ -4779,7 +4836,6 @@ function openSettings(): void {
             const p = Array.isArray(picked) ? picked[0] : picked;
             draft.editor = { vscodePath: p };
             build();
-            renderSettingsTabs();
           } catch (e) {
             toast(String(e), "error");
           }
@@ -4799,7 +4855,10 @@ function openSettings(): void {
       void (async () => {
         try {
           const auto = await invoke<string | null>("detect_editor_path");
-          if (!draft.editor?.vscodePath && auto) hint.textContent = `留空时使用：${auto}`;
+          // 跑过「自动检测」后，输入框下面已经有「检测到：…」，这里不再重复
+          if (!draft.editor?.vscodePath && auto && !detected) {
+            hint.textContent = `留空时使用：${auto}`;
+          }
         } catch {
           /* 探测失败就保持通用提示 */
         }
@@ -4890,10 +4949,14 @@ function openSettings(): void {
         "命令用确定性 id 去重，服务被删只标失效、不删数据。";
       s.appendChild(hint);
     }
+
+    // 单页滚动：按 SECTION_ORDER 重排（书写顺序不必等于展示顺序）
+    const sections = Array.from(body.querySelectorAll<HTMLElement>(".set-section"));
+    sections.sort((a, b) => Number(a.dataset.pri) - Number(b.dataset.pri));
+    for (const el of sections) body.appendChild(el);
   };
 
   build();
-  renderSettingsTabs();
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#set-cancel") as HTMLButtonElement).addEventListener("click", close);
@@ -4901,34 +4964,22 @@ function openSettings(): void {
     if (e.target === overlay) close();
   });
 
-  (overlay.querySelector("#set-detect") as HTMLButtonElement).addEventListener("click", () => {
+  const detectBtn = overlay.querySelector("#set-detect") as HTMLButtonElement;
+  detectBtn.addEventListener("click", () => {
+    // 只做探测：不覆盖用户已经填过的值。
+    // 探测结果以「检测到：…」+「填写」的形式挂在对应输入框下面，由用户决定要不要用。
+    detectBtn.disabled = true;
     hint.textContent = "检测中…";
     void (async () => {
       try {
-        const d = await invoke<Detected>("detect_toolchains");
-        draft.android = { ...draft.android, ...d.android };
-        draft.harmony = { ...draft.harmony, ...d.harmony };
-        // 只在检测到值时覆盖，避免把用户手填的清空
-        if (d.npm?.nodePath) draft.npm = { ...draft.npm, nodePath: d.npm.nodePath };
-        if (d.docker?.dockerPath)
-          draft.docker = { ...draft.docker, dockerPath: d.docker.dockerPath };
-        if (d.docker?.composeStyle)
-          draft.docker = { ...draft.docker, composeStyle: d.docker.composeStyle };
-        if (d.editor?.vscodePath)
-          draft.editor = { ...draft.editor, vscodePath: d.editor.vscodePath };
-        if (d.flutter) {
-          draft.flutterTool.mode = "custom";
-          draft.flutterTool.customPath = d.flutter;
-        }
+        detected = await invoke<Detected>("detect_toolchains");
         build();
-  renderSettingsTabs();
-        const parts = [...d.notes];
-        if (d.harmonyVersion) parts.unshift(d.harmonyVersion);
-        const msg = parts.length ? parts.join("；") : "已填入检测结果，确认后保存";
-        hint.textContent = msg;
-        hint.title = msg;
+        hint.textContent = "";
+        toast("检测完成：与当前设置不同的项已在输入框下方标出");
       } catch (e) {
         hint.textContent = String(e);
+      } finally {
+        detectBtn.disabled = false;
       }
     })();
   });
@@ -5162,12 +5213,25 @@ async function boot(): Promise<void> {
     const settingsHook = await invoke<string | null>("dev_env", { name: "FLA_SETTINGS" });
     if (settingsHook) {
       openSettings();
-      // FLA_SETTINGS=npm 之类：打开后自动切到指定分页，便于截图核对
-      if (settingsHook !== "1") {
+      // FLA_SETTINGS=detect：自动点一下「自动检测」，便于截图核对检测提示
+      if (settingsHook === "detect") {
         window.setTimeout(() => {
-          document
-            .querySelector<HTMLButtonElement>(`.set-tab[data-tab="${settingsHook}"]`)
-            ?.click();
+          document.querySelector<HTMLButtonElement>("#set-detect")?.click();
+        }, 400);
+      }
+      // FLA_SETTINGS=npm 之类：单页没有分页了，把对应分区滚到视野内，便于截图核对
+      if (settingsHook !== "1" && settingsHook !== "detect") {
+        const want = settingsHook.toLowerCase();
+        window.setTimeout(() => {
+          for (const el of Array.from(
+            document.querySelectorAll<HTMLElement>("#settings-body .set-section"),
+          )) {
+            const title = el.querySelector(".set-title")?.textContent?.toLowerCase() ?? "";
+            if (title.includes(want)) {
+              el.scrollIntoView({ block: "start" });
+              break;
+            }
+          }
         }, 300);
       }
     }
@@ -5336,6 +5400,9 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 

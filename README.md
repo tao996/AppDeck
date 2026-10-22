@@ -331,16 +331,20 @@
     未配置时回退 `flutter daemon`
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
 - **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
-- **设置页**（⚙）分六个分页签（固定尺寸，内容长了内部滚动）：
-  - **通用**：命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（VS Code）
-  - **Flutter**：`auto` / `custom` / `fvm` + 自定义路径
-  - **Android**：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
-  - **鸿蒙**：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK / 全局环境变量
-  - **Npm**：包管理器（auto/npm/pnpm/yarn）/ node 目录
-  - **Docker**：docker 路径 / compose 风格（v2 / v1 / auto）
-- **一键自动检测**：不扫全盘，只用环境变量 + `hdc.exe` 反推 + 常见安装位置；
-  Flutter / Android / 鸿蒙 / Npm / Docker 一起填
+- **设置页**（⚙）**单页垂直滚动**（不分页签；弹窗固定尺寸，内容内部滚动），分区顺序：
+  命令模板 → 会话恢复 → 终端 → 编辑器 → Flutter → Android → 鸿蒙 → Npm → Docker
+  - 命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（VS Code）
+  - Flutter：`auto` / `custom` / `fvm` + 自定义路径
+  - Android：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
+  - 鸿蒙：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK / 全局环境变量
+  - Npm：包管理器（auto/npm/pnpm/yarn）/ node 目录
+  - Docker：docker 路径 / compose 风格（v2 / v1 / auto）
+- **一键自动检测**：不扫全盘，只用环境变量 + `hdc.exe` 反推 + 常见安装位置。
+  **只探测、不写入**——检测结果与输入框里的值不一致时（多半是用户手填过），
+  在输入框下方显示 `检测到：<值>` + 「填写」按钮，点它才覆盖。
+  填一次、存一次盘，不想用就无视它。
 - **开箱即用**：HarmonyOS 路径未配置时自动回退到探测结果
+
 
 ![模拟器菜单](docs/shot-emulators-menu.png)
 
