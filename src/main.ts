@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, confirm } from "@tauri-apps/plugin-dialog";
-import { openPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import {
   isPermissionGranted,
   requestPermission,
@@ -519,7 +519,7 @@ async function openLocation(cwd: string, raw: string): Promise<void> {
   }
 
   try {
-    await openPath(loc.path);
+    await invoke("open_path_default", { path: loc.path });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -567,8 +567,17 @@ const LOCATE_PATTERNS: RegExp[] = [
   /[A-Za-z]:[\\/][^\s"'<>|]+/g,
 ];
 
-let hoveredLink: { cwd: string; raw: string } | null = null;
 let linkMenuEl: HTMLDivElement | null = null;
+
+/** 300ms 内同样的位置只打开一次：xterm 的 activate 和自己的 click 监听可能同时触发 */
+let lastOpen = { key: "", at: 0 };
+function openOnce(cwd: string, raw: string): void {
+  const key = `${cwd}\u0000${raw}`;
+  const now = Date.now();
+  if (lastOpen.key === key && now - lastOpen.at < 300) return;
+  lastOpen = { key, at: now };
+  void openLocation(cwd, raw);
+}
 
 function closeLinkMenu(): void {
   linkMenuEl?.remove();
@@ -597,7 +606,7 @@ function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
     body.appendChild(el);
   };
 
-  item("用 VS Code 打开", "定位到对应行", () => void openLocation(cwd, raw));
+  item("用编辑器打开", "VS Code，定位到对应行", () => void openLocation(cwd, raw));
   item("在资源管理器中定位", "选中该文件", () => void revealLocation(cwd, raw));
   item("复制路径", "", () => {
     void navigator.clipboard?.writeText(raw).catch(() => undefined);
@@ -608,6 +617,8 @@ function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
 /** 给终端注册"可点击位置"：Ctrl+单击打开，右键出菜单 */
 function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): void {
   const cwd = s.cwd || "";
+  // 悬停状态按会话隔离：多个终端同时开着时，全局变量会互相串
+  let hovered: { raw: string } | null = null;
 
   const provider: ILinkProvider = {
     provideLinks(y, callback) {
@@ -637,13 +648,13 @@ function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): 
             activate: (event: MouseEvent) => {
               // 跟随 VS Code / Android Studio：Ctrl+单击
               if (!event.ctrlKey && !event.metaKey) return;
-              void openLocation(cwd, raw);
+              openOnce(cwd, raw);
             },
             hover: () => {
-              hoveredLink = { cwd, raw };
+              hovered = { raw };
             },
             leave: () => {
-              if (hoveredLink?.raw === raw) hoveredLink = null;
+              if (hovered?.raw === raw) hovered = null;
             },
           });
         }
@@ -655,13 +666,19 @@ function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): 
 
   term.registerLinkProvider(provider);
 
+  // 自己再兜一层 Ctrl+单击：不依赖 xterm 的 activate 是否带修饰键
+  pane.addEventListener("click", (e) => {
+    if (!e.ctrlKey && !e.metaKey) return;
+    if (!hovered) return;
+    openOnce(cwd, hovered.raw);
+  });
+
   // 右键：悬停在链接上时给"定位 / 复制"
   pane.addEventListener("contextmenu", (e) => {
-    const target = hoveredLink;
-    if (!target) return;
+    if (!hovered) return;
     e.preventDefault();
     e.stopPropagation();
-    showLinkMenu(e, target.cwd, target.raw);
+    showLinkMenu(e, cwd, hovered.raw);
   });
 }
 
@@ -5024,6 +5041,8 @@ async function boot(): Promise<void> {
   document.addEventListener("mousedown", (e) => {
     if (deviceMenuEl && !deviceMenuEl.contains(e.target as Node)) closeDeviceMenu();
     if (emuMenuEl && !emuMenuEl.contains(e.target as Node)) closeEmuMenu();
+    // 链接菜单：点外部才关，点菜单内部不能关（否则点不到菜单项）
+    if (linkMenuEl && !linkMenuEl.contains(e.target as Node)) closeLinkMenu();
     if (
       projMenuEl &&
       !projMenuEl.contains(e.target as Node) &&
@@ -5036,9 +5055,13 @@ async function boot(): Promise<void> {
     if (e.key !== "Escape") return;
     closeDeviceMenu();
     closeEmuMenu();
+    closeLinkMenu();
     closeAllMenus();
   });
-  window.addEventListener("blur", closeDeviceMenu);
+  window.addEventListener("blur", () => {
+    closeDeviceMenu();
+    closeLinkMenu();
+  });
 
   req<HTMLButtonElement>("#btn-import-menu").addEventListener("click", (e) => {
     e.stopPropagation();
@@ -5113,6 +5136,14 @@ async function boot(): Promise<void> {
       const cmd = proj?.commands.find((x) => x.id === auto.commandId);
       if (proj && cmd) void runCommand(proj, cmd, auto.deviceId ?? undefined);
       else console.warn("[autostart] 未找到项目或命令", auto);
+    }
+
+    // 开发期：直接打开一处位置（FLA_OPEN_LOCATION="<cwd>|<文本>"），
+    // 用于无人值守验证"路径可点"这条链路（走的是和点击完全相同的代码）
+    const openHook = await invoke<string | null>("dev_env", { name: "FLA_OPEN_LOCATION" });
+    if (openHook) {
+      const [cwd, ...rest] = openHook.split("|");
+      void openLocation(cwd, rest.join("|"));
     }
 
     // 开发期：自动弹出设备菜单（FLA_DEVICE_MENU=<项目ID>），便于无人值守截图
@@ -5305,6 +5336,8 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 

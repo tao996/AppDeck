@@ -1737,6 +1737,17 @@ fn open_in_editor(
     editor::open(&code, std::path::Path::new(&path), line, col)
 }
 
+/// 用系统默认程序打开文件（图片 / 日志 / 其他非源码）。
+/// 不走 opener 插件的 open_path：那个要 scope 授权，运行时会被拒。
+#[tauri::command(async)]
+fn open_path_default(path: String) -> Result<(), String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(format!("文件不存在：{path}"));
+    }
+    editor::open_with_default_app(p)
+}
+
 /// 自动探测到的 VS Code 路径（设置里留空时实际会用它）
 #[tauri::command(async)]
 fn detect_editor_path() -> Option<String> {
@@ -1847,11 +1858,13 @@ pub fn run() {
             dev_env,
             resolve_location,
             detect_editor_path,
+            open_path_default,
             open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 
 
 
