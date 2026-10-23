@@ -455,6 +455,70 @@ body.dragging .term-pane {
   flex: 1;
 }
 
+/* 日志搜索条：浮在终端右上角，不占布局 */
+.term-search {
+  position: absolute;
+  top: 8px;
+  right: 18px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(24, 28, 36, 0.96);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+.term-search[hidden] {
+  display: none;
+}
+
+.term-search input {
+  width: 220px;
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 3px 6px;
+  outline: none;
+}
+
+.term-search input:focus {
+  border-color: #4a9eff;
+}
+
+.ts-count {
+  min-width: 52px;
+  text-align: right;
+  font-size: 11.5px;
+  font-family: var(--mono);
+  color: var(--fg-dim);
+}
+
+.ts-count.none {
+  color: #ff7b72;
+}
+
+.ts-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1;
+  padding: 3px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.ts-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+}
 .ctx-info {
   font-size: 11px;
   color: var(--fg-faint);
@@ -1839,3 +1903,4 @@ select.set-input {
   opacity: 0.4;
   cursor: default;
 }
+

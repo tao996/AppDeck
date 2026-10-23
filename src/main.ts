@@ -11,6 +11,7 @@ import { Terminal } from "@xterm/xterm";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SerializeAddon } from "@xterm/addon-serialize";
+import { SearchAddon } from "@xterm/addon-search";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
@@ -319,6 +320,8 @@ interface TermSession {
   term?: Terminal;
   fit?: FitAddon;
   serialize?: SerializeAddon;
+  /** 日志搜索（Ctrl+F）；每个会话各一份，切换 tab 时只操作当前会话的 */
+  search?: SearchAddon;
   pane?: HTMLDivElement;
 }
 
@@ -474,6 +477,86 @@ const termTheme = {
 
 function activeSession(): TermSession | undefined {
   return sessions.find((s) => s.id === activeSessionId);
+}
+
+/* ---------------- 日志搜索 / 清空 ---------------- */
+
+/** 命中高亮配色：暗黄=其他命中，亮黄边框=当前命中 */
+const SEARCH_DECORATIONS = {
+  matchBackground: "#4a3d00",
+  matchBorder: "#7a6500",
+  matchOverviewRuler: "#7a6500",
+  activeMatchBackground: "#b8860b",
+  activeMatchBorder: "#ffd166",
+  activeMatchColorOverviewRuler: "#ffd166",
+};
+
+function renderSearchCount(index: number, count: number): void {
+  const el = req<HTMLSpanElement>("#term-search-count");
+  if (count <= 0) {
+    el.textContent = "0 个";
+    el.classList.add("none");
+    return;
+  }
+  el.classList.remove("none");
+  // index === -1：命中过多（超过上限），只报总数
+  el.textContent = index < 0 ? `${count}+ 个` : `${index + 1}/${count}`;
+}
+
+function runSearch(forward: boolean): void {
+  const s = activeSession();
+  const input = req<HTMLInputElement>("#term-search-input");
+  const q = input.value;
+
+  if (!s?.search || !q) {
+    s?.search?.clearDecorations();
+    renderSearchCount(0, 0);
+    return;
+  }
+
+  const opts = { caseSensitive: false, decorations: SEARCH_DECORATIONS };
+  if (forward) s.search.findNext(q, opts);
+  else s.search.findPrevious(q, opts);
+}
+
+function openSearch(): void {
+  const s = activeSession();
+  if (!s?.term) return;
+
+  const bar = req<HTMLDivElement>("#term-search");
+  const input = req<HTMLInputElement>("#term-search-input");
+  bar.hidden = false;
+
+  // 有选中文字就直接搜它（只取单行）
+  const sel = s.term.getSelection().trim();
+  if (sel && !sel.includes("\n")) input.value = sel;
+
+  input.focus();
+  input.select();
+  runSearch(true);
+}
+
+function closeSearch(): void {
+  const bar = req<HTMLDivElement>("#term-search");
+  if (bar.hidden) return;
+  bar.hidden = true;
+  activeSession()?.search?.clearDecorations();
+  renderSearchCount(0, 0);
+  activeSession()?.term?.focus();
+}
+
+/** 真正清空日志：xterm 整个缓冲区（含回滚区）+ 立即覆盖落盘 */
+async function clearActiveLog(): Promise<void> {
+  const s = activeSession();
+  if (!s?.term) return;
+
+  s.term.clear();
+  s.search?.clearDecorations();
+  renderSearchCount(0, 0);
+
+  // 只清显示、不动进程；但落盘的那份必须一起清，否则重启又回来了
+  await persistSessions();
+  toast("已清空日志");
 }
 
 /* ---------------- 终端里可点击的位置 ---------------- */
@@ -728,6 +811,14 @@ function ensureTerm(s: TermSession): void {
   const serialize = new SerializeAddon();
   term.loadAddon(serialize);
 
+  // 日志搜索（Ctrl+F）：按会话各一份，切换 tab 时只动当前会话
+  const search = new SearchAddon();
+  term.loadAddon(search);
+  s.search = search;
+  search.onDidChangeResults((e) => {
+    if (s.id === activeSessionId) renderSearchCount(e.resultIndex, e.resultCount);
+  });
+
   // 键盘 → PTY（恢复的会话没有进程，绝不能写）
   term.onData((data) => {
     if (s.restored) {
@@ -767,6 +858,8 @@ function activateSession(id: string): void {
   const cur = sessions.find((s) => s.id === id);
   if (cur) {
     ensureTerm(cur);
+    // 换 tab 时收起搜索条：搜索是针对单个会话缓冲区的
+    closeSearch();
     for (const s of sessions) s.pane?.classList.toggle("active", s.id === id);
     requestAnimationFrame(() => {
       cur.fit?.fit();
@@ -795,6 +888,9 @@ function updateControls(): void {
   req<HTMLButtonElement>("#btn-restart").disabled = !running;
   req<HTMLButtonElement>("#btn-stop").disabled = !s || s.status === "stopped";
   req<HTMLButtonElement>("#btn-devtools").disabled = !s?.devToolsUrl;
+  // 清空日志 / 搜索：只要有终端就能用（不要求进程还在跑）
+  req<HTMLButtonElement>("#btn-clear").disabled = !s?.term;
+  req<HTMLButtonElement>("#btn-find").disabled = !s?.term;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
   // 可重跑的会话：命令 / 模板 / 平台动作。
   // 终端不算——它的"重跑"只是新开一个窗口，容易和"恢复现场"混淆，所以不提供。
@@ -5035,12 +5131,27 @@ async function boot(): Promise<void> {
             <span class="session-tools" id="session-tools">
               <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
               <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
+              <button class="cbtn" id="btn-find" disabled title="搜索日志（Ctrl+F）"><i class="hi">🔍</i>搜索</button>
+              <button class="cbtn" id="btn-clear" disabled title="清空当前会话的日志（含回滚区；不影响进程）"><i class="hi">🧹</i>清空</button>
             </span>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
             <span class="ctx-info" id="ctx-info">等待会话</span>
           </div>
           <div class="term-holder" id="term-holder">
+            <div class="term-search" id="term-search" hidden>
+              <input
+                id="term-search-input"
+                type="text"
+                placeholder="搜索日志…"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <span class="ts-count" id="term-search-count">0 个</span>
+              <button class="ts-btn" id="term-search-prev" title="上一个（Shift+Enter）">⌃</button>
+              <button class="ts-btn" id="term-search-next" title="下一个（Enter）">⌄</button>
+              <button class="ts-btn" id="term-search-close" title="关闭（Esc）">×</button>
+            </div>
             <div class="empty-term" id="term-empty">
               <div class="et-glyph">▮</div>
               <div class="et-title">还没有运行中的会话</div>
@@ -5112,6 +5223,8 @@ async function boot(): Promise<void> {
   window.addEventListener("blur", () => {
     closeDeviceMenu();
     closeLinkMenu();
+    // 焦点在终端上时，Esc 也能收起搜索条
+    closeSearch();
   });
 
   req<HTMLButtonElement>("#btn-import-menu").addEventListener("click", (e) => {
@@ -5142,6 +5255,38 @@ async function boot(): Promise<void> {
   req<HTMLButtonElement>("#btn-devtools").addEventListener("click", () => {
     const url = activeSession()?.devToolsUrl;
     if (url) void openUrl(url).catch((e) => toast(String(e), "error"));
+  });
+
+  // 日志搜索 / 清空
+  req<HTMLButtonElement>("#btn-find").addEventListener("click", () => openSearch());
+  req<HTMLButtonElement>("#btn-clear").addEventListener("click", () => void clearActiveLog());
+  req<HTMLButtonElement>("#term-search-next").addEventListener("click", () => runSearch(true));
+  req<HTMLButtonElement>("#term-search-prev").addEventListener("click", () => runSearch(false));
+  req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => closeSearch());
+
+  const searchInput = req<HTMLInputElement>("#term-search-input");
+  searchInput.addEventListener("input", () => runSearch(true));
+  searchInput.addEventListener("keydown", (e) => {
+    // 搜索框里的按键不能漏给终端，也不能触发全局 Esc 逻辑
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      runSearch(!e.shiftKey);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closeSearch();
+    }
+  });
+
+  document.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== "f") return;
+    // 别抢其它输入框里的 Ctrl+F
+    const ae = document.activeElement as HTMLElement | null;
+    const typing = ae?.tagName === "INPUT" || ae?.tagName === "TEXTAREA";
+    if (typing && ae?.id !== "term-search-input") return;
+    if (!activeSession()?.term) return;
+    e.preventDefault();
+    openSearch();
   });
 
   try {
@@ -5195,6 +5340,27 @@ async function boot(): Promise<void> {
     if (openHook) {
       const [cwd, ...rest] = openHook.split("|");
       void openLocation(cwd, rest.join("|"));
+    }
+
+    // 开发期：验证"清空 / 搜索"这两条链路（不用手动点）
+    //   FLA_TERM_DEBUG=clear  → 清空当前会话并把清空前后缓冲区长度打到 toast
+    //   FLA_TERM_FIND=<文本>   → 打开搜索条并搜这段文本
+    const termDebug = await invoke<string | null>("dev_env", { name: "FLA_TERM_DEBUG" });
+    if (termDebug === "clear") {
+      const s = activeSession();
+      if (s?.term) {
+        const before = s.term.buffer.active.length;
+        const beforeBase = s.term.buffer.active.baseY;
+        await clearActiveLog();
+        const after = s.term.buffer.active.length;
+        toast(`buffer 行数 ${before}(baseY ${beforeBase}) → ${after}`, "error");
+      }
+    }
+    const termFind = await invoke<string | null>("dev_env", { name: "FLA_TERM_FIND" });
+    if (termFind) {
+      openSearch();
+      req<HTMLInputElement>("#term-search-input").value = termFind;
+      runSearch(true);
     }
 
     // 开发期：自动弹出设备菜单（FLA_DEVICE_MENU=<项目ID>），便于无人值守截图
@@ -5400,6 +5566,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

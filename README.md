@@ -202,6 +202,33 @@
 
 > 限制：路径被终端宽度折成两行时不可点（单行内匹配）。
 
+### 日志搜索与清空
+
+终端控制条上多了两个按钮，**所有会话都能用**（flutter run / 构建输出 / docker 日志 / 终端）：
+
+**🔍 搜索（Ctrl+F）** —— 浮在终端右上角，不占布局
+
+```
+┌ 日志…                        ⌃ ⌄   2/17   × ┐
+```
+
+- 计数直接显示 `当前/总数`；没有命中显示 **`0 个`**（红色）
+- `Enter` 下一个 / `Shift+Enter` 上一个 / `Esc` 关闭
+- **不区分大小写**（日志搜索的常见需求）
+- 搜的是整个缓冲区，**包括恢复的历史输出**
+- 切 tab 会自动收起（搜索是针对单个会话的）
+
+**🧹 清空** —— 真清空，不是 Flutter 里按 `c` 那种"只清屏幕"
+
+| 位置 | 处理 |
+|---|---|
+| xterm 回滚区 | `term.clear()` 清整个 buffer（**实测 673 行 → 36 行**，回滚区全没了）|
+| 内存快照 | 立即 `persistSessions()` |
+| `sessions.json` | 一起被覆盖成空，**重启不会又冒出来** |
+
+- **只清显示**：不停进程、不向 PTY 发任何按键
+- 不弹确认框（进程不受影响，误点代价只是丢日志）
+
 ### 命令右键：按"会不会连设备"分流
 
 **不是所有命令都该弹设备菜单。** npm 的 `build`、模板里的 `Pub Get` 跟设备毫无关系，
@@ -396,10 +423,14 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 > - `FLA_DEVICE_MENU="<项目ID>"` 启动即弹出设备菜单
 > - `FLA_PROJ_MENU="<项目ID>"` / `FLA_SUBMENU="<平台名>"` 启动即展开项目菜单（可指定子菜单）
 > - `FLA_ENV="<项目ID>"` 打开环境变量对话框 / `FLA_TERMINAL="<项目ID>"` 打开项目终端
-> - `FLA_SETTINGS="1|<分页名>"` 打开设置页（可指定 tab）/ `FLA_TEMPLATES` / `FLA_EXAMPLES`
+> - `FLA_SETTINGS="1|<分区名>|detect"` 打开设置页（可滚到指定分区，或自动点一次自动检测）
+> - `FLA_TEMPLATES` / `FLA_EXAMPLES`
 > - `FLA_IMPORT_MENU` / `FLA_SERVICE_MENU="<服务名>"` 展开导入菜单 / 服务右键菜单
 > - `FLA_IMPORT_PKG="<package.json>"` / `FLA_IMPORT_COMPOSE="<compose>"` / `FLA_REIMPORT_DOCKER=1`
 > - `FLA_RERUN=1` 对恢复的第一个会话触发重跑 / `FLA_DOCTOR_DETAIL` / `FLA_FILING`
+> - `FLA_OPEN_LOCATION="<cwd>|<文本>"` 走一遍"点路径"的完整链路（开编辑器 / 系统程序）
+> - `FLA_TERM_FIND="<文本>"` 打开搜索条并搜这段文字 / `FLA_TERM_DEBUG=clear` 清空当前会话
+>   并把清空前后缓冲区行数打到 toast（验证是否真的清掉回滚区）
 
 ---
 
