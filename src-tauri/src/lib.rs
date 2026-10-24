@@ -3,6 +3,7 @@ mod apksig;
 mod atomic;
 mod locate;
 mod editor;
+mod project_files;
 mod cache;
 mod daemon;
 mod docker;
@@ -1748,6 +1749,12 @@ fn open_path_default(path: String) -> Result<(), String> {
     editor::open_with_default_app(p)
 }
 
+/// 项目目录里可编辑的配置文件（右键菜单据此显示「编辑 …」）
+#[tauri::command(async)]
+fn project_files(path: String) -> project_files::ProjectFiles {
+    project_files::detect(std::path::Path::new(&path))
+}
+
 /// 自动探测到的 VS Code 路径（设置里留空时实际会用它）
 #[tauri::command(async)]
 fn detect_editor_path() -> Option<String> {
@@ -1859,11 +1866,14 @@ pub fn run() {
             resolve_location,
             detect_editor_path,
             open_path_default,
+            project_files,
             open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 

@@ -123,6 +123,21 @@ interface SettingsModel {
   };
 }
 
+/** 项目目录里可编辑的配置文件（后端 project_files） */
+interface ProjectFiles {
+  packageJson: string | null;
+  /** compose 文件的完整路径（名字可能是 .yml / .yaml / compose.*） */
+  compose: string | null;
+}
+
+/** 用默认编辑器（VS Code）打开一个文件 */
+async function editFile(path: string): Promise<void> {
+  try {
+    await invoke("open_in_editor", { path, line: null, col: null });
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
 /** 终端里一处"位置"的解析结果（后端 locate::Location） */
 interface Location {
   raw: string;
@@ -3610,6 +3625,19 @@ let projMenuEl: HTMLDivElement | null = null;
 let devSubmenu: string | null = null;
 
 function openProjectMenu(ev: MouseEvent, p: Proj): void {
+  // 先看目录里有没有 package.json / compose 文件，再决定菜单项（几毫秒，用户感知不到）
+  void (async () => {
+    let files: ProjectFiles = { packageJson: null, compose: null };
+    try {
+      files = await invoke<ProjectFiles>("project_files", { path: p.path });
+    } catch {
+      /* 读不到就当没有：少两项菜单，不影响其它功能 */
+    }
+    renderProjectMenu(ev, p, files);
+  })();
+}
+
+function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
   closeAllMenus();
 
   // 命令集（无 pubspec 的 workspace）本身就是命令列表：不显示平台，也不显示全局命令
@@ -3750,6 +3778,24 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
   }
 
   // 按项目"有什么文件"决定重读哪一份（以前一律显示 launch.json，对 docker/npm 项目是错的）
+  if (files.compose) {
+    const name = files.compose.split(/[\\/]/).pop() ?? "docker-compose.yaml";
+    tail.push({
+      kind: "item",
+      name: `编辑 ${name}`,
+      detail: "用默认编辑器打开（VS Code）",
+      onClick: () => void editFile(files.compose!),
+    });
+  }
+  if (files.packageJson) {
+    tail.push({
+      kind: "item",
+      name: "编辑 package.json",
+      detail: "用默认编辑器打开（VS Code）",
+      onClick: () => void editFile(files.packageJson!),
+    });
+  }
+
   if (dockerCmds.length) {
     tail.push({
       kind: "item",
@@ -5566,6 +5612,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 

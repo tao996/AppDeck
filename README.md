@@ -146,9 +146,14 @@
    mysql        6 个操作      ▶
 
 右键服务：启动 / 停止 / 重启 / 日志 / 进入 shell / 删除容器…（二次确认，说明"卷保留"）
-右键项目：全部启动 / 全部日志 / 全部停止 / 重新读取 docker-compose.yaml
+右键项目：全部启动 / 全部日志 / 全部停止 / 编辑 docker-compose.yaml / 重新读取 docker-compose.yaml
 ```
 
+- **编辑 xxx**：用默认编辑器（VS Code）打开项目的配置文件，右键点一下就跳过去
+  - docker 项目 → `编辑 docker-compose.yaml`（显示**真实文件名**，可能是 `.yml` / `compose.yaml`）
+  - npm 项目 → `编辑 package.json`
+  - 判断依据是**文件是否真的存在**（后端 `project_files` 探测），不是项目的"生态标签"；
+    所以一个目录同时有 compose 和 package.json 时两条都会出现
 - 只有**这个项目真有对应文件**才显示「重新读取 xxx」（compose / package.json / launch.json 各自独立）
 - 状态栏的"N 条命令"按**树里看得见的条目**计，不把折叠的服务动作算进去
 
@@ -199,6 +204,20 @@
 
 **必须是 `Code.exe`**：PATH 里的 `code` 是 `code.cmd`/无扩展名脚本，和 `npm`/`docker`
 同一个坑。`Code.exe --goto "文件:行:列"` 走 argv，没有 `cmd.exe` 的引号问题，也没有注入风险。
+
+**但新版 VS Code 是「Electron 二进制 + 版本子目录」布局**：
+
+```
+Microsoft VS Code\
+  Code.exe                       ← 光杆跑 --goto 会 exit 9
+  e646868227\resources\app\out\cli.js   ← 真正的 app payload（目录名是版本哈希）
+  bin\code.cmd                   ← 它做的就是 ELECTRON_RUN_AS_NODE=1 Code.exe <cli.js> …
+```
+
+所以要按 `code.cmd` 的方式调用：**设 `ELECTRON_RUN_AS_NODE=1`，把 cli.js 当第一个参数**。
+**cli.js 靠扫描 `*\resources\app\out\cli.js` 找，不能硬编码目录名**——
+VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e646868227`，`code.cmd` 同步改，
+写死的话升级后所有"打开文件"功能立刻失效）。
 
 > 限制：路径被终端宽度折成两行时不可点（单行内匹配）。
 
