@@ -138,6 +138,17 @@ async function editFile(path: string): Promise<void> {
     toast(String(e), "error");
   }
 }
+
+/** 用默认编辑器打开本会话的项目目录（整目录当工作区打开） */
+async function openProjectFolder(): Promise<void> {
+  const s = activeSession();
+  if (!s?.cwd) return;
+  try {
+    await invoke("open_in_editor", { path: s.cwd, line: null, col: null });
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
 /** 终端里一处"位置"的解析结果（后端 locate::Location） */
 interface Location {
   raw: string;
@@ -906,6 +917,8 @@ function updateControls(): void {
   // 清空日志 / 搜索：只要有终端就能用（不要求进程还在跑）
   req<HTMLButtonElement>("#btn-clear").disabled = !s?.term;
   req<HTMLButtonElement>("#btn-find").disabled = !s?.term;
+  // 项目目录：有会话且有 cwd 才能用编辑器打开
+  req<HTMLButtonElement>("#btn-open-proj").disabled = !s?.cwd;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
   // 可重跑的会话：命令 / 模板 / 平台动作。
   // 终端不算——它的"重跑"只是新开一个窗口，容易和"恢复现场"混淆，所以不提供。
@@ -5179,6 +5192,7 @@ async function boot(): Promise<void> {
               <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
               <button class="cbtn" id="btn-find" disabled title="搜索日志（Ctrl+F）"><i class="hi">🔍</i>搜索</button>
               <button class="cbtn" id="btn-clear" disabled title="清空当前会话的日志（含回滚区；不影响进程）"><i class="hi">🧹</i>清空</button>
+              <button class="cbtn" id="btn-open-proj" disabled title="用编辑器打开本会话的项目目录（VS Code）"><i class="hi">📂</i>项目</button>
             </span>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
@@ -5308,7 +5322,8 @@ async function boot(): Promise<void> {
   req<HTMLButtonElement>("#btn-clear").addEventListener("click", () => void clearActiveLog());
   req<HTMLButtonElement>("#term-search-next").addEventListener("click", () => runSearch(true));
   req<HTMLButtonElement>("#term-search-prev").addEventListener("click", () => runSearch(false));
-  req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => closeSearch());
+req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => closeSearch());
+  req<HTMLButtonElement>("#btn-open-proj").addEventListener("click", () => void openProjectFolder());
 
   const searchInput = req<HTMLInputElement>("#term-search-input");
   searchInput.addEventListener("input", () => runSearch(true));
@@ -5612,6 +5627,7 @@ async function boot(): Promise<void> {
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
