@@ -231,6 +231,8 @@ interface State {
   settings: SettingsModel;
   projects: Proj[];
   commandTemplates: Cmd[];
+  /** 纯界面状态：项目折叠等 */
+  ui?: { collapsedProjects?: string[] };
 }
 
 function defaultSettings(): SettingsModel {
@@ -362,9 +364,21 @@ let state: State = {
   settings: defaultSettings(),
   projects: [],
   commandTemplates: [],
+  ui: { collapsedProjects: [] },
 };
 const flutterInfo = new Map<string, FlutterInfo>();
 const collapsed = new Set<string>();
+
+/** 折叠状态落盘：连点几下只写一次盘 */
+let collapseSaveTimer: number | null = null;
+function scheduleSaveCollapsed(): void {
+  if (collapseSaveTimer !== null) window.clearTimeout(collapseSaveTimer);
+  collapseSaveTimer = window.setTimeout(() => {
+    collapseSaveTimer = null;
+    void invoke("save_collapsed_projects", { ids: [...collapsed] }).catch(() => undefined);
+  }, 300);
+}
+
 let selectedCommand: string | null = null;
 let statePath = "";
 
@@ -1119,6 +1133,7 @@ function renderTree(): void {
       if (collapsed.has(p.id)) collapsed.delete(p.id);
       else collapsed.add(p.id);
       renderTree();
+      scheduleSaveCollapsed();
     });
 
     // 右键：全局命令可直接执行，无需先加入项目
@@ -5357,6 +5372,9 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
     ]);
     state = s;
     statePath = loc;
+    // 恢复上次的项目折叠状态（没记录的默认展开）
+    collapsed.clear();
+    for (const id of s.ui?.collapsedProjects ?? []) collapsed.add(id);
   } catch (e) {
     toast(`载入状态失败：${String(e)}`, "error");
   }
@@ -5393,6 +5411,18 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
       const cmd = proj?.commands.find((x) => x.id === auto.commandId);
       if (proj && cmd) void runCommand(proj, cmd, auto.deviceId ?? undefined);
       else console.warn("[autostart] 未找到项目或命令", auto);
+    }
+
+    // 开发期：模拟"折叠若干项目"（FLA_COLLAPSE="<id>,<id>"），
+    // 走的是和点击完全相同的代码路径（加进集合 → 重绘 → 落盘）
+    const collapseHook = await invoke<string | null>("dev_env", { name: "FLA_COLLAPSE" });
+    if (collapseHook) {
+      for (const id of collapseHook.split(",")) {
+        const t = id.trim();
+        if (t) collapsed.add(t);
+      }
+      renderTree();
+      scheduleSaveCollapsed();
     }
 
     // 开发期：直接打开一处位置（FLA_OPEN_LOCATION="<cwd>|<文本>"），
@@ -5627,6 +5657,9 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
+
 
 
 

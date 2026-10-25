@@ -268,6 +268,18 @@ pub struct State {
     /// 全局命令模板库
     #[serde(rename = "commandTemplates", default)]
     pub command_templates: Vec<Command>,
+    /// 纯界面状态（与业务无关，丢了不影响功能）
+    #[serde(default)]
+    pub ui: UiState,
+}
+
+/// 界面状态：只放"下次打开还应该保持原样"的展示偏好
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct UiState {
+    /// 右侧项目树里被折叠的项目 id（没列出来的 = 展开）
+    #[serde(default)]
+    pub collapsed_projects: Vec<String>,
 }
 
 impl Default for State {
@@ -277,9 +289,11 @@ impl Default for State {
             settings: Settings::default(),
             projects: Vec::new(),
             command_templates: default_templates(),
+            ui: UiState::default(),
         }
     }
 }
+
 
 
 

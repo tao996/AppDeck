@@ -448,6 +448,9 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
 - **项目管理**：目录选择器添加；自动区分「单应用」（含 `pubspec.yaml`）与「工作区」（monorepo，靠 `.vscode/launch.json` + `cwd` 定位子应用）；支持移除与重复校验
 - **`launch.json` 导入**：手写 JSONC 状态机（行注释 / 块注释 / 尾逗号）；按 `type == "dart" && request == "launch"` 过滤；`cwd` 相对**工作区根**解析（VS Code 的真实语义，不是相对 `.vscode`）
 - **项目树**：真实数据渲染，展示 Flutter 来源（`FVM` / `自定义` / `PATH`）、版本号、`release` 模式标记
+- **折叠状态会记住**：哪些项目是折叠的写进 `state.json` 的 `ui.collapsedProjects`，
+  重启后保持原样（没记录的 = 展开）。连点几下只写一次盘（300ms 防抖），
+  且只保留仍存在的项目 id——删掉的项目不会在配置里留死 id
 - **持久化**：`%APPDATA%\com.flutterlauncher.app\state.json`，`schemaVersion: 2`，原子写入；损坏时备份为 `state.corrupt.json` 后重建
 - **Flutter 探测**：解析可执行文件并执行 `--version`
 
@@ -475,7 +478,7 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 > - `FLA_IMPORT_PKG="<package.json>"` / `FLA_IMPORT_COMPOSE="<compose>"` / `FLA_REIMPORT_DOCKER=1`
 > - `FLA_RERUN=1` 对恢复的第一个会话触发重跑 / `FLA_DOCTOR_DETAIL` / `FLA_FILING`
 > - `FLA_OPEN_LOCATION="<cwd>|<文本>"` 走一遍"点路径"的完整链路（开编辑器 / 系统程序）
-> - `FLA_TERM_FIND="<文本>"` 打开搜索条并搜这段文字 / `FLA_TERM_DEBUG=clear` 清空当前会话
+> - `FLA_COLLAPSE="<项目id>,<项目id>"` 模拟折叠若干项目（走和点击相同的代码路径）`r`n> - `FLA_TERM_FIND="<文本>"` 打开搜索条并搜这段文字 / `FLA_TERM_DEBUG=clear` 清空当前会话
 >   并把清空前后缓冲区行数打到 toast（验证是否真的清掉回滚区）
 
 ---
@@ -626,6 +629,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 

@@ -1326,6 +1326,31 @@ fn start_doctor_fix(
 
 /* ---------------- 设置与工具链 ---------------- */
 
+/// 保存右侧项目树的折叠状态。
+/// 纯 UI 偏好：只写 state.json 里的一小段，不动业务字段。
+#[tauri::command(async)]
+fn save_collapsed_projects(app: AppHandle, ids: Vec<String>) -> Result<(), String> {
+    let mut state = store::load(&app)?;
+
+    // 只留还存在的项目：删掉的项目不该在配置里留下死 id
+    let alive: std::collections::HashSet<&str> =
+        state.projects.iter().map(|p| p.id.as_str()).collect();
+    let mut cleaned: Vec<String> = ids
+        .into_iter()
+        .filter(|id| alive.contains(id.as_str()))
+        .collect();
+    cleaned.sort();
+    cleaned.dedup();
+
+    // 没变化就不写盘（点一下写一次没必要）
+    if state.ui.collapsed_projects == cleaned {
+        return Ok(());
+    }
+
+    state.ui.collapsed_projects = cleaned;
+    store::save(&app, &state)
+}
+
 #[tauri::command]
 fn save_settings(
     app: AppHandle,
@@ -1869,11 +1894,13 @@ pub fn run() {
             detect_editor_path,
             open_path_default,
             project_files,
+            save_collapsed_projects,
             open_in_editor
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
 
 
 
