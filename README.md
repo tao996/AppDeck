@@ -167,8 +167,12 @@ tauri info             custom  npm run tauri -- info
    mysql        6 个操作      ▶
 
 右键服务：启动 / 停止 / 重启 / 日志 / 进入 shell / 删除容器…（二次确认，说明"卷保留"）
-右键项目：全部启动 / 全部日志 / 全部停止 / 编辑 docker-compose.yaml / 重新读取 docker-compose.yaml
+右键项目：全部启动 / 全部日志 / 全部停止 / 编辑 docker-compose.yaml / 用编辑器打开目录 / 重新读取 docker-compose.yaml
 ```
+
+- **用编辑器打开目录**：VS Code 把整个项目文件夹当工作区打开（`--reuse-window`，不会每次开新窗口）。
+  和终端控制条的「📂 项目」是同一套逻辑，区别是那个跟**当前会话的 cwd**，
+  这个跟**项目本身**（菜单在哪个项目上点的就开哪个）
 
 - **编辑 xxx**：用默认编辑器（VS Code）打开项目的配置文件，右键点一下就跳过去
   - docker 项目 → `编辑 docker-compose.yaml`（显示**真实文件名**，可能是 `.yml` / `compose.yaml`）
@@ -478,7 +482,9 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 > - `FLA_IMPORT_PKG="<package.json>"` / `FLA_IMPORT_COMPOSE="<compose>"` / `FLA_REIMPORT_DOCKER=1`
 > - `FLA_RERUN=1` 对恢复的第一个会话触发重跑 / `FLA_DOCTOR_DETAIL` / `FLA_FILING`
 > - `FLA_OPEN_LOCATION="<cwd>|<文本>"` 走一遍"点路径"的完整链路（开编辑器 / 系统程序）
-> - `FLA_COLLAPSE="<项目id>,<项目id>"` 模拟折叠若干项目（走和点击相同的代码路径）`r`n> - `FLA_TERM_FIND="<文本>"` 打开搜索条并搜这段文字 / `FLA_TERM_DEBUG=clear` 清空当前会话
+> - `FLA_COLLAPSE="<项目id>,<项目id>"` 模拟折叠若干项目（走和点击相同的代码路径）
+> - `FLA_OPEN_DIR="<项目id>"` 用编辑器打开该项目目录（等同右键「用编辑器打开目录」）
+> - `FLA_TERM_FIND="<文本>"` 打开搜索条并搜这段文字 / `FLA_TERM_DEBUG=clear` 清空当前会话
 >   并把清空前后缓冲区行数打到 toast（验证是否真的清掉回滚区）
 
 ---

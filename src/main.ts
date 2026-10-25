@@ -3796,6 +3796,13 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     onClick: () => void openProjectTerminal(p),
   });
 
+  tail.push({
+    kind: "item",
+    name: "用编辑器打开目录",
+    detail: "VS Code 打开项目文件夹（整个目录当工作区）",
+    onClick: () => void editFile(p.path),
+  });
+
   if (!isCommandSet) {
     tail.push({
       kind: "item",
@@ -5413,6 +5420,14 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
       else console.warn("[autostart] 未找到项目或命令", auto);
     }
 
+    // 开发期：用编辑器打开某项目的目录（FLA_OPEN_DIR="<项目id>"），
+    // 走的是项目右键「用编辑器打开目录」完全相同的代码路径
+    const openDirHook = await invoke<string | null>("dev_env", { name: "FLA_OPEN_DIR" });
+    if (openDirHook) {
+      const proj = state.projects.find((x) => x.id === openDirHook) ?? state.projects[0];
+      if (proj) void editFile(proj.path);
+    }
+
     // 开发期：模拟"折叠若干项目"（FLA_COLLAPSE="<id>,<id>"），
     // 走的是和点击完全相同的代码路径（加进集合 → 重绘 → 落盘）
     const collapseHook = await invoke<string | null>("dev_env", { name: "FLA_COLLAPSE" });
@@ -5657,6 +5672,7 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
 
 
 
