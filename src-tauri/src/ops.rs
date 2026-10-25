@@ -277,7 +277,21 @@ pub fn import_package_from_path(
         .find(|p| p.id == id)
         .ok_or_else(|| "项目不存在".to_string())?;
 
-    let outcome = crate::npm::merge_into(project, &scripts, manager);
+    // `"tauri": "tauri"` 这种转发脚本展开成 tauri 自己的子命令；
+    // 探测失败（没装依赖 / CLI 不可用）就什么都不做，退回原来的一条裸命令
+    let mut expanded: std::collections::HashMap<String, Vec<crate::model::Command>> =
+        std::collections::HashMap::new();
+    if scripts
+        .iter()
+        .any(|(n, v)| n == "tauri" && v.trim() == "tauri")
+    {
+        let cmds = crate::tauri_cli::expand(std::path::Path::new(&root), manager);
+        if !cmds.is_empty() {
+            expanded.insert("tauri".to_string(), cmds);
+        }
+    }
+
+    let outcome = crate::npm::merge_into(project, &scripts, manager, &expanded);
     Ok((project.clone(), outcome, created, manager))
 }
 

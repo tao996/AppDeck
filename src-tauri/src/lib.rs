@@ -4,6 +4,7 @@ mod atomic;
 mod locate;
 mod editor;
 mod project_files;
+mod tauri_cli;
 mod cache;
 mod daemon;
 mod docker;
@@ -136,7 +137,8 @@ struct ComposeImportResponse {
 }
 
 /// 导入 package.json：解析 scripts 生成命令（生态挂在命令上，source = "npm"）
-#[tauri::command]
+/// 里面会跑一次 `tauri --help` 探测子命令（约 1 秒），所以放线程池，别占主线程。
+#[tauri::command(async)]
 fn import_package_path(app: AppHandle, path: String) -> Result<NpmImportResponse, String> {
     let mut state = store::load(&app)?;
     let (project, outcome, created, manager) = ops::import_package_from_path(&mut state, &path)?;
@@ -1872,6 +1874,8 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
 
 
 

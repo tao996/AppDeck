@@ -126,6 +126,27 @@
 | 导入 `package.json` | 按 `scripts` 每条生成一条命令；包管理器按 lockfile 探测（pnpm > yarn > npm），设置里可强制 |
 | 导入 `docker-compose.yaml` | 每个 service 生成 6 个动作 + 整份文件 3 个项目级动作 |
 
+**转发型脚本会被展开**：`"tauri": "tauri"` 这种脚本单独一条命令毫无意义（跑起来只打印帮助），
+导入时会**跑一次 `npm run tauri -- --help` 解析出子命令**，换成：
+
+```
+tauri dev              run     npm run tauri -- dev
+tauri build            build   npm run tauri -- build
+tauri build (debug)    build   npm run tauri -- build --debug
+tauri android dev      run     npm run tauri -- android dev     ← 有 android 才出现
+tauri android build    build   npm run tauri -- android build
+tauri info             custom  npm run tauri -- info
+```
+
+- **子命令从 `--help` 解析，不硬编码**：tauri 升级后新增/改名照样对得上
+- 只把**日常真会用的**放进去；`add` / `permission` / `completions` / `plugin` 这类
+  一次性配置操作不进树（它们只是一次性的脚手架，放进去是噪音）
+- `ios` 只在 CLI 真有这个子命令时才展开（Windows 上没有）
+- **探测失败**（没装依赖 / CLI 不可用）就退回原来那一条裸命令，不会丢东西
+- 探测约 1 秒，所以导入命令本身是 `#[tauri::command(async)]`，不占主线程
+- 重复导入不会重复生成；CLI 升级后消失的子命令会被标成 `已失效`，不删
+
+
 **阶段分类：`kind` 一个字段同时表示"执行方式"和"阶段"**
 
 | kind | 含义 | 例子 |
@@ -531,6 +552,7 @@ npm run tauri build  # 打包安装程序
 │   ├── src/cache.rs            磁盘缓存（平台矩阵 / 模拟器列表）
 │   ├── src/launch.rs           launch.json 解析
 │   ├── src/npm.rs              package.json 解析（scripts → 命令、包管理器探测）
+│   ├── src/tauri_cli.rs        tauri 转发脚本 → 子命令展开（解析 --help，不硬编码）
 │   ├── src/docker.rs           docker-compose 解析（services → 服务动作）
 │   ├── src/jsonc.rs            JSONC 状态机（注释 / 尾逗号）
 │   ├── src/flutter.rs          Flutter 可执行文件解析与版本探测
@@ -604,6 +626,7 @@ Start-Sleep -Seconds 3
 (Get-CimInstance Win32_Process -Filter "Name='dart.exe'" |
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 必须 0
 ```
+
 
 
 

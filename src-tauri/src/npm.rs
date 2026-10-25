@@ -10,6 +10,7 @@
 //!   2) 脚本被删掉时只标记 `stale`，不删命令。
 
 use crate::model::{make_id, Command, Project};
+use std::collections::HashMap;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -141,14 +142,47 @@ pub struct MergeOutcome {
 /// - 已有同名命令 → 只同步 program 与 stale 标记，**不动 kind / 名字**
 /// - 新脚本 → 追加
 /// - 已消失的脚本 → 标记 stale（不删除）
+///
+/// `expanded`：某些脚本本身只是个"转发器"（典型是 `"tauri": "tauri"`），
+/// 单独一条命令毫无意义。这类脚本由调用方预先探测出子命令列表，
+/// 这里用它替换掉那条裸命令。
 pub fn merge_into(
     project: &mut Project,
     scripts: &[(String, String)],
     manager: Manager,
+    expanded: &HashMap<String, Vec<Command>>,
 ) -> MergeOutcome {
     let mut out = MergeOutcome::default();
 
     for (name, _) in scripts {
+        // 展开型脚本：生成它的子命令，而不是一条"npm run tauri"
+        if let Some(cmds) = expanded.get(name) {
+            for c in cmds {
+                match project.commands.iter_mut().find(|x| x.id == c.id) {
+                    Some(existing) => {
+                        existing.program = c.program.clone();
+                        existing.args = c.args.clone();
+                        existing.stale = false;
+                        out.kept.push(c.name.clone());
+                    }
+                    None => {
+                        project.commands.push(c.clone());
+                        out.added.push(c.name.clone());
+                    }
+                }
+            }
+
+            // 清掉历史遗留的裸命令（只认当初自动生成的那条原始形态）
+            if let Some(i) = project
+                .commands
+                .iter()
+                .position(|c| is_script_command(c, name))
+            {
+                project.commands.remove(i);
+            }
+            continue;
+        }
+
         let found = project
             .commands
             .iter_mut()
@@ -163,6 +197,24 @@ pub fn merge_into(
             None => {
                 project.commands.push(command_for(name, manager));
                 out.added.push(name.clone());
+            }
+        }
+    }
+
+    // 子命令集合随 tauri 版本变化：这次没探测到的旧展开项标为失效
+    if !expanded.is_empty() {
+        let alive_ids: std::collections::HashSet<&str> = expanded
+            .values()
+            .flatten()
+            .map(|c| c.id.as_str())
+            .collect();
+        for c in project.commands.iter_mut() {
+            if !is_expansion(c) || alive_ids.contains(c.id.as_str()) {
+                continue;
+            }
+            if !c.stale {
+                c.stale = true;
+                out.stale.push(c.name.clone());
             }
         }
     }
@@ -185,6 +237,15 @@ pub fn merge_into(
     }
 
     out
+}
+
+/// 是不是"展开型"命令（`npm run tauri -- <子命令>...`）
+fn is_expansion(c: &Command) -> bool {
+    c.source.as_deref() == Some("npm")
+        && c.args.len() > 3
+        && c.args[0] == "run"
+        && c.args[1] == "tauri"
+        && c.args[2] == "--"
 }
 
 fn is_script_command(c: &Command, script: &str) -> bool {
@@ -297,7 +358,7 @@ mod tests {
             ("dev".to_string(), "vite".to_string()),
             ("build".to_string(), "vite build".to_string()),
         ];
-        let out = merge_into(&mut p, &scripts, Manager::Pnpm);
+        let out = merge_into(&mut p, &scripts, Manager::Pnpm, &HashMap::new());
 
         assert_eq!(out.added, vec!["build".to_string()], "只应新增 build");
         assert_eq!(out.kept, vec!["dev".to_string()]);
@@ -312,7 +373,7 @@ mod tests {
 
         // 再导入一次，去掉 dev 脚本 → dev 应被标记 stale 而不是删除
         let scripts2 = vec![("build".to_string(), "vite build".to_string())];
-        let out2 = merge_into(&mut p, &scripts2, Manager::Pnpm);
+        let out2 = merge_into(&mut p, &scripts2, Manager::Pnpm, &HashMap::new());
         assert_eq!(out2.stale, vec!["dev".to_string()]);
         assert!(p.commands.iter().any(|c| c.name == "dev"), "stale 命令要保留");
         assert!(
@@ -333,6 +394,78 @@ mod tests {
         assert!(!c.stale);
         let _ = HashMap::<String, String>::new();
     }
+
+    /// 展开型脚本：裸命令要被子命令替换掉，重复导入不重复生成
+    #[test]
+    fn expansion_replaces_bare_script_command() {
+        let d = tmpdir("fla_npm_expand");
+        let mut p = project_at(&d);
+        let scripts = vec![("tauri".to_string(), "tauri".to_string())];
+
+        // 第一步：没有展开信息时，退化成一条裸命令（老行为）
+        merge_into(&mut p, &scripts, Manager::Npm, &HashMap::new());
+        assert!(
+            p.commands
+                .iter()
+                .any(|c| c.source.as_deref() == Some("npm") && c.args == vec!["run", "tauri"]),
+            "没有展开信息时应保留裸命令"
+        );
+
+        // 第二步：拿到展开信息 → 裸命令消失，换成一堆子命令
+        let sub = |label: &str, tail: &[&str], kind: &str| Command {
+            id: crate::model::make_id("npm", label),
+            name: label.to_string(),
+            kind: kind.to_string(),
+            program: Some("npm".to_string()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["run", "tauri", "--"]
+                .into_iter()
+                .chain(tail.iter().copied())
+                .map(|s| s.to_string())
+                .collect(),
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("npm".to_string()),
+            scope: Some("project".to_string()),
+            stale: false,
+            group: None,
+            role: None,
+            category: None,
+        };
+        let expanded: HashMap<String, Vec<Command>> = HashMap::from([(
+            "tauri".to_string(),
+            vec![
+                sub("tauri dev", &["dev"], "run"),
+                sub("tauri build", &["build"], "build"),
+            ],
+        )]);
+
+        let out = merge_into(&mut p, &scripts, Manager::Npm, &expanded);
+        assert_eq!(out.added.len(), 2);
+        assert!(
+            !p.commands.iter().any(|c| c.args == vec!["run", "tauri"]),
+            "裸命令应被移除"
+        );
+        assert!(p.commands.iter().any(|c| c.name == "tauri dev"));
+        assert!(p.commands.iter().any(|c| c.name == "tauri build"));
+
+        // 再导入一次：不重复生成，也不误标 stale
+        let out2 = merge_into(&mut p, &scripts, Manager::Npm, &expanded);
+        assert!(out2.added.is_empty(), "第二次不该再加");
+        assert!(out2.stale.is_empty(), "脚本还在，不该标失效");
+        assert_eq!(
+            p.commands.iter().filter(|c| c.name == "tauri dev").count(),
+            1,
+            "不能重复追加"
+        );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
+
 
 
