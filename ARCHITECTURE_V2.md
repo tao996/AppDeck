@@ -1,4 +1,4 @@
-# Flutter Launcher —— 方案决策与架构设计 v2
+# AppDeck —— 方案决策与架构设计 v2
 
 > **定位：设计推导文档。** 本文记录「为什么这样定」，包含源码证据与决策权衡。
 > **权威规格与验收标准已合并进 `readme_md_for_ai_agents.md`（v2）**——实现时以那份为准，本文用于理解依据。
@@ -287,7 +287,10 @@ D:\apps\flutter\bin\  →  flutter, flutter.bat, dart, dart.bat
 ```jsonc
 {
   "schemaVersion": 2,
-  "settings": { "flutterTool": { "mode": "auto", "customPath": null } },
+  "settings": {
+    "flutterTool": { "mode": "auto", "customPath": null },
+    "window": { "closeBehavior": "quit" }        // quit | tray
+  },
   "projects": [{
     "id": "uuid", "name": "MyApp", "path": "D:\\proj\\my_app",
     "flutterTool": { "mode": "fvm" },          // 项目级覆盖

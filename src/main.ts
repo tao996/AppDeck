@@ -17,8 +17,11 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import "@xterm/xterm/css/xterm.css";
 
 /* ============================================================
-   Flutter Launcher — M2：ConPTY 终端
+   AppDeck — M2：ConPTY 终端
    ============================================================ */
+
+/** 产品名：与 tauri.conf.json 的 productName、Cargo 包名保持一致 */
+const APP_NAME = "AppDeck";
 
 // harmony：鸿蒙工程改用 flutter_flutter 分支（后端 resolve_for_project 的返回值）
 type FlutterSource = "fvm" | "custom" | "path" | "harmony" | "none";
@@ -87,6 +90,10 @@ interface Proj {
 
 interface SettingsModel {
   flutterTool: { mode: string; customPath: string | null };
+  window: {
+    /** quit | tray —— 点关闭按钮时：退出程序 / 最小化到托盘 */
+    closeBehavior: string;
+  };
   android: {
     sdkPath: string | null;
     emulatorPath: string | null;
@@ -238,6 +245,7 @@ interface State {
 function defaultSettings(): SettingsModel {
   return {
     flutterTool: { mode: "auto", customPath: null },
+    window: { closeBehavior: "quit" },
     android: {
       sdkPath: null,
       emulatorPath: null,
@@ -4537,15 +4545,16 @@ function openSettings(): void {
 
   // 单页滚动：所有分区按固定顺序排列（不再分页签）
   const SECTION_ORDER: Record<string, number> = {
-    命令模板: 1,
-    会话恢复: 2,
-    终端: 3,
-    编辑器: 4,
-    Flutter: 5,
-    Android: 6,
-    HarmonyOS: 7,
-    Npm: 8,
-    Docker: 9,
+    窗口与托盘: 1,
+    命令模板: 2,
+    会话恢复: 3,
+    终端: 4,
+    编辑器: 5,
+    Flutter: 6,
+    Android: 7,
+    HarmonyOS: 8,
+    Npm: 9,
+    Docker: 10,
   };
 
   /** 上一次「自动检测」的结果；只用来在输入框下面提示，不直接改用户填的值 */
@@ -4561,7 +4570,7 @@ function openSettings(): void {
   // 版本信息：原来在工具栏上，移到设置页底部（固定可见，不用滚到底）
   (
     overlay.querySelector("#settings-version") as HTMLSpanElement
-  ).textContent = `Flutter Launcher · state schema v${state.schemaVersion}`;
+  ).textContent = `${APP_NAME} · state schema v${state.schemaVersion}`;
 
   const section = (title: string, desc: string): HTMLDivElement => {
     const s = document.createElement("div");
@@ -4695,6 +4704,55 @@ function openSettings(): void {
 
   const build = (): void => {
     body.innerHTML = "";
+
+    // 窗口与托盘
+    {
+      // 老状态文件里没有 window 字段：补默认值，别让下拉框空着
+      if (draft.window?.closeBehavior !== "quit" && draft.window?.closeBehavior !== "tray") {
+        draft.window = { closeBehavior: "quit" };
+      }
+
+      const s = section(
+        "窗口与托盘",
+        "点标题栏关闭按钮时做什么。托盘图标常驻，左键或双击可把窗口拉回来。",
+      );
+
+      const row = document.createElement("div");
+      row.className = "set-row";
+      const lab = document.createElement("label");
+      lab.textContent = "关闭按钮";
+
+      const sel = document.createElement("select");
+      sel.className = "set-input";
+      for (const [value, text] of [
+        ["quit", "退出程序"],
+        ["tray", "最小化到托盘"],
+      ] as const) {
+        const o = document.createElement("option");
+        o.value = value;
+        o.textContent = text;
+        if (draft.window.closeBehavior === value) o.selected = true;
+        sel.appendChild(o);
+      }
+
+      const note = document.createElement("div");
+      note.className = "set-desc";
+      const syncNote = (): void => {
+        note.textContent =
+          draft.window.closeBehavior === "tray"
+            ? "关闭后进程驻留托盘：正在跑的构建和终端不会中断；从托盘「显示主窗口」或双击图标恢复。"
+            : "关闭即退出：先结束所有终端会话与 flutter daemon，再关闭程序。";
+      };
+      sel.addEventListener("change", () => {
+        draft.window = { closeBehavior: sel.value };
+        syncNote();
+      });
+      syncNote();
+
+      row.append(lab, sel);
+      s.appendChild(row);
+      s.appendChild(note);
+    }
 
     // Flutter
     {
@@ -5184,8 +5242,27 @@ async function boot(): Promise<void> {
   app.innerHTML = `
     <div class="app">
       <header class="toolbar">
-        <div class="brand">
-          <span class="logo">◆</span>
+        <div class="brand" title="${APP_NAME}">
+          <span class="logo">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <defs>
+                <linearGradient id="brand-card" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#7c5cff" />
+                  <stop offset="1" stop-color="#2f8bff" />
+                </linearGradient>
+              </defs>
+              <rect x="7.6" y="2.6" width="12.6" height="15.8" rx="3.4" fill="#3a4777" />
+              <rect
+                x="3.4" y="5.4" width="12.6" height="15.8" rx="3.4"
+                fill="url(#brand-card)" stroke="#ffffff" stroke-opacity="0.18" stroke-width="0.6"
+              />
+              <path
+                d="M7.2 10.3 L12.2 13.3 L7.2 16.3 Z"
+                fill="#ffffff" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"
+              />
+            </svg>
+          </span>
+          <span class="title">${APP_NAME}</span>
         </div>
         <div class="tb-menu">
           <button class="btn menu-btn" id="btn-import-menu">导入 ▾</button>

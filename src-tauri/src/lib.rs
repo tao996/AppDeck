@@ -27,6 +27,8 @@ mod terminal;
 use model::State;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -1815,6 +1817,75 @@ fn dev_autostart() -> Option<DevAutostart> {
     })
 }
 
+/* ---------------- 托盘 / 关闭行为 ---------------- */
+
+const TRAY_SHOW: &str = "tray-show";
+const TRAY_QUIT: &str = "tray-quit";
+
+/// 把主窗口拉回前台。托盘左键、托盘菜单、单实例二次启动都走这里。
+fn show_main(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+/// 真正退出：先收掉 PTY 会话（连带整棵进程树）和 flutter daemon，再退出。
+///
+/// 不能只靠析构：`app.exit()` 之后不保证还会跑 Drop，而正在跑的
+/// `flutter build` 不应该因为点了退出就变成孤儿进程。
+fn quit_app(app: &AppHandle) {
+    if let Some(reg) = app.try_state::<pty::Registry>() {
+        if let Ok(mut map) = reg.0.lock() {
+            map.clear(); // JobGuard 掉光 → KILL_ON_JOB_CLOSE
+        }
+    }
+    if let Some(daemons) = app.try_state::<daemon::Daemons>() {
+        daemons.invalidate_all();
+    }
+    app.exit(0);
+}
+
+/// 系统托盘：常驻图标 + 「显示主窗口 / 退出」菜单。
+///
+/// 图标复用应用自己的 icon 资源（`bundle.icon`），不额外塞一份 png。
+fn install_tray(app: &AppHandle) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, TRAY_SHOW, "显示主窗口", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, TRAY_QUIT, "退出", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let menu = Menu::with_items(app, &[&show, &sep, &quit])?;
+
+    let mut tray = TrayIconBuilder::with_id("main-tray")
+        .menu(&menu)
+        // 左键留给「唤回窗口」，菜单走右键，和 Windows 上的习惯一致
+        .show_menu_on_left_click(false)
+        .tooltip(app.package_info().name.clone())
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            TRAY_SHOW => show_main(app),
+            TRAY_QUIT => quit_app(app),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                show_main(tray.app_handle());
+            }
+        });
+
+    // Windows 上 default_window_icon 来自 exe 内嵌的 icon.ico
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+
+    tray.build(app)?;
+    Ok(())
+}
+
 /* ---------------- 入口 ---------------- */
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1823,11 +1894,7 @@ pub fn run() {
         // 单实例必须**第一个**注册：第二个实例启动时直接退出，
         // 并把已有窗口拉到前面——否则两个进程会同时写 state.json，互相覆盖。
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            if let Some(w) = app.get_webview_window("main") {
-                let _ = w.unminimize();
-                let _ = w.show();
-                let _ = w.set_focus();
-            }
+            show_main(app);
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
@@ -1837,7 +1904,37 @@ pub fn run() {
             if let Some(msg) = crate::store::migrate_legacy_dir(app.handle()) {
                 println!("[store] {msg}");
             }
+            // 托盘建不起来不该让整个应用起不来：退化成「关闭即退出」，
+            // 否则用户选了「最小化到托盘」会得到一个藏起来又唤不回的主窗口。
+            if let Err(e) = install_tray(app.handle()) {
+                eprintln!("[tray] 创建系统托盘失败，关闭按钮按「退出程序」处理：{e}");
+            }
             Ok(())
+        })
+        // 关闭按钮的行为是设置项：每次关窗都从磁盘读最新值，
+        // 不用把设置再缓存一份到内存（save_settings 是原子落盘）。
+        .on_window_event(|window, event| {
+            let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+                return;
+            };
+            // 只接管主窗口：以后若加真正的原生窗口（关于/预览），各自决定关闭语义
+            if window.label() != "main" {
+                return;
+            }
+            let app = window.app_handle();
+            let behavior = store::load(app)
+                .map(|s| s.settings.window.close_behavior)
+                .unwrap_or_else(|_| "quit".to_string());
+
+            // 两种情况都由我们接管：交给默认实现会直接结束进程，
+            // 收不到下面这条"先杀进程树再退出"的路径。
+            api.prevent_close();
+            // 托盘缺失时不能藏窗口：否则没有入口把它叫回来
+            if behavior == "tray" && app.tray_by_id("main-tray").is_some() {
+                let _ = window.hide();
+            } else {
+                quit_app(app);
+            }
         })
         .manage(pty::Registry::default())
         .manage(daemon::Daemons::default())

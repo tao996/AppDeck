@@ -4,7 +4,7 @@
   display: none !important;
 }
 /* ============================================================
-   Flutter Launcher — WindTerm 风格深色主题
+   AppDeck — WindTerm 风格深色主题
    ============================================================ */
 
 :root {
@@ -130,9 +130,16 @@ body {
 }
 
 .brand .logo {
-  color: var(--accent);
-  font-size: 14px;
-  text-shadow: 0 0 10px rgba(74, 158, 255, 0.55);
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+/* 图标是内联 SVG（和应用图标同一套叠层卡片），不额外加载图片 */
+.brand .logo svg {
+  display: block;
+  width: 18px;
+  height: 18px;
 }
 
 .brand .title {

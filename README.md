@@ -1,7 +1,10 @@
-# Flutter Launcher
+# AppDeck
 
-> 轻量级 **Flutter 应用启动器与发布管理器** —— 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
+> 轻量级 **多运行时应用启动器与发布管理器**（Flutter / npm / Docker Compose / 鸿蒙工程）——
+> 不用打开 Android Studio / VS Code，也能跑起来、热重载、打渠道包。
 > 界面参考 **WindTerm**：高信息密度、多标签终端、层级树导航。
+>
+> 原名 **Flutter Launcher**（0.1.0 起更名）；`identifier` 未变，已有项目与设置不受影响。
 
 ![界面截图](docs/shot-p4.png)
 
@@ -60,7 +63,7 @@
 - **结果缓存（内存 + 磁盘）**：首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon
   （约十秒），之后**跨重启**都直接用缓存；右键菜单里有「重新分析平台信息」强制刷新
 - 模拟器列表同样落磁盘缓存，菜单里的 ⟳ 才重新检查
-- 缓存在 `%APPDATA%\com.flutterlauncher.app\cache.json`，删掉即可强制全部重算
+- 缓存在 `%APPDATA%\cn.gu19.appdev\cache.json`，删掉即可强制全部重算
 - 分析在阻塞线程池执行，不会占住主线程卡界面
 
 **HarmonyOS 工程**：目录里有 `ohos/` 就自动改用设置里的鸿蒙 flutter 分支
@@ -78,7 +81,7 @@
 同一个上下文（exe + env + PATH）同时用于会话、daemon、doctor 和宿主能力探测——
 不会出现"设备列表用鸿蒙分支、构建却用标准 flutter"这种分裂。
 
-**PATH shim**：鸿蒙工程会在 `%APPDATA%\com.flutterlauncher.app\shims\<项目id>\flutter.bat`
+**PATH shim**：鸿蒙工程会在 `%APPDATA%\cn.gu19.appdev\shims\<项目id>\flutter.bat`
 生成一个转发脚本并前置到 PATH。这样应用内手敲 `flutter`、以及构建链内部再调 `flutter`，
 都会落到项目自己的分支上——**不需要改你的 `$PROFILE`**。
 
@@ -409,7 +412,9 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
 - **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
 - **设置页**（⚙）**单页垂直滚动**（不分页签；弹窗固定尺寸，内容内部滚动），分区顺序：
-  命令模板 → 会话恢复 → 终端 → 编辑器 → Flutter → Android → 鸿蒙 → Npm → Docker
+  窗口与托盘 → 命令模板 → 会话恢复 → 终端 → 编辑器 → Flutter → Android → 鸿蒙 → Npm → Docker
+  - 窗口与托盘：关闭按钮行为（**退出程序** / **最小化到托盘**）。托盘图标常驻：
+    左键或双击恢复窗口，右键菜单有「显示主窗口 / 退出」；选「最小化到托盘」时关窗不会中断正在跑的构建
   - 命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（VS Code）
   - Flutter：`auto` / `custom` / `fvm` + 自定义路径
   - Android：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
@@ -455,7 +460,7 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
 - **折叠状态会记住**：哪些项目是折叠的写进 `state.json` 的 `ui.collapsedProjects`，
   重启后保持原样（没记录的 = 展开）。连点几下只写一次盘（300ms 防抖），
   且只保留仍存在的项目 id——删掉的项目不会在配置里留死 id
-- **持久化**：`%APPDATA%\com.flutterlauncher.app\state.json`，`schemaVersion: 2`，原子写入；损坏时备份为 `state.corrupt.json` 后重建
+- **持久化**：`%APPDATA%\cn.gu19.appdev\state.json`，`schemaVersion: 2`，原子写入；损坏时备份为 `state.corrupt.json` 后重建
 - **Flutter 探测**：解析可执行文件并执行 `--version`
 
 ### 测试
@@ -508,13 +513,15 @@ npm run tauri build
 
 | 产物 | 大小 | 说明 |
 |---|---|---|
-| `nsis/Flutter Launcher_0.1.0_x64-setup.exe` | 2.0 MB | 推荐，单文件安装器 |
-| `msi/Flutter Launcher_0.1.0_x64_en-US.msi` | 3.0 MB | 需要 MSI 部署时用 |
+| `nsis/AppDeck_0.1.0_x64-setup.exe` | 2.0 MB | 推荐，单文件安装器 |
+| `msi/AppDeck_0.1.0_x64_en-US.msi` | 3.0 MB | 需要 MSI 部署时用 |
 
-- 绿色版：直接分发 `src-tauri/target/release/flutter-launcher.exe`（5.9 MB），无需安装
+- 绿色版：直接分发 `src-tauri/target/release/app-deck.exe`（5.9 MB），无需安装
 - 依赖只有 **WebView2 运行时**（Win10 1803+ / Win11 已内置）
 - 版本号在 `src-tauri/tauri.conf.json` 的 `version` 字段，改完重新打包即可
-- 数据目录跟随 `identifier`：`%APPDATA%\com.flutterlauncher.app\`
+- 图标母版是 `src-tauri/app-icon.svg`（叠层卡片）；改完执行
+  `npx tauri icon src-tauri/app-icon.svg` 重新生成 `src-tauri/icons/` 全套图标
+- 数据目录跟随 `identifier`：`%APPDATA%\cn.gu19.appdev\`
   （**改 identifier 会换目录，等于清空已有项目配置**）
 
 其他命令：
@@ -628,7 +635,7 @@ npm run tauri build  # 打包安装程序
   Where-Object { $_.CommandLine -match 'flutter_tools.snapshot" daemon' }).Count   # 期望 1
 
 # 2) 强杀应用
-Get-Process flutter-launcher | Stop-Process -Force
+Get-Process app-deck | Stop-Process -Force
 Start-Sleep -Seconds 3
 
 # 3) 再数一次

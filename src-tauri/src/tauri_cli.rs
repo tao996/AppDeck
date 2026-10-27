@@ -196,7 +196,7 @@ mod tests {
     /// 真实 `npm run tauri -- --help` 的输出（含 npm 自己的前缀行）。
     /// 用原始字符串：`\` 续行会吃掉行首缩进，而解析正是靠缩进识别条目。
     const TOP: &str = r#"
-> flutter-launcher@0.1.0 tauri
+> app-deck@0.1.0 tauri
 > tauri --help
 
 Command line interface for building Tauri apps

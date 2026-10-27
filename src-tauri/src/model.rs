@@ -93,10 +93,37 @@ impl Default for FlutterToolSetting {
     }
 }
 
+/// 主窗口 / 托盘行为
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowSettings {
+    /// quit | tray
+    ///
+    /// 点标题栏关闭按钮时：`quit` 退出程序；`tray` 收进系统托盘（进程继续
+    /// 跑，正在执行的 flutter build / 终端会话不受影响）。
+    ///
+    /// 默认 `quit`：和老版本行为一致，升级后不会出现"点了叉程序还在"的困惑。
+    #[serde(rename = "closeBehavior", default = "default_close_behavior")]
+    pub close_behavior: String,
+}
+
+fn default_close_behavior() -> String {
+    "quit".to_string()
+}
+
+impl Default for WindowSettings {
+    fn default() -> Self {
+        Self {
+            close_behavior: default_close_behavior(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     #[serde(rename = "flutterTool", default)]
     pub flutter_tool: FlutterToolSetting,
+    #[serde(default)]
+    pub window: WindowSettings,
     #[serde(default)]
     pub android: AndroidSettings,
     #[serde(default)]
@@ -294,12 +321,30 @@ impl Default for State {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    /// 老状态文件里没有 `window` 字段：必须补成「退出程序」。
+    /// 否则升级后第一次点关闭按钮的行为无法预期（用户可能以为程序没退出）。
+    #[test]
+    fn settings_without_window_defaults_to_quit() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.window.close_behavior, "quit");
+    }
 
-
-
-
-
-
-
-
+    /// 前端用 camelCase，字段名写错就会静默丢设置——所以钉住序列化形状。
+    #[test]
+    fn close_behavior_roundtrips_as_camel_case() {
+        let s = Settings {
+            window: WindowSettings {
+                close_behavior: "tray".into(),
+            },
+            ..Settings::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(json.contains("\"closeBehavior\":\"tray\""), "{json}");
+        let back: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.window.close_behavior, "tray");
+    }
+}

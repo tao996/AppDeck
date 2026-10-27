@@ -1,11 +1,11 @@
 [package]
-name = "flutter-launcher"
+name = "app-deck"
 version = "0.1.0"
-description = "Flutter App Launcher & Release Manager (WindTerm style)"
+description = "AppDeck - multi-runtime app launcher & release manager (WindTerm style)"
 authors = ["you"]
 edition = "2024"
 # src/bin/ 下还有诊断工具 pty_probe，需显式指定默认二进制
-default-run = "flutter-launcher"
+default-run = "app-deck"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -24,7 +24,7 @@ tauri-build = { version = "2", features = [] }
 x509-parser = "0.16"
 md-5 = "0.10"
 base64 = "0.22"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"

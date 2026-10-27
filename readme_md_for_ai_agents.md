@@ -1,4 +1,4 @@
-# Flutter Launcher (WindTerm Style) — 需求与架构规格 v2
+# AppDeck (WindTerm Style) — 需求与架构规格 v2
 
 > **Target Audience:** 本文档面向 AI 编码助手（Cursor / Claude Code / Copilot 等），是生成与扩展本项目的**唯一权威规格**。
 > **v1 已被本文件整体取代。** v1 中「Flutter Desktop or Tauri 二选一」「`flutter run --machine` 结构化协议」「每 tab 配热重载按钮」等表述与已定决策冲突，**不得再据此实现**。
@@ -453,6 +453,7 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
   "schemaVersion": 3,
   "settings": {
     "flutterTool": { "mode": "auto", "customPath": null },   // auto | custom | fvm
+    "window": { "closeBehavior": "quit" },                   // quit | tray（关闭按钮：退出 / 最小化到托盘）
     "android": {
       "sdkPath": null,          // Android SDK 根目录
       "emulatorPath": null,     // <sdk>\emulator\emulator.exe

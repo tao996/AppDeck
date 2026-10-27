@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="ad-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#26304a"/>
+      <stop offset="1" stop-color="#0b0e15"/>
+    </linearGradient>
+    <linearGradient id="ad-mid" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#3c4874"/>
+      <stop offset="1" stop-color="#222a45"/>
+    </linearGradient>
+    <linearGradient id="ad-front" x1="0" y1="0" x2="0.55" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#2f8bff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 深色圆角底板 -->
+  <rect x="16" y="16" width="992" height="992" rx="232" fill="url(#ad-bg)"/>
+  <rect x="17.5" y="17.5" width="989" height="989" rx="230.5" fill="none" stroke="#ffffff" stroke-opacity="0.07" stroke-width="3"/>
+
+  <!-- 整叠卡片略微放大并上移：图标在 16~32px 下也能撑满底板 -->
+  <g transform="translate(512 500) scale(1.08) translate(-512 -512)">
+    <!-- 后排：左右微微扇开，形成「一叠」而不是「三扇窗」 -->
+    <rect x="230" y="220" width="420" height="500" rx="80" fill="#1e2638"
+          stroke="#ffffff" stroke-opacity="0.08" stroke-width="3"
+          transform="rotate(-12 440 470)"/>
+    <rect x="374" y="220" width="420" height="500" rx="80" fill="url(#ad-mid)"
+          stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"
+          transform="rotate(12 584 470)"/>
+
+    <!-- 最前面的卡片：白色播放键 = 启动 -->
+    <rect x="302" y="322" width="420" height="500" rx="80" fill="url(#ad-front)"
+          stroke="#ffffff" stroke-opacity="0.22" stroke-width="3"/>
+    <path d="M464 520 L464 624 L560 572 Z" fill="#ffffff" stroke="#ffffff"
+          stroke-width="26" stroke-linejoin="round"/>
+  </g>
+</svg>

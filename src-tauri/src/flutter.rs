@@ -301,7 +301,7 @@ pub fn ensure_shim(project_id: &str, exe: &Path) -> Option<PathBuf> {
 
     let bat = dir.join("flutter.bat");
     let body = format!(
-        "@echo off\r\nrem 由 Flutter Launcher 生成：转发到项目使用的 flutter\r\ncall \"{}\" %*\r\n",
+        "@echo off\r\nrem 由 AppDeck 生成：转发到项目使用的 flutter\r\ncall \"{}\" %*\r\n",
         exe.display()
     );
 
