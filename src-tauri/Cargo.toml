@@ -2,6 +2,8 @@
 name = "app-deck"
 version = "0.1.0"
 description = "AppDeck - multi-runtime app launcher & release manager (WindTerm style)"
+license = "MIT"
+repository = "https://github.com/tao996/AppDeck"
 authors = ["you"]
 edition = "2024"
 # src/bin/ 下还有诊断工具 pty_probe，需显式指定默认二进制

@@ -31,6 +31,17 @@
 
 ## 安装与运行
 
+### 下载安装
+
+到 [Releases](https://github.com/tao996/AppDeck/releases/latest) 下载最新安装包：
+
+| 安装包 | 说明 |
+|---|---|
+| `AppDeck_0.1.0_x64-setup.exe` | NSIS 安装器（推荐，按当前用户安装，无需管理员） |
+| `AppDeck_0.1.0_x64_en-US.msi` | 需要 MSI 部署时用 |
+
+> 安装包未做代码签名，Windows SmartScreen 可能提示“未知发布者”：点「更多信息 → 仍要运行」即可。
+
 ### 从源码运行
 
 ```bash
@@ -113,6 +124,10 @@ npm run build        # 前端构建
 
 提交前 husky 会自动跑 typecheck + test；实现约束与回归检查见
 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 tao996
 
 ---
 
