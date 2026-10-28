@@ -34,6 +34,10 @@ pub struct PlatformEntry {
     pub enabled: bool,
     pub reason: Option<String>,
     pub actions: Vec<PlatformAction>,
+    /// 该平台下会用的设备（"名字 (id)"）；没有设备时为 None。
+    /// 光看"能不能跑"不够，用户想知道**跑在哪台机器上**。
+    #[serde(default)]
+    pub device: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, serde::Deserialize, Default)]
@@ -263,6 +267,8 @@ pub fn matrix(
                 enabled,
                 reason,
                 actions,
+                device: device_for(devices, def.id)
+                    .map(|d| format!("{} ({})", d.name, d.id)),
             },
         ));
     }
@@ -540,6 +546,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
 
 
 

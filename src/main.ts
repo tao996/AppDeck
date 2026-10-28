@@ -201,6 +201,8 @@ interface PlatformEntry {
   enabled: boolean;
   reason?: string | null;
   actions: PlatformAction[];
+  /** 该平台会用的设备，如 "23049RAD8C (daf3c642)"；没有设备时为空 */
+  device?: string | null;
 }
 
 interface PlatformMatrix {
@@ -230,7 +232,21 @@ interface FilingInfo {
 interface AllEmulators {
   android: EmulatorEntry[];
   harmony: EmulatorEntry[];
+  /** 已连接的真机（手机 / 桌面 / 浏览器）；后端每次现查，不缓存 */
+  devices?: ConnectedDevice[];
   notes: string[];
+}
+
+/** 已连接设备（daemon 的 device.getDevices） */
+interface ConnectedDevice {
+  id: string;
+  name: string;
+  platform?: string | null;
+  platformType?: string | null;
+  category?: string | null;
+  emulator?: boolean;
+  sdk?: string | null;
+  isConnected?: boolean | null;
 }
 
 interface State {
@@ -3911,7 +3927,10 @@ async function loadPlatformRows(
       rows.push({
         kind: "item",
         name: pf.label,
-        detail: usable === total ? `${total} 个动作` : `${usable}/${total} 可用`,
+        detail: [
+          usable === total ? `${total} 个动作` : `${usable}/${total} 可用`,
+          pf.device ?? "无设备",
+        ].join(" · "),
         children: pf.actions.map((a) => ({
           kind: "item" as const,
           name: a.command,
@@ -4315,6 +4334,19 @@ function renderEmulatorBody(data: AllEmulators, error: string | null): void {
     return;
   }
 
+  // 已连接的设备放最前面：刚从手机插上就想确认"它认到了没"
+  const connected = (data.devices ?? []).filter((d) => d.isConnected !== false);
+  group(`已连接设备 (${connected.length})`);
+  if (connected.length === 0) note("未检测到已连接设备（手机需开启 USB 调试并授权）");
+  for (const d of connected) {
+    const sub = [d.id, d.sdk ?? d.platformType ?? d.category ?? ""].filter(Boolean).join(" · ");
+    item(d.name, sub, () => {
+      // 设备已经在跑，点它只是复制 id——真要跑请用命令/平台菜单
+      void navigator.clipboard?.writeText(d.id).catch(() => undefined);
+      toast(`已复制设备 ID：${d.id}`);
+    });
+  }
+
   group(`Android 模拟器 (${data.android.length})`);
   if (data.android.length === 0) note("无可用 AVD");
   for (const a of data.android) {
@@ -4497,8 +4529,8 @@ function openEmulatorMenu(anchor: HTMLElement): void {
   menu.style.top = `${rect.bottom + 4}px`;
   menu.innerHTML = `
     <div class="dm-head">
-      <span>可启动的模拟器</span>
-      <button class="dm-refresh" title="重新检查电脑上的模拟器（结果会缓存）">⟳</button>
+      <span>设备与模拟器</span>
+      <button class="dm-refresh" title="重新检查设备与模拟器（模拟器结果会缓存，设备每次现查）">⟳</button>
     </div>
     <div class="dm-body"></div>
   `;
@@ -5749,6 +5781,8 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 

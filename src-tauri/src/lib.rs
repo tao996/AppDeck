@@ -604,28 +604,64 @@ fn build_targets(
 
 /* ---------------- 平台动作（派生，不落盘） ---------------- */
 
-/// 宿主能构建哪些目标（复用 TargetCache）
+/// 宿主能构建哪些目标名（内存 + 磁盘双缓存；`force` 时重算）
 fn host_target_names(
     app: &AppHandle,
     cache: &TargetCache,
     project_id: &str,
+    force: bool,
 ) -> Result<Vec<String>, String> {
     let state = store::load(app)?;
     let ctx = project_ctx(&state, project_id)?;
     let exe = ctx.exe;
     let key = exe.display().to_string();
 
-    if let Ok(map) = cache.0.lock() {
-        if let Some(list) = map.get(&key) {
-            return Ok(list.iter().map(|t| t.name.clone()).collect());
+    if !force {
+        // 1) 进程内（按 flutter 可执行文件区分：不同分支能力不同）
+        if let Ok(map) = cache.0.lock() {
+            if let Some(list) = map.get(&key) {
+                return Ok(list.iter().map(|t| t.name.clone()).collect());
+            }
+        }
+
+        // 2) 磁盘（跨重启有效，省掉 6 次 flutter build --help）
+        let disk = read_disk_cache(app);
+        if let Some(hit) = disk.targets.get(project_id) {
+            let names = hit.targets.clone();
+            if let Ok(mut map) = cache.0.lock() {
+                map.insert(
+                    key,
+                    names
+                        .iter()
+                        .map(|n| BuildTarget {
+                            name: n.clone(),
+                            description: String::new(),
+                            supports_flavor: false,
+                        })
+                        .collect(),
+                );
+            }
+            return Ok(names);
         }
     }
 
     let list = detect_targets(&exe)?;
+    let names: Vec<String> = list.iter().map(|t| t.name.clone()).collect();
     if let Ok(mut map) = cache.0.lock() {
-        map.insert(key, list.clone());
+        map.insert(key, list);
     }
-    Ok(list.into_iter().map(|t| t.name).collect())
+
+    let mut disk = read_disk_cache(app);
+    disk.targets.insert(
+        project_id.to_string(),
+        CachedTargets {
+            saved_at: logs::now_ms(),
+            targets: names.clone(),
+        },
+    );
+    write_disk_cache(app, &disk);
+
+    Ok(names)
 }
 
 fn devices_snapshot(
@@ -640,36 +676,19 @@ fn devices_snapshot(
     serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
 }
 
-/// 平台矩阵缓存：分析一次就留着，只有点「重新分析」才刷新。
-/// 首次分析要跑 6 次 `flutter build <t> --help` 并拉起 daemon，约十秒量级。
+/// 宿主支持哪些 `flutter build <target>`（成本：6 次 `flutter build --help`，约十秒）。
+/// 这部分变化慢，才值得缓存。
 #[derive(Default)]
-struct PlatformCache(std::sync::Mutex<std::collections::HashMap<String, platforms::PlatformMatrix>>);
+struct PlatformCache(std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>);
 
+/// **设备绝不进缓存**：手机插拔是随时发生的。
+/// 以前把整个平台矩阵（含"该平台有没有设备"）缓存起来，插上手机后
+/// 右键「平台」里永远看不到它，必须手动点「重新分析平台信息」——这就是坑。
 fn platform_matrix_impl(
     app: &AppHandle,
     project_id: &str,
     force: bool,
 ) -> Result<platforms::PlatformMatrix, String> {
-    let pcache = app.state::<PlatformCache>();
-
-    if !force {
-        // 1) 进程内缓存
-        if let Ok(map) = pcache.0.lock() {
-            if let Some(hit) = map.get(project_id) {
-                return Ok(hit.clone());
-            }
-        }
-
-        // 2) 磁盘缓存（跨重启有效）
-        let disk = read_disk_cache(app);
-        if let Some(hit) = disk.platforms.get(project_id) {
-            if let Ok(mut map) = pcache.0.lock() {
-                map.insert(project_id.to_string(), hit.matrix.clone());
-            }
-            return Ok(hit.matrix.clone());
-        }
-    }
-
     let state = store::load(app)?;
     let project = state
         .projects
@@ -678,27 +697,23 @@ fn platform_matrix_impl(
         .ok_or_else(|| "项目不存在".to_string())?;
 
     // 命令集（无 pubspec 的 workspace）没有平台菜单
-    let matrix = if project.kind != "single" {
-        platforms::matrix(project, &[], &[], None)
-    } else {
-        let cache = app.state::<TargetCache>();
-        let reg = app.state::<daemon::Daemons>();
+    if project.kind != "single" {
+        return Ok(platforms::matrix(project, &[], &[], None));
+    }
 
-        let targets = host_target_names(app, &cache, project_id)?;
-        let (devices, device_error) = match devices_snapshot(app, &reg, project_id) {
-            Ok(list) => (list, None),
-            Err(e) => (Vec::new(), Some(e)),
-        };
+    let cache = app.state::<TargetCache>();
+    let reg = app.state::<daemon::Daemons>();
 
-        platforms::matrix(project, &targets, &devices, device_error)
+    // 目标：缓存（force 时重算）
+    let targets = host_target_names(app, &cache, project_id, force)?;
+
+    // 设备：每次都查
+    let (devices, device_error) = match devices_snapshot(app, &reg, project_id) {
+        Ok(list) => (list, None),
+        Err(e) => (Vec::new(), Some(e)),
     };
 
-    if let Ok(mut map) = pcache.0.lock() {
-        map.insert(project_id.to_string(), matrix.clone());
-    }
-    cache_matrix(app, project_id, &matrix);
-
-    Ok(matrix)
+    Ok(platforms::matrix(project, &targets, &devices, device_error))
 }
 
 #[tauri::command]
@@ -717,14 +732,31 @@ async fn platform_matrix(
 
 #[tauri::command]
 fn invalidate_platform_cache(app: AppHandle, project_id: Option<String>) {
+    // 内存缓存按 flutter 可执行文件分组：先把项目映射成它的 flutter
+    let exe_key = project_id.as_deref().and_then(|id| {
+        let state = store::load(&app).ok()?;
+        let ctx = project_ctx(&state, id).ok()?;
+        Some(ctx.exe.display().to_string())
+    });
+
     if let Ok(mut map) = app.state::<PlatformCache>().0.lock() {
-        match project_id {
-            Some(id) => {
-                map.remove(&id);
+        match exe_key {
+            Some(k) => {
+                map.remove(&k);
             }
             None => map.clear(),
         }
     }
+
+    // 磁盘缓存按项目 id
+    let mut disk = read_disk_cache(&app);
+    match project_id {
+        Some(id) => {
+            disk.targets.remove(&id);
+        }
+        None => disk.targets.clear(),
+    }
+    write_disk_cache(&app, &disk);
 }
 
 /// 派生动作：平台 + 动作（+ 构建目标）→ 起一个会话，**不写入项目命令**
@@ -1483,19 +1515,25 @@ struct AllEmulators {
     android: Vec<EmulatorEntry>,
     harmony: Vec<EmulatorEntry>,
     notes: Vec<String>,
+    /// 已连接的真机（手机 / Windows / 浏览器…）。
+    /// **不落缓存**：插拔随时发生，缓存了就永远看不到新设备。
+    #[serde(default)]
+    devices: Vec<daemon::DeviceInfo>,
 }
 
 /* ---------------- 磁盘缓存（跨重启有效） ---------------- */
 
 /// 缓存结构版本。**改平台定义或缓存语义时必须 +1**，否则旧缓存会挡住新逻辑。
-/// （踩过：新增 HarmonyOS 平台，但该项目的平台矩阵是旧版本缓存的，新平台不出现。）
-const DISK_CACHE_VERSION: u32 = 3;
+/// （踩过：新增 HarmonyOS 平台，但该项目的平台矩阵是旧版本缓存的，新平台不出现。
+///  v4：平台缓存从"整个矩阵"改成"只存宿主目标"——设备状态不能缓存。）
+const DISK_CACHE_VERSION: u32 = 4;
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Default)]
 #[serde(default, rename_all = "camelCase")]
 struct DiskCache {
     v: u32,
-    platforms: std::collections::HashMap<String, CachedMatrix>,
+    /// 每个项目对应的"宿主能构建哪些目标"。**不含设备信息**（设备随时插拔）
+    targets: std::collections::HashMap<String, CachedTargets>,
     emulators: Option<CachedEmulators>,
     /// 体检结果落盘：`flutter doctor` 实测要 20+ 秒，
     /// 只放内存的话每次启动都要重跑一遍
@@ -1513,9 +1551,9 @@ struct CachedDoctor {
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CachedMatrix {
+struct CachedTargets {
     saved_at: u64,
-    matrix: platforms::PlatformMatrix,
+    targets: Vec<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1551,18 +1589,6 @@ fn write_disk_cache(app: &AppHandle, c: &DiskCache) {
     }
 }
 
-fn cache_matrix(app: &AppHandle, project_id: &str, matrix: &platforms::PlatformMatrix) {
-    let mut disk = read_disk_cache(app);
-    disk.platforms.insert(
-        project_id.to_string(),
-        CachedMatrix {
-            saved_at: logs::now_ms(),
-            matrix: matrix.clone(),
-        },
-    );
-    write_disk_cache(app, &disk);
-}
-
 fn cache_emulators(app: &AppHandle, payload: &AllEmulators) {
     let mut disk = read_disk_cache(app);
     disk.emulators = Some(CachedEmulators {
@@ -1572,6 +1598,33 @@ fn cache_emulators(app: &AppHandle, payload: &AllEmulators) {
     write_disk_cache(app, &disk);
 }
 
+/// 已连接设备（手机 / 桌面 / 浏览器）。**永远现查，不缓存。**
+fn list_connected_devices(
+    app: &AppHandle,
+    reg: &daemon::Daemons,
+    project_id: Option<&str>,
+) -> Vec<daemon::DeviceInfo> {
+    let Ok(state) = store::load(app) else {
+        return Vec::new();
+    };
+
+    let ctx = match project_id {
+        Some(id) => project_ctx(&state, id),
+        None => ctx_or_default(&state, None),
+    };
+    let Ok(ctx) = ctx else {
+        return Vec::new();
+    };
+
+    let Ok(d) = daemon::get_or_start(reg, &ctx.exe, &ctx.env_with_path(), device_sink(app))
+    else {
+        return Vec::new();
+    };
+    let Ok(v) = d.request("device.getDevices", None) else {
+        return Vec::new();
+    };
+    serde_json::from_value(v).unwrap_or_default()
+}
 /// 未显式配置时回退到自动探测结果，保证开箱即用
 fn effective_harmony(state: &State) -> model::HarmonySettings {
     if state
@@ -1601,7 +1654,8 @@ fn effective_android(state: &State) -> model::AndroidSettings {
 }
 
 /// 聚合两个来源：Android（emulator.exe，退化时用 flutter daemon）+ HarmonyOS（Emulator.exe -list）。
-/// 结果落磁盘缓存，只有 `force`（菜单里的 ⟳）才重新检查。
+/// 模拟器列表落磁盘缓存（只有 `force`＝菜单里的 ⟳ 才重新检查），
+/// **已连接设备每次现查**——手机插拔随时发生，缓存了就永远看不到新设备。
 #[tauri::command(async)]
 fn list_all_emulators(
     app: AppHandle,
@@ -1609,17 +1663,28 @@ fn list_all_emulators(
     project_id: Option<String>,
     force: Option<bool>,
 ) -> AllEmulators {
-    // 1) 命中磁盘缓存直接返回
-    if !force.unwrap_or(false) {
-        let disk = read_disk_cache(&app);
-        if let Some(hit) = disk.emulators {
-            return hit.payload;
-        }
-    }
+    let force = force.unwrap_or(false);
 
+    // 模拟器：可缓存
+    let mut out = if !force {
+        read_disk_cache(&app)
+            .emulators
+            .map(|hit| hit.payload)
+            .unwrap_or_else(|| probe_emulators(&app, project_id.as_deref()))
+    } else {
+        probe_emulators(&app, project_id.as_deref())
+    };
+
+    // 设备：永远现查（失败就空着，不影响模拟器列表）
+    out.devices = list_connected_devices(&app, &reg, project_id.as_deref());
+    out
+}
+
+/// 查一遍模拟器（并写缓存）。返回的 `devices` 一定是空的，由调用方填。
+fn probe_emulators(app: &AppHandle, project_id: Option<&str>) -> AllEmulators {
     let mut out = AllEmulators::default();
 
-    let state = match store::load(&app) {
+    let state = match store::load(app) {
         Ok(s) => s,
         Err(e) => {
             out.notes.push(e);
@@ -1661,14 +1726,18 @@ fn list_all_emulators(
     }
 
     if !android_resolved {
-        let target = project_id.or_else(|| state.projects.first().map(|p| p.id.clone()));
+        // 退路：问 flutter daemon 要模拟器列表（此时用 app 里的 daemon 注册表）
+        let reg = app.state::<daemon::Daemons>();
+        let target = project_id
+            .map(|s| s.to_string())
+            .or_else(|| state.projects.first().map(|p| p.id.clone()));
         match target {
             Some(pid) => match project_ctx(&state, &pid) {
                 Ok(ctx) => match daemon::get_or_start(
                     &reg,
                     &ctx.exe,
                     &ctx.env_with_path(),
-                    device_sink(&app),
+                    device_sink(app),
                 ) {
                     Ok(d) => match d.request("emulator.getEmulators", None) {
                         Ok(v) => {
@@ -1718,10 +1787,9 @@ fn list_all_emulators(
         Err(e) => out.notes.push(e),
     }
 
-    cache_emulators(&app, &out);
+    cache_emulators(app, &out);
     out
 }
-
 #[tauri::command(async)]
 fn launch_harmony_emulator(app: AppHandle, name: String) -> Result<(), String> {
     let state = store::load(&app)?;
@@ -1997,6 +2065,11 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+
+
+
+
 
 
 
