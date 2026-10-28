@@ -3574,6 +3574,8 @@ type MenuRow =
       disabled?: boolean;
       onClick?: () => void;
       children?: MenuRow[];
+      /** 点击后不关菜单（用于"原地刷新某一段"这类动作） */
+      keepOpen?: boolean;
     };
 
 /** 二级子菜单（本项目最多两层：右键菜单 → 平台 → 动作） */
@@ -3632,7 +3634,8 @@ function renderMenuRows(parent: HTMLDivElement, rows: MenuRow[]): void {
       });
     } else {
       el.addEventListener("click", () => {
-        closeAllMenus();
+        // keepOpen：原地刷新某一段（如「平台」），菜单保持打开
+        if (!r.keepOpen) closeAllMenus();
         r.onClick?.();
       });
     }
@@ -3757,8 +3760,9 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
   }
 
   // 1) 平台（仅 Flutter 项目）
+  let platformBox: HTMLDivElement | null = null;
   if (!isCommandSet) {
-    const platformBox = document.createElement("div");
+    platformBox = document.createElement("div");
     platformBox.innerHTML = `<div class="dm-group">平台 · 正在分析…</div>`;
     body.appendChild(platformBox);
     void loadPlatformRows(p, platformBox, menu);
@@ -3799,14 +3803,20 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
       kind: "item",
       name: "重新分析平台信息",
       detail: "刷新宿主可构建的平台与该平台设备",
+      // 不关菜单：只把「平台」那一段原地刷新（关掉再开等于闪一下，还会丢滚动位置）
+      keepOpen: true,
       onClick: () => {
+        if (platformBox) {
+          platformBox.innerHTML = `<div class="dm-group">平台 · 正在重新分析…</div>`;
+        }
         void (async () => {
           try {
             await invoke("platform_matrix", { projectId: p.id, force: true });
+            if (platformBox) await loadPlatformRows(p, platformBox, menu);
             toast("平台信息已刷新");
-            openProjectMenu(ev, p);
           } catch (e) {
             toast(String(e), "error");
+            if (platformBox) await loadPlatformRows(p, platformBox, menu);
           }
         })();
       },
@@ -3931,13 +3941,17 @@ async function loadPlatformRows(
           usable === total ? `${total} 个动作` : `${usable}/${total} 可用`,
           pf.device ?? "无设备",
         ].join(" · "),
-        children: pf.actions.map((a) => ({
-          kind: "item" as const,
-          name: a.command,
-          detail: a.enabled ? a.label : `${a.label} · ${a.reason ?? "不可用"}`,
-          disabled: !a.enabled,
-          onClick: () => void runPlatformAction(p, pf.id, a),
-        })),
+        children: [
+          // 展开后第一行直接告诉你"跑在哪台设备上"，省得再回上一级看
+          { kind: "group" as const, text: `设备 · ${pf.device ?? "无"}` },
+          ...pf.actions.map((a) => ({
+            kind: "item" as const,
+            name: a.command,
+            detail: a.enabled ? a.label : `${a.label} · ${a.reason ?? "不可用"}`,
+            disabled: !a.enabled,
+            onClick: () => void runPlatformAction(p, pf.id, a),
+          })),
+        ],
       });
     }
     renderMenuRows(box, rows);
@@ -5744,6 +5758,16 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
       const proj = state.projects.find((x) => x.id === projMenu) ?? state.projects[0];
       if (proj) {
         openProjectMenu(new MouseEvent("contextmenu", { clientX: 1500, clientY: 640 }), proj);
+        // FLA_REFRESH_PLATFORM=1：菜单打开后自动点一次「重新分析平台信息」，
+        // 用于验证刷新时菜单不该消失、平台段应原地更新
+        if (await invoke<string | null>("dev_env", { name: "FLA_REFRESH_PLATFORM" })) {
+          window.setTimeout(() => {
+            const row = Array.from(
+              document.querySelectorAll<HTMLDivElement>(".device-menu .dm-item"),
+            ).find((el) => el.querySelector(".dm-name")?.textContent === "重新分析平台信息");
+            row?.click();
+          }, 800);
+        }
       }
     }
     const runTpl = await invoke<string | null>("dev_env", { name: "FLA_RUN_TEMPLATE" });
@@ -5781,6 +5805,8 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
 }
 
 window.addEventListener("DOMContentLoaded", () => void boot());
+
+
 
 
 
