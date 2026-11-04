@@ -81,6 +81,78 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
     Ok(project)
 }
 
+/// 添加一个普通文件夹/目录。
+///
+/// 与 `add_project_to` 的区别：**不探测技术栈、也不要求任何标志文件**，
+/// 导入后命令列表为空——让它当"任意命令的容器"（脚本集合、文档仓、多工程上级目录）。
+/// 用户随后在树里「添加命令」或「从模板导入」按需补充。
+pub fn add_folder_to(state: &mut State, raw_path: &str) -> Result<Project, String> {
+    let p = normalize(raw_path);
+    if p.is_empty() {
+        return Err("路径为空".to_string());
+    }
+
+    let pb = PathBuf::from(&p);
+    if !pb.is_dir() {
+        return Err(format!("目录不存在：{p}"));
+    }
+    if state
+        .projects
+        .iter()
+        .any(|x| normalize(&x.path).eq_ignore_ascii_case(&p))
+    {
+        return Err("该项目已在列表中".to_string());
+    }
+
+    let name = pb
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.clone());
+
+    let project = Project {
+        id: make_id("proj", &p.to_lowercase()),
+        name,
+        path: p,
+        kind: "folder".to_string(),
+        flutter_tool: None,
+        // 有意为空：不解析 launch.json / package.json，也不套用模板
+        commands: Vec::new(),
+        env: Default::default(),
+    };
+
+    state.projects.push(project.clone());
+    Ok(project)
+}
+
+/// 重命名项目：**只改显示名，不动磁盘目录**。
+///
+/// 会做基本清洗：去掉首尾空白、拒绝空名 / 控制字符 / 过长名称。
+/// 允许和别人重名——树里由 `projectLabel` 自动补 ‹父目录› 区分。
+pub fn rename_project_in(
+    state: &mut State,
+    project_id: &str,
+    raw_name: &str,
+) -> Result<String, String> {
+    let name = raw_name.trim();
+    if name.is_empty() {
+        return Err("项目名称不能为空".to_string());
+    }
+    if name.chars().count() > 60 {
+        return Err("项目名称最多 60 个字符".to_string());
+    }
+    if name.chars().any(char::is_control) {
+        return Err("项目名称不能包含换行、制表符等控制字符".to_string());
+    }
+
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    project.name = name.to_string();
+    Ok(name.to_string())
+}
+
 /// 从全局模板库导入选中的模板到项目（按「名称 + 类型」去重）
 pub fn import_templates(
     state: &mut State,
@@ -936,6 +1008,97 @@ mod tests {
     fn rejects_missing_directory() {
         let mut state = State::default();
         assert!(add_project_to(&mut state, r"D:\__nope__\not_here").is_err());
+    }
+
+    /// 文件夹导入：普通目录（没有任何标志文件）也能挂进来，且命令列表为空。
+    #[test]
+    fn add_folder_accepts_plain_directory() {
+        let dir = std::env::temp_dir().join("fla_folder_plain");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut state = State::default();
+        let project = add_folder_to(&mut state, &dir.display().to_string()).expect("普通目录应能添加");
+        assert_eq!(project.kind, "folder");
+        assert!(project.commands.is_empty(), "文件夹导入后应为空");
+        assert_eq!(state.projects.len(), 1);
+
+        assert!(
+            add_folder_to(&mut state, &dir.display().to_string()).is_err(),
+            "重复添加应失败"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn add_folder_rejects_missing_directory() {
+        let mut state = State::default();
+        assert!(add_folder_to(&mut state, r"D:\__nope__\not_here").is_err());
+        assert!(state.projects.is_empty());
+    }
+
+    /// 即便目录里有 pubspec.yaml、模板库里也有项目作用域模板，
+    /// 文件夹导入也不得自动生成命令——"导入后默认为空"是产品约束。
+    #[test]
+    fn add_folder_stays_empty_even_with_pubspec_and_templates() {
+        let dir = std::env::temp_dir().join("fla_folder_pubspec");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("pubspec.yaml"), "name: demo\n").unwrap();
+
+        let mut state = State::default();
+        let mut tpl = crate::model::default_templates()[0].clone();
+        tpl.id = "tpl-project-scope".into();
+        tpl.scope = Some("project".into());
+        state.command_templates.push(tpl);
+
+        let project =
+            add_folder_to(&mut state, &dir.display().to_string()).expect("含 pubspec 的目录也应能按文件夹添加");
+        assert_eq!(project.kind, "folder", "不应被识别成 Flutter 工程");
+        assert!(project.commands.is_empty(), "不应套用模板");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 重命名只改显示名：清洗空白、拒绝脏名字、允许重名，失败时不破坏原名。
+    #[test]
+    fn rename_project_trims_and_validates() {
+        let mut state = State::default();
+        state.projects.push(Project {
+            id: "p1".into(),
+            name: "old".into(),
+            path: r"C:\demo\proj".into(),
+            kind: "folder".into(),
+            flutter_tool: None,
+            commands: Vec::new(),
+            env: Default::default(),
+        });
+
+        assert_eq!(
+            rename_project_in(&mut state, "p1", "  新名字  ").unwrap(),
+            "新名字",
+            "首尾空白应被去掉"
+        );
+        assert_eq!(state.projects[0].name, "新名字");
+
+        assert!(rename_project_in(&mut state, "p1", "   ").is_err(), "空名应被拒绝");
+        assert!(
+            rename_project_in(&mut state, "p1", "a\nb").is_err(),
+            "控制字符应被拒绝"
+        );
+        assert!(
+            rename_project_in(&mut state, "p1", &"长".repeat(61)).is_err(),
+            "超长名字应被拒绝"
+        );
+        assert!(
+            rename_project_in(&mut state, "nope", "x").is_err(),
+            "项目不存在应报错"
+        );
+        assert_eq!(state.projects[0].name, "新名字", "失败时不能改坏原名");
+
+        // 允许重名：树里会补 ‹父目录› 区分
+        assert!(rename_project_in(&mut state, "p1", "重名").is_ok());
     }
 
     /// 端到端：添加 → 导入 → 落盘 → 重新读取，全链路校验。

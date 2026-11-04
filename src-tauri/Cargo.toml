@@ -36,12 +36,21 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.9"
 serde_yaml = "0.9"
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_JobObjects",
   "Win32_System_Threading",
+  # 进程与端口管理：ToolHelp 枚举进程、ProcessStatus 读内存、IpHelper 读端口表、
+  # RemoteDesktop 取会话 ID（判断系统服务）、Security 取令牌用户
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+  "Win32_System_RemoteDesktop",
+  "Win32_NetworkManagement_IpHelper",
+  "Win32_Networking_WinSock",
+  "Win32_Security",
   # 用 ShellExecuteW 以系统默认程序打开文件（图片/日志）
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",

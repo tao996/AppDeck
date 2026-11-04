@@ -19,10 +19,15 @@
 ## 命令模板库
 
 - **全局模板**：设置 → 命令模板，可新建 / 编辑 / 删除 / 恢复默认（内置模板只剩 Pub Get；调试 / 构建动作由项目右键的平台菜单派生）
-- **三种类型**：
+- **类型**：
   - `run` — `flutter run`（可指定 `-t` 入口与 debug/profile/release）
   - `build` — `flutter build <目标> --release`（目标动态探测）
   - `custom` — 任意程序 + 参数；`%FLUTTER%` 会替换成该项目的 flutter 可执行文件
+  - `powershell` / `cmd` / `bash` — 直接写一条命令，分别用
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command` / `cmd.exe /C` / `bash.exe -lc` 执行；
+    落盘仍是 `custom`（program + args），`%PROJECT%` / `%CWD%` 等占位符照常可用
+
+![Shell 命令](shot-cmd-shell.png)
 - **环境变量**：键值对随命令保存，直接注入 PTY 子进程
 - **作用域**：
   - `project` — 导入到项目后才能执行
@@ -115,6 +120,48 @@
 
 **同名项目**：两个都叫 `jbook` 时，用最具区分度的祖先目录名做后缀——
 `jbook ‹library›` 与 `jbook ‹hm-library›`，不会在树里混淆。
+
+**自定义名称**：项目行悬停时右侧出现 **✎**，可以改成任意显示名。
+**只改显示名，不会重命名磁盘目录**；名称会同步到新建的终端标签，
+已打开的标签也会换掉前缀。重名依然可以，树里自动补 ‹父目录› 区分。
+
+**Flutter 包名 / 应用名称**：Flutter 工程右键 →「Flutter 重命名…」，打开 rename 面板：
+
+- 读取当前值：`rename getBundleId` / `rename getAppName`
+- 平台复选框只列出项目里实际存在的目录：Android / iOS / macOS / Linux / Web / Windows
+- 更新包名：`rename setBundleId --targets android,ios --value "com.example.app"`
+- 更新名称：`rename setAppName --targets android,ios --value "Today"`
+- 会直接改工程文件，建议先提交 Git；两个操作分别执行，未勾选的平台不动
+- 设置 → Flutter 里会检查 rename 是否已通过 `flutter pub global activate rename` 安装、
+  是否在 PATH 中，并提供「安装 / 更新」和 PATH 目录提示
+
+![Flutter 重命名](shot-flutter-rename.png)
+
+**工具栏自定义命令**：工具栏「自定义命令 ▾」→ 命令 → 运行 / 编辑 / 删除，
+底部「＋ 添加命令…」。
+
+- 适合启动任意常驻程序，例如 `npc_start.lnk`、本地服务、脚本封装的 exe
+- 字段：名称、程序 / 快捷方式、参数、工作目录；选 `.lnk` 后自动解析出
+  真实 exe / 参数 / 工作目录，并显示「目标：…」
+- **不会经过 ShellExecute**：`.lnk` 会先解析，再把目标 exe 直接放进 AppDeck 的
+  内嵌 ConPTY 终端运行。所以输出在标签页里，**不会弹出系统控制台、任务栏不会多一个窗口**
+- 运行会新建「自定义 · 名称」标签；停止会结束进程但保留标签与历史，重跑会重启一条命令
+- 命令保存在 `state.json` 的 `customCommands`，与项目命令 / 模板互不影响
+- 暂不支持 `.bat/.cmd` 直接作为目标；需要时让快捷方式指向 exe
+
+![自定义命令](shot-custom-command.png)
+
+**添加文件夹 / 目录**（工具栏「导入 ▾」）：任意目录都能挂进项目树，
+**不识别工程类型、也不解析任何配置文件**，所以导入后命令列表为空。
+适合脚本集合、文档仓、多个工程的上级目录这类"不是 Flutter 工程、但想放几条命令"的地方；
+之后用树里的「＋ 添加命令」或「⤓ 从模板导入…」补充即可。
+它的右键菜单只有四项通用操作，不显示平台 / Compose / 数据库：
+
+```
+在终端中打开 / 用编辑器打开目录 / 在 Git Desktop 中打开 / 添加命令
+```
+
+> `在 Git Desktop 中打开` 需先在「设置 → Git」指定客户端；未配置时该项置灰并给出提示。
 
 **导入 launch.json 的判定**（`import_launch_path`）：先看目录有没有 `pubspec.yaml`——
 有则作为**普通 Flutter 项目**导入，launch.json 的命令成为它的自定义命令；
@@ -211,11 +258,13 @@ tauri info             custom  npm run tauri -- info
 右键项目：全部启动 / 全部日志 / 全部停止 / 编辑 docker-compose.yaml / 用编辑器打开目录 / 重新读取 docker-compose.yaml
 ```
 
-- **用编辑器打开目录**：VS Code 把整个项目文件夹当工作区打开（`--reuse-window`，不会每次开新窗口）。
-  和终端控制条的「📂 项目」是同一套逻辑，区别是那个跟**当前会话的 cwd**，
-  这个跟**项目本身**（菜单在哪个项目上点的就开哪个）
+- **用编辑器打开目录**：默认编辑器把整个项目文件夹当工作区打开（VS Code 用 `--new-window`，**开新窗口**，
+  不会把当前窗口里已经打开的工程替换掉）。和终端控制条的「📂 项目」是同一套逻辑，
+  区别是那个跟**当前会话的 cwd**，这个跟**项目本身**（菜单在哪个项目上点的就开哪个）
+- **在 Git Desktop 中打开**：只有「设置 → Git」填了 Git 桌面客户端程序才出现。
+  GitHub Desktop 自动加 `--cli-open`，其它客户端按「程序 + 目录」启动
 
-- **编辑 xxx**：用默认编辑器（VS Code）打开项目的配置文件，右键点一下就跳过去
+- **编辑 xxx**：用默认编辑器打开项目的配置文件，右键点一下就跳过去
   - docker 项目 → `编辑 docker-compose.yaml`（显示**真实文件名**，可能是 `.yml` / `compose.yaml`）
   - npm 项目 → `编辑 package.json`
   - 判断依据是**文件是否真的存在**（后端 `project_files` 探测），不是项目的"生态标签"；
@@ -237,8 +286,14 @@ tauri info             custom  npm run tauri -- info
 | `build` | 独立标签 + 结束通知 + 产物按钮 |
 
 - 同一项目的普通命令**复用同一个终端**，不会每次开新标签
-- 终端标签**恢复后直接可以输入**（历史留在上面，下面接一个新提示符）
-- 普通终端**没有"重跑"按钮**：`↑` 就是历史，Enter 直接再执行
+- 终端标签**恢复后直接可以输入**：旧历史留在上方回滚区，新 shell 在干净的一屏里启动，
+  避免 ConPTY 的绝对光标把提示符覆盖进旧日志
+- 普通终端也默认显示「停止 / 重跑 / 搜索 / 清空」：
+  - **停止** = 给当前命令发 `Ctrl+C`，**不会关闭 shell**（关标签才结束会话）
+  - **重跑** = 先 `Ctrl+C` 中断当前命令，再把上一条命令**带 Enter** 打回同一个 shell，
+    不需要再手动按回车
+
+![终端工具](shot-terminal-tools.png)
 
 两个踩过的坑：
 
@@ -256,7 +311,8 @@ tauri info             custom  npm run tauri -- info
 - **DSR 握手**：ConPTY 启动即发 `ESC[6n` 查询光标位置，不应答会**永久卡住**；由后端统一应答 `ESC[1;1R` 并剔除该序列（只应答一次）
 - **进程树回收**：Windows Job Object + `KILL_ON_JOB_CLOSE`，关标签/退出应用时连带杀掉 `flutter → dart → gradle`
 - **会话状态机**：命中 `Flutter run key commands.` → 🟢；进程退出 → 🔴 并记录退出码
-- **控制按钮**：热重载 `r`、热重启 `R`、停止 `q`（5 秒后兜底强杀）、DevTools（从输出解析 URL 打开）
+- **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 发 `q`；项目终端发 `Ctrl+C`）、
+  重跑（项目终端会先中断再自动回车重放）、DevTools（从输出解析 URL 打开）
 - **命令拼装**：`.bat` 经 `cmd.exe /d /c`（**不加 `/s`**），路径与参数逐项传参，避免引号被二次转义
 
 ## 终端里的路径可点（Ctrl+单击）
@@ -266,22 +322,33 @@ tauri info             custom  npm run tauri -- info
 
 | 形态 | 例子 | 打开方式 |
 |---|---|---|
-| `package:` URI | `package:tao996/src/translation/translation.dart:119:7` | VS Code 跳到 119 行第 7 列 |
+| `package:` URI | `package:tao996/src/translation/translation.dart:119:7` | 编辑器跳到 119 行第 7 列 |
 | 绝对路径 | `C:/Users/mb/jbook\screenshots\a.png`（斜杠混用是真实存在的） | 系统默认程序 |
-| 相对路径 | `lib/main.dart:12:5`（相对会话 cwd） | VS Code 跳到行列 |
+| 相对路径 | `lib/main.dart:12:5`（相对会话 cwd） | 编辑器跳到行列 |
 
 - **Ctrl+单击**才打开（跟随 VS Code / Android Studio 终端），避免选文字时误触
-- **右键**在链接上可「用 VS Code 打开 / 在资源管理器中定位 / 复制路径」
+- **右键**在链接上可「用编辑器打开 / 在资源管理器中定位 / 复制路径」
 - 文件不存在时提示「文件不存在：<路径>」，不做静默失败
 
 **`package:` 怎么解析**：从会话 cwd 逐级向上找 `.dart_tool/package_config.json`，
 取 `rootUri`（可能是 `file:///…` 绝对 URI，也可能是 `../../packages/foo` 相对路径），
 再拼 `lib/<剩余路径>`。所以**没跑过 `flutter pub get` 的工程点不动**。
 
-**必须是 `Code.exe`**：PATH 里的 `code` 是 `code.cmd`/无扩展名脚本，和 `npm`/`docker`
+**编辑器可换**：设置 → 编辑器里指定任意 GUI 程序的 exe（VS Code / Zed / Sublime Text /
+Cursor / Notepad++…），留空则自动探测（VS Code → Zed → Sublime Text → Cursor → Notepad++）。
+打开方式按 exe 名分派，不会给 Zed 硬塞 `--goto`：
+
+| 编辑器 | 打开文件（带行列） | 打开目录 |
+|---|---|---|
+| VS Code 及分支（Code / Cursor / VSCodium…） | `--goto 文件:行:列` | `--new-window 目录` |
+| Zed / Sublime Text | `文件:行:列` | `目录` |
+| Notepad++ | `-n行 文件` | `目录` |
+| 其它程序 | `文件`（不拼行号，避免打开不存在的文件名） | `目录` |
+
+**VS Code 必须选 `Code.exe`**：PATH 里的 `code` 是 `code.cmd`/无扩展名脚本，和 `npm`/`docker`
 同一个坑。`Code.exe --goto "文件:行:列"` 走 argv，没有 `cmd.exe` 的引号问题，也没有注入风险。
 
-**但新版 VS Code 是「Electron 二进制 + 版本子目录」布局**：
+**新版 VS Code 是「Electron 二进制 + 版本子目录」布局**：
 
 ```
 Microsoft VS Code\
@@ -327,18 +394,84 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
 **📂 项目** —— 用编辑器打开**当前会话的项目目录**（整个目录当工作区）
 
 - 取的是会话的 `cwd`，所以单应用项目打开应用目录，命令带自定义 `cwd` 时打开那个子目录
-- 走的是 `--reuse-window <目录>`，不会每次点击都开新窗口
+- 走的是 `--new-window <目录>`，**不会替换掉当前已经打开的工程**（以前是 `--reuse-window`，一点就把原窗口的工程换掉了）
+- 终端里 Ctrl+单击报错路径仍是 `--goto`（就地定位，不会每点一次多一个窗口）
 - 和「编辑 xxx」是同一套编辑器设置（设置 → 编辑器）
+
+## 进程与端口（开发排障）
+
+工具栏 **「🧩 进程」**：默认隐藏 **Windows 核心进程**和其他会话里的服务进程；
+端口页则**始终显示端口所有者**（包括系统进程），避免“8080 被占，但列表里找不到人”。
+
+- **搜索**：名称 / PID / 端口 / 路径 / 用户，一个框全匹配；输入 `8080` 直接定位占用者
+- **筛选**：`只看有端口`、`开发进程`（flutter / dart / java / node / docker…）、`显示系统/服务`
+- **端口页**：TCP/UDP、本地 / 远端地址、状态、PID；默认只看 `LISTEN` / UDP 绑定，
+  取消「只看监听 / 绑定」才显示已建立连接
+- **结束进程**：选中后「结束进程」，或勾选「同时结束子进程」；Windows 关键进程、AppDeck 自身
+  会被前后端双重拒绝
+- **PID 复用防护**：结束前用快照里的启动时间再校验一次，进程已退出 / PID 被复用就跳过，
+  不会误杀刚复用了同一 PID 的其他程序
+- **权限**：普通权限结束管理员进程会失败并给出提示；面板右上角显示「管理员」或「普通权限」
+- **服务**：Clash / MySQL 这类第三方服务默认折叠，勾「显示系统/服务」后带「服务」徽章显示，
+  可以尝试结束（非管理员会得到权限不足提示）；`System32` 下的操作系统服务始终禁止
+- **开发场景**：`flutter run` / `dart` / `java` 残留导致文件被锁、端口占用时，
+  搜端口或勾「开发进程 + 只看有端口」，结束对应进程后重跑即可
+- **端口归属注意**：`PID 4`（HTTP.sys）、WSL 的 `wslrelay`、Docker 的 `com.docker.backend`
+  只是代理，杀进程 ≠ 停服务；这类进程会标「系统」
+- **自动刷新**：工具栏的复选框控制是否每 2 秒刷新（默认开，窗口不可见时也会暂停）；
+  关掉后仍可点「刷新」手动更新
+- **隐藏规则**：点「隐藏规则」展开 textarea，**一行一个**，按程序名**包含**匹配、大小写不敏感；
+  命中后进程和它的端口都不显示（例如 `svchost` / `SearchHost` / `msedgewebview2`）。
+  规则与开关保存在 `state.json` 的 `ui` 段，重启后仍然生效
+- **启用隐藏规则**：工具栏复选框控制规则是否生效；取消勾选后规则**保留但不过滤**，
+  状态栏显示「隐藏规则已停用」。右键「隐藏此进程」在停用状态下会先自动启用规则再隐藏
+- **右键隐藏**：在进程 / 端口行上右键 →「隐藏此进程」，会把这个程序名**追加**到隐藏规则并立即生效；
+  想恢复时在「隐藏规则」textarea 里删掉对应行即可。右键菜单还提供结束进程 / 结束进程树 /
+  显示位置 / 复制路径 / 复制 PID
+- 刷新会保留搜索、筛选和选中行；选中进程被搜索/规则过滤掉时会自动取消选择
+
+![进程与端口](shot-processes.png)
+
+![端口归属](shot-processes-ports.png)
 
 ## 设备与模拟器
 
-- **常驻 `flutter daemon`**：按 Flutter 可执行文件复用，`device.getDevices` + `emulator.getEmulators`
+- **常驻 `flutter daemon`**：按 Flutter 可执行文件复用，`emulator.getEmulators` 列模拟器，
+  `device.discoverDevices` 查在线设备
 - **能看到未启动的模拟器**：`flutter devices` 只列在线设备，`flutter emulators --machine` 根本不存在；daemon 协议才拿得到 `Pixel_5` 这类待启动项
 - **设备菜单**：右键命令弹出，分「自动选择 / 在线设备 / 可启动模拟器」；选中设备即带 `-d` 启动，选模拟器则先 `emulator.launch`
 - **设备列表只查一次**：首次打开菜单才去问 `flutter daemon`（要拉起进程，好几秒），
-  之后一直复用；要最新列表点菜单里的「⟳ 刷新设备列表」。模拟器菜单同理（标题栏 ⟳）
+  之后一直复用；要最新列表点菜单里的「⟳ 刷新设备列表」。
+- **刷新必须走 `device.discoverDevices`**：`device.getDevices` 返回的是 daemon
+  内部 `PollingDeviceDiscovery` 的**轮询缓存**，daemon 常驻时看不到后来插上的手机
+  （症状：`flutter devices` 有手机，菜单里却没有）。`discoverDevices` 会丢缓存重扫 adb。
 - **热插拔**：监听 `device.added` / `device.removed` 事件推送，无需轮询
 - **健壮性**：daemon 超时自动杀掉重建；stderr 独立消费避免管道写满阻塞
+
+## 应用数据库（Android 只读快照）
+
+**不打开 Android Studio，也能看设备上 app 的 SQLite**：项目右键 →「数据库…」。
+
+- 自动定位 adb（设置 → Android 的 SDK 目录 / `ANDROID_SDK_ROOT` / PATH）与在线设备
+- 从 `android/app/build.gradle(.kts)` 读 `applicationId` 猜包名；猜不到时用当前前台应用，也可以手填
+- 用 `adb run-as <包名>` 列出 `databases/` / `files/` 下的 `.db` / `.sqlite` / `.sqlite3`，点哪个拉哪个
+- 拉取时连同 `-wal` 一起带走——**未 checkpoint 的最新数据也能看到**
+- 内置查看器：表列表 / 字段 / 分页数据 / SQL 查询 / 导出干净的单个 `.db`
+- 本机副本落在临时目录，关闭弹窗或退出应用即删除
+
+**只读是硬限制**：SQL 面板只允许 `SELECT` / `PRAGMA` / `WITH` / `EXPLAIN`；
+后端用 `Statement::readonly()` 加 `PRAGMA query_only` 双重拦截，写语句直接报错。
+要改数据请导出副本后用 DB Browser / DataGrip 改（不会同步回设备）。
+
+**和 Studio 的 Database Inspector 的区别**：
+
+| | AppDeck 数据库 | Studio Database Inspector |
+|---|---|---|
+| 依赖 | 只要 adb | 需要 IDE + JDWP 调试通道 |
+| 实时性 | 拉取那一刻的快照，点「读取数据库」重拉 | 实时 |
+| 写操作 | 只读 | 可改（写回设备） |
+| 前置条件 | debug 包（`run-as`） | debuggable 包 |
+
 
 ## 设置页与模拟器菜单
 
@@ -347,13 +480,24 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
     SDK / AVD 目录通过 `ANDROID_AVD_HOME` 等注入子进程（自定义 AVD 目录才真正生效）；
     未配置时回退 `flutter daemon`
   - HarmonyOS 实例 ← DevEco `Emulator.exe -list`
-- **列表缓存**：首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查
+- **列表缓存**：模拟器列表首次打开查询并缓存，之后直接渲染；点标题栏右侧 **⟳** 才重新检查。
+  已连接设备**每次打开都现查**（手机随时插拔），标题栏会显示「设备更新于 HH:mm:ss」
 - **设置页**（⚙）**单页垂直滚动**（不分页签；弹窗固定尺寸，内容内部滚动），分区顺序：
-  窗口与托盘 → 命令模板 → 会话恢复 → 终端 → 编辑器 → Flutter → Android → 鸿蒙 → Npm → Docker
+  窗口与托盘 → 命令模板 → 会话恢复 → 终端 → 编辑器 → Git → Flutter → Android → 鸿蒙 → Npm → Docker
+  - 左下角显示**最后一次编译（打包）的时间**（`AppDeck · 最后编译 2026/10/29 00:16:12`），
+    取 exe 修改时间与前端打包时间的较大者
   - 窗口与托盘：关闭按钮行为（**退出程序** / **最小化到托盘**）。托盘图标常驻：
     左键或双击恢复窗口，右键菜单有「显示主窗口 / 退出」；选「最小化到托盘」时关窗不会中断正在跑的构建
-  - 命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（VS Code）
-  - Flutter：`auto` / `custom` / `fvm` + 自定义路径
+  - 命令模板库入口 / 会话恢复 / 终端程序 / 默认编辑器（可换 VS Code / Zed / Sublime Text…）
+  - Git：Git 桌面客户端程序（GitHub Desktop / SourceTree…）。**填了才在项目右键出现
+    「在 Git Desktop 中打开」**；GitHub Desktop 自动走 `--cli-open`，其它客户端按
+    「程序 + 目录」启动
+  - Flutter：`auto` / `custom` / `fvm` + 自定义路径；rename CLI 状态（版本 / 是否在 PATH），
+    可「安装 / 更新」执行 `flutter pub global activate rename`，未进 PATH 时给出 pub bin 目录。
+    检查结果会缓存：首次打开检查一次，之后打开项目/设置不再重复跑
+    `flutter pub global list`；点「重新检查」或安装/更新后才刷新
+
+![设置 Flutter](shot-settings-rename.png)
   - Android：SDK 目录 / `emulator.exe` / AVD 目录 / build-tools / keytool
   - 鸿蒙：`Emulator.exe` 目录 / 实例目录 / 镜像目录 / 鸿蒙 Flutter 分支 / SDK / 全局环境变量
   - Npm：包管理器（auto/npm/pnpm/yarn）/ node 目录
@@ -375,7 +519,8 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
   Windows 宿主没有 `ipa` / `macos`
 - **flavor 支持度探测**：逐个执行 `flutter build <target> --help` 检查是否含 `--flavor`
   （实测 `apk`/`windows` 支持，`web` 不支持），不支持时输入框置灰
-- **命令编辑对话框**：树里「＋ 添加命令」可建 run / build 两类命令；右键命令可编辑或删除
+- **命令编辑对话框**：树里「＋ 添加命令」可建 run / build / custom / powershell / cmd / bash 命令；
+  右键命令可编辑或删除
 - **产物解析**：从终端流里匹配 `✓ Built <path>`，在控制条生成 `📦 产物名` 按钮，点击在资源管理器定位
 - **构建通知**：结束（成功或失败）发系统通知，含项目与产物/退出码
 - **退出码可见**：终端末尾打印 `──── 会话结束（退出码 N）────`，标签转 🔴

@@ -11,6 +11,8 @@ pub struct ProjectFiles {
     pub package_json: Option<String>,
     /// compose 文件的完整路径（名字可能是 .yml / .yaml / compose.*）
     pub compose: Option<String>,
+    /// 是不是 Android 工程（右键菜单据此显示「数据库…」）
+    pub android: bool,
 }
 
 /// compose 文件的候选名，按优先级排列。
@@ -28,10 +30,18 @@ pub fn detect(dir: &Path) -> ProjectFiles {
         .iter()
         .map(|n| dir.join(n))
         .find(|p| p.is_file());
+    let android = dir
+        .join("android")
+        .join("app")
+        .join("src")
+        .join("main")
+        .join("AndroidManifest.xml")
+        .is_file();
 
     ProjectFiles {
         package_json: pkg.is_file().then(|| pkg.display().to_string()),
         compose: compose.map(|p: PathBuf| p.display().to_string()),
+        android,
     }
 }
 
@@ -91,6 +101,19 @@ mod tests {
         let f = detect(&dir);
         assert!(f.package_json.is_none());
         assert!(f.compose.is_none());
+        assert!(!f.android);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn detects_android_manifest() {
+        let dir = temp_dir("android");
+        let main = dir.join("android").join("app").join("src").join("main");
+        std::fs::create_dir_all(&main).unwrap();
+        std::fs::write(main.join("AndroidManifest.xml"), "<manifest/>").unwrap();
+
+        assert!(detect(&dir).android);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

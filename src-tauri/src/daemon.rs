@@ -131,6 +131,32 @@ impl Daemon {
         }
     }
 
+    /// 丢缓存重新扫一遍设备。
+    ///
+    /// **必须用 `device.discoverDevices`**：`device.getDevices` 只是把
+    /// `PollingDeviceDiscovery` 里的缓存原样返回（flutter_tools 的
+    /// `DeviceDomain.getDevices` 就是 `discoverer.devices()`）。
+    /// daemon 是常驻的，手机后插上去它照样返回启动时那份旧列表——
+    /// 这正是「`flutter devices` 能看到手机，点刷新还是看不到」的根因。
+    /// `discoverDevices` 会 `discard existing cache of devices` 后重扫（adb / 桌面 / 浏览器）。
+    pub fn discover_devices(&self) -> Result<Vec<DeviceInfo>, String> {
+        let fresh = self.request(
+            "device.discoverDevices",
+            Some(serde_json::json!({ "timeoutInMilliseconds": 20_000 })),
+        );
+
+        let v = match fresh {
+            Ok(v) => v,
+            Err(e) => {
+                // 老版本 flutter 没有这个 method：退回缓存版，至少不是空列表
+                eprintln!("[daemon] discoverDevices 失败，退回 getDevices: {e}");
+                self.request("device.getDevices", None)?
+            }
+        };
+
+        serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
+    }
+
     pub fn snapshot(&self) -> DevicesPayload {
         DevicesPayload {
             devices: self.devices.lock().map(|d| d.clone()).unwrap_or_default(),
@@ -375,6 +401,14 @@ mod tests {
             .expect("device.getDevices 应有响应");
         let devices: Vec<DeviceInfo> = serde_json::from_value(v).expect("设备列表应可解析");
         assert!(!devices.is_empty(), "至少应有 windows / chrome 之一");
+
+        // 回归：菜单里的"刷新"必须走 discoverDevices（丢缓存重扫）。
+        // getDevices 只是轮询缓存，常驻 daemon 里看不到后插上的手机。
+        let fresh = d.discover_devices().expect("device.discoverDevices 应有响应");
+        assert!(
+            !fresh.is_empty(),
+            "重扫后至少应有 windows / chrome 之一"
+        );
 
         let v2 = d
             .request("emulator.getEmulators", None)

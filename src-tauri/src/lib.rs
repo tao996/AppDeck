@@ -1,4 +1,5 @@
 mod android;
+mod android_db;
 mod apksig;
 mod atomic;
 mod locate;
@@ -6,12 +7,14 @@ mod editor;
 mod project_files;
 mod tauri_cli;
 mod cache;
+mod custom_cmd;
 mod daemon;
 mod docker;
 mod detect;
 mod doctor;
 mod filing;
 mod flutter;
+mod gitdesk;
 mod harmony;
 mod logs;
 mod platforms;
@@ -21,7 +24,9 @@ mod model;
 mod npm;
 mod ops;
 mod pty;
+mod rename_tool;
 mod store;
+mod sysmon;
 mod terminal;
 
 use model::State;
@@ -55,10 +60,31 @@ fn add_project(app: AppHandle, path: String) -> Result<State, String> {
     Ok(state)
 }
 
+/// 添加一个普通文件夹/目录：不要求任何标志文件，命令列表导入后为空。
+///
+/// 和 `add_project` 分开是有意的：后者按 Flutter / 工作区 / npm / compose
+/// 校验目录并自动生成命令，而这里要的是"先挂进来，命令之后自己加"。
+#[tauri::command]
+fn add_folder(app: AppHandle, path: String) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    ops::add_folder_to(&mut state, &path)?;
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
 #[tauri::command]
 fn remove_project(app: AppHandle, id: String) -> Result<State, String> {
     let mut state = store::load(&app)?;
     state.projects.retain(|p| p.id != id);
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
+/// 重命名项目：只改显示名，磁盘目录保持不变。
+#[tauri::command]
+fn rename_project(app: AppHandle, id: String, name: String) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+    ops::rename_project_in(&mut state, &id, &name)?;
     store::save(&app, &state)?;
     Ok(state)
 }
@@ -398,6 +424,24 @@ fn kill_session(app: AppHandle, reg: tauri::State<'_, pty::Registry>, id: String
     killed
 }
 
+/* ---------------- 进程与端口 ---------------- */
+
+#[tauri::command(async)]
+fn process_snapshot() -> sysmon::Snapshot {
+    sysmon::snapshot()
+}
+
+/// 结束进程。`expect_start_ms` 是前端快照里的启动时间，用来防止 PID 复用误杀；
+/// `tree` 为 true 时连同子进程一起结束。
+#[tauri::command(async)]
+fn process_kill(
+    pid: u32,
+    expect_start_ms: Option<u64>,
+    tree: bool,
+) -> Result<sysmon::KillReport, String> {
+    sysmon::kill(pid, expect_start_ms, tree)
+}
+
 /* ---------------- 设备与模拟器 ---------------- */
 
 /// 项目的运行上下文（exe + 环境 + shim）。所有"跑 flutter"的入口都该用它，
@@ -446,11 +490,8 @@ fn list_devices(
     let ctx = project_ctx(&state, &project_id)?;
     let d = daemon::get_or_start(&reg, &ctx.exe, &ctx.env_with_path(), device_sink(&app))?;
 
-    match d.request("device.getDevices", None) {
-        Ok(v) => match serde_json::from_value::<Vec<daemon::DeviceInfo>>(v) {
-            Ok(list) => d.set_devices(list),
-            Err(e) => return Err(format!("解析设备列表失败: {e}")),
-        },
+    match d.discover_devices() {
+        Ok(list) => d.set_devices(list),
         Err(e) => return Err(e),
     }
 
@@ -672,8 +713,8 @@ fn devices_snapshot(
     let state = store::load(app)?;
     let ctx = project_ctx(&state, project_id)?;
     let d = daemon::get_or_start(reg, &ctx.exe, &ctx.env_with_path(), device_sink(app))?;
-    let v = d.request("device.getDevices", None)?;
-    serde_json::from_value(v).map_err(|e| format!("解析设备列表失败: {e}"))
+    // 同 list_connected_devices：getDevices 是 daemon 的旧缓存，必须重扫
+    d.discover_devices()
 }
 
 /// 宿主支持哪些 `flutter build <target>`（成本：6 次 `flutter build --help`，约十秒）。
@@ -1385,6 +1426,44 @@ fn save_collapsed_projects(app: AppHandle, ids: Vec<String>) -> Result<(), Strin
     store::save(&app, &state)
 }
 
+/// 保存进程面板的隐藏规则与自动刷新偏好（纯 UI 状态）。
+#[tauri::command(async)]
+fn save_process_prefs(
+    app: AppHandle,
+    hide_rules: Vec<String>,
+    hide_rules_enabled: bool,
+    auto_refresh: bool,
+) -> Result<State, String> {
+    let mut state = store::load(&app)?;
+
+    // 清洗：去空白 / 空行、按大小写不敏感去重；保留用户写的原始大小写与顺序
+    let mut cleaned: Vec<String> = Vec::new();
+    for raw in hide_rules {
+        let rule = raw.trim();
+        if rule.is_empty() || cleaned.len() >= 200 {
+            continue;
+        }
+        if cleaned.iter().any(|x| x.eq_ignore_ascii_case(rule)) {
+            continue;
+        }
+        cleaned.push(rule.to_string());
+    }
+
+    // 没变化就不写盘（输入框每敲一下都会调用，靠这里挡住）
+    if state.ui.process_hide_rules == cleaned
+        && state.ui.process_hide_rules_enabled == hide_rules_enabled
+        && state.ui.process_auto_refresh == auto_refresh
+    {
+        return Ok(state);
+    }
+
+    state.ui.process_hide_rules = cleaned;
+    state.ui.process_hide_rules_enabled = hide_rules_enabled;
+    state.ui.process_auto_refresh = auto_refresh;
+    store::save(&app, &state)?;
+    Ok(state)
+}
+
 #[tauri::command]
 fn save_settings(
     app: AppHandle,
@@ -1519,6 +1598,10 @@ struct AllEmulators {
     /// **不落缓存**：插拔随时发生，缓存了就永远看不到新设备。
     #[serde(default)]
     devices: Vec<daemon::DeviceInfo>,
+    /// 设备列表这一份是**什么时候查的**（毫秒时间戳），给菜单显示"更新于"，
+    /// 让用户能确认 ⟳ 真的生效了。
+    #[serde(default)]
+    devices_at: u64,
 }
 
 /* ---------------- 磁盘缓存（跨重启有效） ---------------- */
@@ -1599,31 +1682,23 @@ fn cache_emulators(app: &AppHandle, payload: &AllEmulators) {
 }
 
 /// 已连接设备（手机 / 桌面 / 浏览器）。**永远现查，不缓存。**
+///
+/// 注意：必须走 `Daemon::discover_devices`（丢缓存重扫），
+/// `device.getDevices` 拿到的是 daemon 启动时的旧缓存。
 fn list_connected_devices(
     app: &AppHandle,
     reg: &daemon::Daemons,
     project_id: Option<&str>,
-) -> Vec<daemon::DeviceInfo> {
-    let Ok(state) = store::load(app) else {
-        return Vec::new();
-    };
+) -> Result<Vec<daemon::DeviceInfo>, String> {
+    let state = store::load(app)?;
 
     let ctx = match project_id {
         Some(id) => project_ctx(&state, id),
         None => ctx_or_default(&state, None),
-    };
-    let Ok(ctx) = ctx else {
-        return Vec::new();
-    };
+    }?;
 
-    let Ok(d) = daemon::get_or_start(reg, &ctx.exe, &ctx.env_with_path(), device_sink(app))
-    else {
-        return Vec::new();
-    };
-    let Ok(v) = d.request("device.getDevices", None) else {
-        return Vec::new();
-    };
-    serde_json::from_value(v).unwrap_or_default()
+    let d = daemon::get_or_start(reg, &ctx.exe, &ctx.env_with_path(), device_sink(app))?;
+    d.discover_devices()
 }
 /// 未显式配置时回退到自动探测结果，保证开箱即用
 fn effective_harmony(state: &State) -> model::HarmonySettings {
@@ -1642,7 +1717,7 @@ fn effective_harmony(state: &State) -> model::HarmonySettings {
 }
 
 /// 未显式配置时回退到自动探测结果，保证开箱即用
-fn effective_android(state: &State) -> model::AndroidSettings {
+pub(crate) fn effective_android(state: &State) -> model::AndroidSettings {
     let s = &state.settings.android;
     let has = |v: &Option<String>| v.as_ref().is_some_and(|p| !p.trim().is_empty());
 
@@ -1676,7 +1751,12 @@ fn list_all_emulators(
     };
 
     // 设备：永远现查（失败就空着，不影响模拟器列表）
-    out.devices = list_connected_devices(&app, &reg, project_id.as_deref());
+    match list_connected_devices(&app, &reg, project_id.as_deref()) {
+        Ok(list) => out.devices = list,
+        // 别静默吞掉：菜单里要能看见"为什么没有设备"，否则只会误报"未检测到"
+        Err(e) => out.notes.push(format!("已连接设备：{e}")),
+    }
+    out.devices_at = logs::now_ms();
     out
 }
 
@@ -1830,9 +1910,49 @@ fn open_in_editor(
     col: Option<u32>,
 ) -> Result<(), String> {
     let state = store::load(&app)?;
-    let code = editor::detect(state.settings.editor.vscode_path.as_deref())
-        .ok_or_else(|| "没找到 VS Code，请到「设置 → 通用 → 编辑器」里指定 Code.exe".to_string())?;
-    editor::open(&code, std::path::Path::new(&path), line, col)
+    let exe = editor::detect_any(state.settings.editor.path.as_deref()).ok_or_else(|| {
+        "没找到可用的编辑器，请到「设置 → 编辑器」里指定 Code.exe / zed.exe / sublime_text.exe"
+            .to_string()
+    })?;
+    editor::open(&exe, std::path::Path::new(&path), line, col)
+}
+
+/// 在 Git 桌面客户端里打开项目目录。
+///
+/// 只有设置里填了程序才可用（右侧菜单同理只在有值时才显示这一项）。
+#[tauri::command(async)]
+fn open_in_git_desktop(app: AppHandle, path: String) -> Result<(), String> {
+    let state = store::load(&app)?;
+
+    let configured = state
+        .settings
+        .git
+        .desktop_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let Some(raw) = configured else {
+        return Err(
+            "没配置 Git Desktop 程序：请到「设置 → Git」指定（如 GitHubDesktop.exe）".to_string(),
+        );
+    };
+
+    let exe = std::path::PathBuf::from(raw);
+    if !exe.is_file() {
+        return Err(format!(
+            "Git Desktop 程序不存在：{}（请到「设置 → Git」重新指定）",
+            exe.display()
+        ));
+    }
+
+    gitdesk::open(&exe, std::path::Path::new(&path))
+}
+
+/// 自动探测到的 GitHub Desktop 路径（设置里留空时只是提示，不会自动启用）
+#[tauri::command(async)]
+fn detect_git_desktop_path() -> Option<String> {
+    gitdesk::detect().map(|p| p.display().to_string())
 }
 
 /// 用系统默认程序打开文件（图片 / 日志 / 其他非源码）。
@@ -1852,15 +1972,27 @@ fn project_files(path: String) -> project_files::ProjectFiles {
     project_files::detect(std::path::Path::new(&path))
 }
 
-/// 自动探测到的 VS Code 路径（设置里留空时实际会用它）
+/// 自动探测到的编辑器路径（设置里留空时实际会用它）
 #[tauri::command(async)]
 fn detect_editor_path() -> Option<String> {
-    editor::detect(None).map(|p| p.display().to_string())
+    editor::detect_any(None).map(|p| p.display().to_string())
 }
 
 #[tauri::command]
 fn dev_env(name: String) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// 最后一次编译/打包的时间：取当前可执行文件的修改时间（毫秒时间戳）。
+/// 设置页左下角用它替代原来的 "state schema vN"——那个版本号对用户没有意义。
+#[tauri::command]
+fn build_time() -> Option<u64> {
+    let exe = std::env::current_exe().ok()?;
+    let modified = std::fs::metadata(exe).ok()?.modified().ok()?;
+    modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
 }
 
 #[tauri::command]
@@ -1883,6 +2015,88 @@ fn dev_autostart() -> Option<DevAutostart> {
         command_id,
         device_id,
     })
+}
+
+/* ---------------- Android 数据库（只读快照） ---------------- */
+
+/// 探测 adb / 设备 / 项目包名，供「数据库…」弹窗初始化。
+#[tauri::command(async)]
+fn android_db_env(app: AppHandle, project_id: String) -> Result<android_db::DbEnv, String> {
+    let state = store::load(&app)?;
+    let project = state
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+    let settings = effective_android(&state);
+    Ok(android_db::env(Some(&project.path), &settings))
+}
+
+/// 列出设备上该应用数据目录里的 SQLite 文件（`run-as` + `find`）。
+#[tauri::command(async)]
+fn android_db_files(
+    app: AppHandle,
+    serial: String,
+    package: String,
+) -> Result<Vec<android_db::DbFile>, String> {
+    let state = store::load(&app)?;
+    let adb = android_db::resolve_adb(&effective_android(&state))
+        .ok_or_else(|| "没有找到 adb：请到「设置 → Android」填 SDK 目录".to_string())?;
+    android_db::list_files(&adb, &serial, &package)
+}
+
+/// 拉取 db（+ `-wal`）到本机临时目录，建立只读查询会话。
+#[tauri::command(async)]
+fn android_db_open(
+    app: AppHandle,
+    sessions: tauri::State<'_, android_db::DbSessions>,
+    serial: String,
+    package: String,
+    remote_path: String,
+) -> Result<android_db::DbOpen, String> {
+    let state = store::load(&app)?;
+    let adb = android_db::resolve_adb(&effective_android(&state))
+        .ok_or_else(|| "没有找到 adb：请到「设置 → Android」填 SDK 目录".to_string())?;
+    android_db::open_snapshot(&sessions, &adb, &serial, &package, &remote_path)
+}
+
+#[tauri::command(async)]
+fn android_db_rows(
+    sessions: tauri::State<'_, android_db::DbSessions>,
+    session_id: String,
+    table: String,
+    offset: i64,
+    limit: usize,
+) -> Result<android_db::DbPage, String> {
+    android_db::rows(&sessions, &session_id, &table, offset, limit)
+}
+
+#[tauri::command(async)]
+fn android_db_query(
+    sessions: tauri::State<'_, android_db::DbSessions>,
+    session_id: String,
+    sql: String,
+    limit: usize,
+) -> Result<android_db::DbPage, String> {
+    android_db::query(&sessions, &session_id, &sql, limit)
+}
+
+/// 把当前快照导出成干净的单个 `.db`（WAL 已合并），方便用外部工具打开。
+#[tauri::command(async)]
+fn android_db_export(
+    sessions: tauri::State<'_, android_db::DbSessions>,
+    session_id: String,
+    dest: String,
+) -> Result<(), String> {
+    android_db::export(&sessions, &session_id, &dest)
+}
+
+#[tauri::command(async)]
+fn android_db_close(
+    sessions: tauri::State<'_, android_db::DbSessions>,
+    session_id: String,
+) -> Result<(), String> {
+    android_db::close(&sessions, &session_id)
 }
 
 /* ---------------- 托盘 / 关闭行为 ---------------- */
@@ -1911,6 +2125,9 @@ fn quit_app(app: &AppHandle) {
     }
     if let Some(daemons) = app.try_state::<daemon::Daemons>() {
         daemons.invalidate_all();
+    }
+    if let Some(db) = app.try_state::<android_db::DbSessions>() {
+        db.clear();
     }
     app.exit(0);
 }
@@ -1972,6 +2189,8 @@ pub fn run() {
             if let Some(msg) = crate::store::migrate_legacy_dir(app.handle()) {
                 println!("[store] {msg}");
             }
+            // 上次崩溃/强杀可能留下数据库临时副本，启动时兜底清掉
+            android_db::clean_stale();
             // 托盘建不起来不该让整个应用起不来：退化成「关闭即退出」，
             // 否则用户选了「最小化到托盘」会得到一个藏起来又唤不回的主窗口。
             if let Err(e) = install_tray(app.handle()) {
@@ -2009,11 +2228,15 @@ pub fn run() {
         .manage(TargetCache::default())
         .manage(PlatformCache::default())
         .manage(doctor::Cache::default())
+        .manage(android_db::DbSessions::default())
+        .manage(rename_tool::RenameCache::default())
         .invoke_handler(tauri::generate_handler![
             load_state,
             state_location,
             add_project,
+            add_folder,
             remove_project,
+            rename_project,
             import_launch,
             detect_flutter,
             start_session,
@@ -2021,6 +2244,8 @@ pub fn run() {
             write_session,
             resize_session,
             kill_session,
+            process_snapshot,
+            process_kill,
             list_devices,
             launch_emulator,
             build_targets,
@@ -2055,17 +2280,36 @@ pub fn run() {
             launch_harmony_emulator,
             dev_autostart,
             dev_env,
+            build_time,
             resolve_location,
             detect_editor_path,
             open_path_default,
             project_files,
             save_collapsed_projects,
-            open_in_editor
+            save_process_prefs,
+            open_in_editor,
+            android_db_env,
+            android_db_files,
+            android_db_open,
+            android_db_rows,
+            android_db_query,
+            android_db_export,
+            android_db_close,
+            open_in_git_desktop,
+            detect_git_desktop_path,
+            rename_tool::rename_status,
+            rename_tool::rename_refresh,
+            rename_tool::rename_activate,
+            rename_tool::rename_project_info,
+            rename_tool::rename_apply,
+            custom_cmd::resolve_shortcut,
+            custom_cmd::upsert_custom_command,
+            custom_cmd::remove_custom_command,
+            custom_cmd::start_custom_command
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
-
 
 
 

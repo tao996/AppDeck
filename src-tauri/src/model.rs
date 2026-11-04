@@ -136,14 +136,26 @@ pub struct Settings {
     pub docker: DockerSettings,
     #[serde(default)]
     pub editor: EditorSettings,
+    #[serde(default)]
+    pub git: GitSettings,
 }
 
-/// 默认编辑器（目前只支持 VS Code）
+/// Git 桌面客户端（GitHub Desktop 等）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct GitSettings {
+    /// 客户端 exe 的完整路径；**留空则项目右键不显示「在 Git Desktop 中打开」**
+    #[serde(rename = "desktopPath", default)]
+    pub desktop_path: Option<String>,
+}
+
+/// 默认编辑器（VS Code / Zed / Sublime Text / Cursor / Notepad++ …）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EditorSettings {
-    /// `Code.exe` 的完整路径；留空表示自动探测
-    #[serde(rename = "vscodePath", default)]
-    pub vscode_path: Option<String>,
+    /// 编辑器可执行文件的完整路径；留空表示自动探测。
+    ///
+    /// 老状态文件里这个字段叫 `vscodePath`，用 alias 兼容，保存后写成 `path`。
+    #[serde(alias = "vscodePath", default)]
+    pub path: Option<String>,
 }
 
 /// npm / Node 相关设置
@@ -272,6 +284,7 @@ pub struct Project {
     pub name: String,
     pub path: String,
     /// single（自身是 Flutter 应用）| workspace（多应用，靠 cwd 区分）
+    /// | folder（任意文件夹/目录，导入后命令为空，见 `ops::add_folder_to`）
     #[serde(default = "default_project_kind")]
     pub kind: String,
     #[serde(rename = "flutterTool", default)]
@@ -282,6 +295,25 @@ pub struct Project {
     /// 优先级：全局鸿蒙 env < .fvmrc.env < 项目 env < 命令 env
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
+}
+
+/// 工具栏「自定义命令」：全局命令，不绑定项目。
+/// 直接启动目标程序（.lnk 会先解析），不经过 ShellExecute，避免弹系统控制台。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomCommand {
+    pub id: String,
+    pub name: String,
+    /// 用户选择的 .lnk / .exe；.lnk 会解析出 target
+    pub program: String,
+    /// 快捷方式解析出的真实 exe；运行优先用它
+    #[serde(default)]
+    pub target: Option<String>,
+    /// Windows 命令行参数原文（快捷方式参数也存这里）
+    #[serde(default)]
+    pub args: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -295,18 +327,45 @@ pub struct State {
     /// 全局命令模板库
     #[serde(rename = "commandTemplates", default)]
     pub command_templates: Vec<Command>,
+    /// 工具栏自定义命令（全局）
+    #[serde(rename = "customCommands", default)]
+    pub custom_commands: Vec<CustomCommand>,
     /// 纯界面状态（与业务无关，丢了不影响功能）
     #[serde(default)]
     pub ui: UiState,
 }
 
 /// 界面状态：只放"下次打开还应该保持原样"的展示偏好
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiState {
     /// 右侧项目树里被折叠的项目 id（没列出来的 = 展开）
     #[serde(default)]
     pub collapsed_projects: Vec<String>,
+    /// 进程面板的隐藏规则：程序名包含任一规则就不显示
+    #[serde(default)]
+    pub process_hide_rules: Vec<String>,
+    /// 隐藏规则是否生效（默认开；关掉后规则保留，但不过滤）
+    #[serde(default = "default_true")]
+    pub process_hide_rules_enabled: bool,
+    /// 进程面板是否自动刷新（默认开）
+    #[serde(default = "default_true")]
+    pub process_auto_refresh: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for UiState {
+    fn default() -> Self {
+        Self {
+            collapsed_projects: Vec::new(),
+            process_hide_rules: Vec::new(),
+            process_hide_rules_enabled: true,
+            process_auto_refresh: true,
+        }
+    }
 }
 
 impl Default for State {
@@ -316,6 +375,7 @@ impl Default for State {
             settings: Settings::default(),
             projects: Vec::new(),
             command_templates: default_templates(),
+            custom_commands: Vec::new(),
             ui: UiState::default(),
         }
     }
@@ -346,5 +406,50 @@ mod tests {
         assert!(json.contains("\"closeBehavior\":\"tray\""), "{json}");
         let back: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(back.window.close_behavior, "tray");
+    }
+
+    /// 编辑器设置从 `vscodePath` 改名成通用的 `path`：老状态文件必须还能读。
+    #[test]
+    fn editor_setting_accepts_legacy_vscode_path() {
+        let legacy: Settings =
+            serde_json::from_str(r#"{"editor":{"vscodePath":"C:\\apps\\Code.exe"}}"#).unwrap();
+        assert_eq!(legacy.editor.path.as_deref(), Some(r"C:\apps\Code.exe"));
+
+        // 新字段名也认，并且保存后统一写成 `path`
+        let current: Settings =
+            serde_json::from_str(r#"{"editor":{"path":"C:\\apps\\zed.exe"}}"#).unwrap();
+        assert_eq!(current.editor.path.as_deref(), Some(r"C:\apps\zed.exe"));
+        let json = serde_json::to_string(&current).unwrap();
+        assert!(json.contains("\"path\":\"C:\\\\apps\\\\zed.exe\""), "{json}");
+        assert!(!json.contains("vscodePath"), "{json}");
+    }
+
+    /// 进程面板偏好：老状态文件没有这些字段时，自动刷新/隐藏规则默认开。
+    #[test]
+    fn ui_state_defaults_auto_refresh_on_and_roundtrips() {
+        let ui: UiState = serde_json::from_str("{}").unwrap();
+        assert!(ui.process_auto_refresh, "默认应开启自动刷新");
+        assert!(ui.process_hide_rules_enabled, "默认应启用隐藏规则");
+        assert!(ui.process_hide_rules.is_empty());
+
+        let mut state = State::default();
+        assert!(state.ui.process_auto_refresh, "State::default 也应开启");
+        assert!(state.ui.process_hide_rules_enabled);
+
+        state.ui.process_hide_rules = vec!["svchost".into(), "SearchHost".into()];
+        state.ui.process_hide_rules_enabled = false;
+        state.ui.process_auto_refresh = false;
+        let json = serde_json::to_string(&state.ui).unwrap();
+        assert!(json.contains("\"processAutoRefresh\":false"), "{json}");
+        assert!(json.contains("\"processHideRulesEnabled\":false"), "{json}");
+        assert!(
+            json.contains("\"processHideRules\":[\"svchost\",\"SearchHost\"]"),
+            "{json}"
+        );
+
+        let back: UiState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.process_hide_rules.len(), 2);
+        assert!(!back.process_hide_rules_enabled);
+        assert!(!back.process_auto_refresh);
     }
 }

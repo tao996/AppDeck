@@ -26,6 +26,9 @@ pub struct SessionLog {
     pub project_id: Option<String>,
     pub command_id: Option<String>,
     pub template_id: Option<String>,
+    /// 工具栏自定义命令（全局）：恢复后用于「重跑」
+    #[serde(default)]
+    pub custom_command_id: Option<String>,
     pub device: String,
     pub mode: String,
     pub kind: String,

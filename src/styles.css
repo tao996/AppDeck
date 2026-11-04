@@ -68,14 +68,7 @@ body {
   border-bottom: 1px solid var(--line);
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-}
-
-/* 工具栏菜单条：紧贴 logo 右侧 */
+/* 工具栏菜单条：从左侧开始（AppDeck 名称/图标由系统标题栏显示，这里不再重复） */
 .tb-menu {
   display: flex;
   align-items: center;
@@ -127,25 +120,6 @@ body {
 .import-item.disabled {
   cursor: default;
   opacity: 0.45;
-}
-
-.brand .logo {
-  display: flex;
-  align-items: center;
-  flex: 0 0 auto;
-}
-
-/* 图标是内联 SVG（和应用图标同一套叠层卡片），不额外加载图片 */
-.brand .logo svg {
-  display: block;
-  width: 18px;
-  height: 18px;
-}
-
-.brand .title {
-  font-weight: 600;
-  font-size: 13.5px;
-  letter-spacing: 0.2px;
 }
 
 .badge-m0 {
@@ -202,6 +176,11 @@ body {
 
 .btn:active {
   background: #2c333e;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btn.primary {
@@ -986,10 +965,40 @@ body.dragging .term-pane {
   color: var(--red);
 }
 
+/* 重命名：和「×」一样悬停才出现，避免项目行常态太挤 */
+.proj-edit {
+  border: none;
+  background: none;
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1;
+  width: 16px;
+  padding: 0;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s;
+}
+
+.proj-row:hover .proj-edit {
+  opacity: 0.7;
+}
+
+.proj-edit:hover {
+  opacity: 1 !important;
+  color: var(--accent);
+}
+
 .chip.kind-workspace {
   background: #2a3040;
   color: #9db4d0;
   border-color: #333c4d;
+}
+
+/* 普通文件夹/目录：和「工作区」「应用」区分开，暗示它只是个空容器 */
+.chip.kind-folder {
+  background: #302a22;
+  color: #d3b98d;
+  border-color: #463a2b;
 }
 
 .chip.kind-single {
@@ -1131,11 +1140,12 @@ body.dragging .term-pane {
 }
 
 .modal-head {
-  height: 42px;
+  /* 用 min-height + 上下 padding：标题不再贴着顶边，弹窗越高越明显 */
+  min-height: 48px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
   font-size: 13px;
   color: var(--fg);
@@ -1264,6 +1274,153 @@ select.set-input {
   flex: 0 0 auto;
 }
 
+.set-desc.rename-ok {
+  color: #7fd18b;
+}
+
+.set-desc.rename-warn {
+  color: #e0a33e;
+}
+
+.set-desc.rename-bad {
+  color: #ff7b7b;
+}
+
+/* ---------------- Flutter 重命名面板 ---------------- */
+
+.fl-rename-modal {
+  width: 820px;
+  max-width: calc(100vw - 48px);
+}
+
+.rename-banner {
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #171b22;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-line;
+}
+
+.rename-banner.ok {
+  color: #7fd18b;
+  border-color: rgba(127, 209, 139, 0.35);
+}
+
+.rename-banner.warn {
+  color: #e0a33e;
+  border-color: rgba(224, 163, 62, 0.38);
+}
+
+.rename-banner.bad {
+  color: #ff7b7b;
+  border-color: rgba(255, 123, 123, 0.38);
+}
+
+.rename-warning {
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1.55;
+  margin-bottom: 8px;
+}
+
+.rename-path {
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.rename-section {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.rename-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.rename-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rename-head .set-desc {
+  margin: 0;
+}
+
+.rename-current {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  line-height: 1.5;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+
+.rename-platforms {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 2px 0 9px;
+}
+
+.rename-platforms label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  user-select: none;
+}
+
+.rename-platforms input {
+  accent-color: var(--accent);
+}
+
+.rename-cmd {
+  display: block;
+  padding: 6px 8px;
+  margin-bottom: 9px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #10141a;
+  color: #9db7d8;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.rename-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.rename-log {
+  max-height: 220px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #0c1015;
+  color: #b9c7d6;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* ---------------- 命令编辑 / 构建产物 ---------------- */
 
 .set-cell {
@@ -1278,6 +1435,17 @@ select.set-input {
 .set-cell .set-input {
   flex: 1;
   min-width: 0;
+}
+
+/* Shell 命令输入：多行文本域，保留等宽字体 */
+.cmd-script {
+  width: 100%;
+  height: auto;
+  min-height: 64px;
+  padding: 7px 8px;
+  line-height: 1.5;
+  font-family: var(--mono);
+  resize: vertical;
 }
 
 .set-cell.disabled .set-input {
@@ -1574,6 +1742,17 @@ select.set-input {
 .dm-refresh:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* 标题栏中间的"设备更新于 HH:mm:ss"：点了 ⟳ 是否真的查过，一眼可见 */
+.dm-updated {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: right;
+  font-size: 10px;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 
@@ -1911,3 +2090,743 @@ select.set-input {
   cursor: default;
 }
 
+
+/* ---------------- Android 数据库查看器 ---------------- */
+
+.db-modal {
+  width: min(1180px, 94vw);
+  height: min(780px, 88vh);
+  max-width: none;
+  max-height: none;
+}
+
+.db-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.db-toolbar label {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.db-toolbar .set-input {
+  width: auto;
+  min-width: 220px;
+}
+
+#db-pkg {
+  width: 260px;
+}
+
+.db-hint {
+  color: var(--fg-dim);
+  font-size: 12px;
+  flex: 1;
+  min-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.db-side {
+  width: 300px;
+  flex: 0 0 300px;
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.db-side-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px 4px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  flex: 0 0 auto;
+}
+
+.db-files {
+  max-height: 42%;
+  overflow: auto;
+  padding: 0 8px 8px;
+  flex: 0 0 auto;
+}
+
+.db-file {
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.db-file:hover {
+  background: var(--bg-3);
+}
+
+.db-file.active {
+  background: var(--bg-4);
+}
+
+.db-file-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.db-file-size {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.db-tables {
+  flex: 1;
+  overflow: auto;
+  padding: 0 8px 8px;
+}
+
+.db-table-item {
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.db-table-item:hover {
+  background: var(--bg-3);
+}
+
+.db-table-item.active {
+  background: var(--bg-4);
+  color: var(--accent);
+}
+
+.db-work {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.db-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.db-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.db-tab:hover {
+  color: var(--fg);
+}
+
+.db-tab.active {
+  color: var(--fg);
+  background: var(--bg-3);
+  border-color: var(--line-2);
+}
+
+.db-pane {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.db-grid-wrap {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+}
+
+.db-grid {
+  border-collapse: collapse;
+  font-family: var(--mono);
+  font-size: 12px;
+  min-width: 100%;
+}
+
+.db-grid th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg-3);
+  color: var(--fg-dim);
+  text-align: left;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line-2);
+  white-space: nowrap;
+}
+
+.db-grid td {
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  max-width: 460px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.db-grid tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.db-grid td.db-null {
+  color: var(--fg-faint);
+  font-style: italic;
+}
+
+.db-pager,
+.db-sql-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--line);
+  font-size: 12px;
+  flex: 0 0 auto;
+}
+
+.db-pager .btn,
+.db-sql-bar .btn {
+  white-space: nowrap;
+}
+
+.db-status {
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.db-limit {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.db-sql {
+  width: 100%;
+  height: 110px;
+  flex: 0 0 auto;
+  resize: vertical;
+  background: var(--bg-2);
+  color: var(--fg);
+  border: none;
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.db-sql:focus {
+  background: var(--bg-3);
+}
+
+/* ---------------- 进程与端口 ---------------- */
+
+.modal.proc-modal {
+  width: min(1180px, 94vw);
+  height: min(820px, 90vh);
+  max-width: none;
+  max-height: none;
+  overflow: hidden;
+}
+
+.proc-head-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.proc-elev {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  padding: 1px 7px;
+}
+
+.proc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+
+.proc-search {
+  width: 250px;
+  flex: 0 0 auto;
+}
+
+.proc-tabbar {
+  display: inline-flex;
+  border: 1px solid var(--line-2);
+  border-radius: 5px;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+.proc-tab {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+
+.proc-tab:hover {
+  color: var(--fg);
+}
+
+.proc-tab.active {
+  background: #2f4664;
+  color: #eaf1fb;
+}
+
+.proc-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.proc-check input {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+.proc-summary {
+  padding: 4px 16px;
+  font-size: 11px;
+  color: var(--fg-faint);
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proc-main {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.proc-table-wrap {
+  flex: 1;
+  min-width: 0;
+  overflow: auto;
+}
+
+.proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.proc-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #1b1f26;
+  color: var(--fg-dim);
+  font-weight: 500;
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+
+.proc-table th[data-sort] {
+  cursor: pointer;
+  user-select: none;
+}
+
+.proc-table th[data-sort]:hover,
+.proc-table th.on {
+  color: var(--fg);
+}
+
+.proc-table td {
+  padding: 5px 10px;
+  border-bottom: 1px solid #222831;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 380px;
+}
+
+.proc-row {
+  cursor: pointer;
+}
+
+.proc-row:hover td {
+  background: #202632;
+}
+
+.proc-row.selected td {
+  background: #26344a;
+}
+
+.proc-row.sys .proc-name-cell {
+  color: #b6a582;
+}
+
+.proc-row.svc .proc-name-cell {
+  color: #b3a8c9;
+}
+
+/* 进程 / 端口表格的滚动条跟其它面板保持一致，别用系统白条 */
+.proc-table-wrap::-webkit-scrollbar,
+.proc-detail::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.proc-table-wrap::-webkit-scrollbar-thumb,
+.proc-detail::-webkit-scrollbar-thumb {
+  background: #333a46;
+  border-radius: 5px;
+}
+
+.proc-table-wrap::-webkit-scrollbar-track,
+.proc-detail::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.proc-num {
+  font-family: var(--mono);
+  color: #aab4c3;
+}
+
+.proc-mono {
+  font-family: var(--mono);
+}
+
+.proc-name-cell {
+  max-width: 430px;
+}
+
+.proc-user-cell {
+  color: var(--fg-dim);
+}
+
+.proc-ports-cell {
+  font-family: var(--mono);
+  color: #9db4d0;
+}
+
+.proc-empty {
+  text-align: center;
+  padding: 36px 0;
+  color: var(--fg-faint);
+}
+
+.proc-badge {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  line-height: 14px;
+  vertical-align: 1px;
+  border: 1px solid #3a4250;
+  color: #9aa6b6;
+}
+
+.proc-badge.system {
+  color: #d8b26a;
+  border-color: #4a3f28;
+  background: #2a2419;
+}
+
+.proc-badge.service {
+  color: #b3a2d8;
+  border-color: #3d3450;
+  background: #272236;
+}
+
+.proc-badge.dev {
+  color: #8fc9a0;
+  border-color: #31453a;
+  background: #243026;
+}
+
+.proc-badge.session {
+  color: #9db4d0;
+  border-color: #333c4d;
+  background: #283040;
+}
+
+.proc-badge.self {
+  color: #f0a0a0;
+  border-color: #4a2f33;
+  background: #3a2326;
+}
+
+.proc-detail {
+  width: 330px;
+  flex: 0 0 330px;
+  border-left: 1px solid var(--line);
+  padding: 14px 16px;
+  overflow: auto;
+  font-size: 12px;
+}
+
+.proc-detail-empty {
+  color: var(--fg-faint);
+  text-align: center;
+  padding: 40px 6px;
+  line-height: 1.8;
+}
+
+.proc-detail-empty span {
+  font-size: 11px;
+}
+
+.proc-detail-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #e3ebf5;
+  margin-bottom: 3px;
+  word-break: break-all;
+}
+
+.proc-detail-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-faint);
+  margin-bottom: 12px;
+  word-break: break-all;
+}
+
+.proc-kv {
+  display: flex;
+  gap: 10px;
+  padding: 3px 0;
+  align-items: flex-start;
+}
+
+.proc-kv > span {
+  flex: 0 0 46px;
+  color: var(--fg-faint);
+  font-size: 11.5px;
+}
+
+.proc-kv > b {
+  flex: 1;
+  min-width: 0;
+  font-weight: 400;
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.proc-path {
+  font-family: var(--mono);
+  font-size: 11px;
+  user-select: text;
+}
+
+.proc-detail-label {
+  margin: 12px 0 6px;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+
+.proc-port-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.proc-port-chip {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: #2a3040;
+  color: #9db4d0;
+  border: 1px solid #333c4d;
+}
+
+.proc-dim {
+  color: var(--fg-faint);
+}
+
+.proc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+.proc-status {
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proc-proto-cell {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.proc-proto-cell i {
+  font-style: normal;
+  font-size: 9.5px;
+  color: var(--fg-faint);
+  margin-left: 3px;
+}
+
+.proc-state {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: #242a33;
+  color: #9db4d0;
+}
+
+.proc-state.s-listen {
+  background: #243026;
+  color: #8fc9a0;
+}
+
+.proc-state.s-established {
+  background: #283040;
+  color: #9db4d0;
+}
+
+.proc-state.s-time_wait {
+  background: #2d2a22;
+  color: #c9b27f;
+}
+
+.proc-confirm {
+  z-index: 1200;
+}
+
+.proc-kill-title {
+  font-size: 14px;
+  color: #e3ebf5;
+  margin-bottom: 4px;
+}
+
+.proc-warn {
+  margin: 12px 0;
+  padding: 8px 10px;
+  border-left: 2px solid var(--red);
+  background: rgba(248, 81, 73, 0.08);
+  color: #e0a7a7;
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.proc-kill-hint {
+  margin-top: 8px;
+  min-height: 16px;
+  font-size: 11px;
+  color: #f0a0a0;
+}
+
+/* 隐藏规则：可折叠的 textarea，一行一条 */
+.proc-rules {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
+  background: #191d24;
+}.proc-rules-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+
+.proc-rules-head > span:first-child {
+  font-size: 12px;
+  font-weight: 600;
+  color: #dfe7f0;
+}
+
+.proc-rules-hint {
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+.proc-rules-input {
+  width: 100%;
+  height: 78px;
+  resize: vertical;
+  background: #151a21;
+  color: var(--fg);
+  border: 1px solid var(--line-2);
+  border-radius: 4px;
+  padding: 7px 9px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  outline: none;
+}
+
+.proc-rules-input:focus {
+  border-color: var(--accent);
+}
+
+.proc-rules-foot {
+  margin-top: 5px;
+  font-size: 10.5px;
+  color: var(--fg-faint);
+}
+
+/* 进程右键菜单：必须盖在 modal-overlay（1100）之上 */
+.proc-context {
+  z-index: 1150;
+  min-width: 250px;
+  max-width: 320px;
+}
+
+.proc-menu-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

@@ -17,18 +17,37 @@ pub struct Detected {
     pub npm: crate::model::NpmSettings,
     pub docker: crate::model::DockerSettings,
     pub editor: crate::model::EditorSettings,
+    pub git: crate::model::GitSettings,
     pub notes: Vec<String>,
 }
 
-/// 默认编辑器：只认 VS Code（Code.exe，不是 PATH 里的 code.cmd 脚本）
+/// 默认编辑器：VS Code / Zed / Sublime Text / Cursor / Notepad++。
+/// 只认 GUI 可执行文件，不选 PATH 里的 code.cmd / subl 这类启动脚本。
 fn detect_editor(notes: &mut Vec<String>) -> crate::model::EditorSettings {
     let mut out = crate::model::EditorSettings::default();
-    match crate::editor::detect(None) {
+    match crate::editor::detect_any(None) {
         Some(p) => {
-            out.vscode_path = Some(p.display().to_string());
-            notes.push("编辑器：VS Code".to_string());
+            notes.push(format!("编辑器：{}", crate::editor::display_name(&p)));
+            out.path = Some(p.display().to_string());
         }
-        None => notes.push("未检测到 VS Code".to_string()),
+        None => notes.push(
+            "未检测到编辑器（可在「编辑器」里指定 Code.exe / zed.exe / sublime_text.exe）"
+                .to_string(),
+        ),
+    }
+    out
+}
+
+/// Git 桌面客户端：目前只认 GitHub Desktop（其它客户端的路径让用户手填）。
+/// 探测结果只是提示，用户点「填写」才会写进设置——没配置时右键不显示这一项。
+fn detect_git(notes: &mut Vec<String>) -> crate::model::GitSettings {
+    let mut out = crate::model::GitSettings::default();
+    match crate::gitdesk::detect() {
+        Some(p) => {
+            out.desktop_path = Some(p.display().to_string());
+            notes.push("Git Desktop：GitHub Desktop".to_string());
+        }
+        None => notes.push("未检测到 Git Desktop（可手动指定）".to_string()),
     }
     out
 }
@@ -261,6 +280,7 @@ pub fn detect() -> Detected {
     let npm = detect_npm(&mut notes);
     let docker = detect_docker(&mut notes);
     let editor = detect_editor(&mut notes);
+    let git = detect_git(&mut notes);
     let flutter = crate::flutter::resolve(Path::new("."), None)
         .0
         .map(|p| p.display().to_string());
@@ -275,6 +295,7 @@ pub fn detect() -> Detected {
         npm,
         docker,
         editor,
+        git,
         notes,
     }
 }

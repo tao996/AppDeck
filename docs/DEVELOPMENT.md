@@ -58,7 +58,7 @@
 cd src-tauri && cargo test
 ```
 
-102 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化。
+141 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、文件夹导入（任意目录 / 导入后为空 / 不套用模板）、项目重命名（清洗 / 校验 / 失败不破坏原名）、编辑器分派（VS Code / Zed / Sublime Text / Notepad++，含旧 `vscodePath` 设置迁移）、进程与端口快照（ToolHelp + GetExtendedTcpTable、真实监听端口归属、系统目录判定、自保护）、进程面板偏好（自动刷新默认值 / 隐藏规则往返）、rename CLI 输出解析（ANSI / box 清理、引号/分号、平台过滤）、自定义命令参数解析（引号 / 空格 / 空参数）、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化、adb 设备输出 / Gradle 包名 / find 输出解析、SQLite 只读查询与分页。
 
 诊断工具：
 ```bash
@@ -75,6 +75,7 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 > - `FLA_IMPORT_MENU` / `FLA_SERVICE_MENU="<服务名>"` 展开导入菜单 / 服务右键菜单
 > - `FLA_IMPORT_PKG="<package.json>"` / `FLA_IMPORT_COMPOSE="<compose>"` / `FLA_REIMPORT_DOCKER=1`
 > - `FLA_RERUN=1` 对恢复的第一个会话触发重跑 / `FLA_DOCTOR_DETAIL` / `FLA_FILING`
+> - `FLA_DB="<项目ID>"` 打开 Android 数据库查看器（走与右键菜单相同的代码路径）
 > - `FLA_OPEN_LOCATION="<cwd>|<文本>"` 走一遍"点路径"的完整链路（开编辑器 / 系统程序）
 > - `FLA_COLLAPSE="<项目id>,<项目id>"` 模拟折叠若干项目（走和点击相同的代码路径）
 > - `FLA_OPEN_DIR="<项目id>"` 用编辑器打开该项目目录（等同右键「用编辑器打开目录」）
@@ -115,6 +116,7 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 │   ├── src/terminal.rs         终端选择 / 命令行方言 / 可执行文件解析
 │   ├── src/pty.rs              ConPTY 会话（UTF-8 流解码 / DSR 应答 / Job Object）
 │   ├── src/daemon.rs           flutter daemon 客户端（设备 / 模拟器 / 热插拔）
+│   ├── src/android_db.rs       Android SQLite 只读快照（adb run-as / WAL / 只读 SQL）
 │   ├── src/apksig.rs           APK 签名块解析（备案公钥 / MD5）
 │   ├── src/doctor.rs           flutter doctor 体检
 │   ├── src/bin/pty_probe.rs    ConPTY 诊断探针

@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, confirm } from "@tauri-apps/plugin-dialog";
+import { open, confirm, save } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openProcessManager } from "./process-manager";
 import {
   isPermissionGranted,
   requestPermission,
@@ -22,6 +23,9 @@ import "@xterm/xterm/css/xterm.css";
 
 /** 产品名：与 tauri.conf.json 的 productName、Cargo 包名保持一致 */
 const APP_NAME = "AppDeck";
+
+/** 前端打包时间（vite.config.ts 的 define 注入）；与 exe mtime 取较大值 */
+declare const __BUILD_TIME__: string;
 
 // harmony：鸿蒙工程改用 flutter_flutter 分支（后端 resolve_for_project 的返回值）
 type FlutterSource = "fvm" | "custom" | "path" | "harmony" | "none";
@@ -125,8 +129,12 @@ interface SettingsModel {
     composeStyle: string | null;
   };
   editor: {
-    /** Code.exe 的完整路径；留空自动探测 */
-    vscodePath: string | null;
+    /** 编辑器 exe 的完整路径（Code.exe / zed.exe / sublime_text.exe…）；留空自动探测 */
+    path: string | null;
+  };
+  git: {
+    /** Git 桌面客户端（GitHub Desktop 等）exe 路径；留空则项目右键不显示入口 */
+    desktopPath: string | null;
   };
 }
 
@@ -135,9 +143,11 @@ interface ProjectFiles {
   packageJson: string | null;
   /** compose 文件的完整路径（名字可能是 .yml / .yaml / compose.*） */
   compose: string | null;
+  /** 有没有 Android 工程（决定是否显示「数据库…」） */
+  android: boolean;
 }
 
-/** 用默认编辑器（VS Code）打开一个文件 */
+/** 用默认编辑器打开一个文件 */
 async function editFile(path: string): Promise<void> {
   try {
     await invoke("open_in_editor", { path, line: null, col: null });
@@ -175,6 +185,7 @@ interface Detected {
   npm: SettingsModel["npm"];
   docker: SettingsModel["docker"];
   editor: SettingsModel["editor"];
+  git: SettingsModel["git"];
   notes: string[];
 }
 
@@ -234,6 +245,8 @@ interface AllEmulators {
   harmony: EmulatorEntry[];
   /** 已连接的真机（手机 / 桌面 / 浏览器）；后端每次现查，不缓存 */
   devices?: ConnectedDevice[];
+  /** 上面这份设备列表的查询时间（毫秒时间戳） */
+  devicesAt?: number;
   notes: string[];
 }
 
@@ -249,13 +262,36 @@ interface ConnectedDevice {
   isConnected?: boolean | null;
 }
 
+/** 工具栏自定义命令（全局，不绑定项目） */
+interface CustomCommand {
+  id: string;
+  name: string;
+  /** 用户选择的 .lnk / .exe */
+  program: string;
+  /** 快捷方式解析出的真实 exe */
+  target: string | null;
+  /** 原始命令行参数（快捷方式参数也在这里） */
+  args: string;
+  cwd: string | null;
+}
+
 interface State {
   schemaVersion: number;
   settings: SettingsModel;
   projects: Proj[];
   commandTemplates: Cmd[];
-  /** 纯界面状态：项目折叠等 */
-  ui?: { collapsedProjects?: string[] };
+  /** 工具栏自定义命令 */
+  customCommands?: CustomCommand[];
+  /** 纯界面状态：项目折叠、进程面板偏好等 */
+  ui?: {
+    collapsedProjects?: string[];
+    /** 进程面板隐藏规则：程序名包含任一规则就不显示 */
+    processHideRules?: string[];
+    /** 隐藏规则是否生效（缺省视为启用） */
+    processHideRulesEnabled?: boolean;
+    /** 进程面板是否自动刷新（缺省视为开启） */
+    processAutoRefresh?: boolean;
+  };
 }
 
 function defaultSettings(): SettingsModel {
@@ -280,7 +316,8 @@ function defaultSettings(): SettingsModel {
     terminal: { path: null },
     npm: { manager: null, nodePath: null },
     docker: { dockerPath: null, composeStyle: null },
-    editor: { vscodePath: null },
+    editor: { path: null },
+    git: { desktopPath: null },
   };
 }
 
@@ -349,6 +386,8 @@ interface TermSession {
   id: string;
   title: string;
   device: string;
+  /** 会话根进程 PID（恢复自磁盘的会话没有） */
+  pid?: number;
   mode: string;
   kind: string;
   cwd: string;
@@ -365,6 +404,8 @@ interface TermSession {
   projectId?: string;
   commandId?: string;
   templateId?: string;
+  /** 工具栏自定义命令：重跑/恢复用 */
+  customCommandId?: string;
   /** 派生动作来源（平台菜单）：重跑时按平台重新解析设备 */
   platform?: string;
   action?: string;
@@ -388,7 +429,13 @@ let state: State = {
   settings: defaultSettings(),
   projects: [],
   commandTemplates: [],
-  ui: { collapsedProjects: [] },
+  customCommands: [],
+  ui: {
+    collapsedProjects: [],
+    processHideRules: [],
+    processHideRulesEnabled: true,
+    processAutoRefresh: true,
+  },
 };
 const flutterInfo = new Map<string, FlutterInfo>();
 const collapsed = new Set<string>();
@@ -644,7 +691,7 @@ async function locateAt(cwd: string, text: string): Promise<Location | null> {
   return res;
 }
 
-/** 打开一处位置：源码交给 VS Code 跳行列，其他交给系统默认程序 */
+/** 打开一处位置：源码交给默认编辑器跳行列，其他交给系统默认程序 */
 async function openLocation(cwd: string, raw: string): Promise<void> {
   const loc = await locateAt(cwd, raw);
   if (!loc?.path) {
@@ -753,7 +800,7 @@ function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
     body.appendChild(el);
   };
 
-  item("用编辑器打开", "VS Code，定位到对应行", () => void openLocation(cwd, raw));
+  item("用编辑器打开", "用默认编辑器，定位到对应行", () => void openLocation(cwd, raw));
   item("在资源管理器中定位", "选中该文件", () => void revealLocation(cwd, raw));
   item("复制路径", "", () => {
     void navigator.clipboard?.writeText(raw).catch(() => undefined);
@@ -845,6 +892,8 @@ function ensureTerm(s: TermSession): void {
     cursorBlink: true,
     cursorStyle: "bar",
     scrollback: 10000,
+    // 用户按方向键 / 输入时，如果当前在看历史，自动回到光标处
+    scrollOnUserInput: true,
     theme: termTheme,
     allowProposedApi: true,
   });
@@ -945,8 +994,9 @@ function updateControls(): void {
   const tools = req<HTMLSpanElement>("#flutter-tools");
   tools.hidden = !running;
 
-  // 普通终端不需要「停止」「重跑」——它就是个 shell，关标签即可
-  req<HTMLSpanElement>("#session-tools").hidden = s?.kind === "terminal";
+  // 普通命令也跑在「项目常驻终端」里：停止 / 重跑 / 搜索 / 清空 都应当可用。
+  // 停止对终端是发 Ctrl+C（不关 shell），重跑是中断后带 Enter 再执行。
+  req<HTMLSpanElement>("#session-tools").hidden = false;
 
   req<HTMLButtonElement>("#btn-reload").disabled = !running;
   req<HTMLButtonElement>("#btn-restart").disabled = !running;
@@ -958,13 +1008,33 @@ function updateControls(): void {
   // 项目目录：有会话且有 cwd 才能用编辑器打开
   req<HTMLButtonElement>("#btn-open-proj").disabled = !s?.cwd;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
-  // 可重跑的会话：命令 / 模板 / 平台动作。
-  // 终端不算——它的"重跑"只是新开一个窗口，容易和"恢复现场"混淆，所以不提供。
+  // 可重跑的会话：自定义命令 / 命令 / 模板 / 平台动作。
+  // 终端：必须执行过命令，且 shell 已经恢复（restored 时还没活过来）。
+  // 其他：恢复或已停止的会话才显示重跑，避免误以为能热重启。
   rerun.disabled = !(
     s &&
-    (s.restored || s.status === "stopped") &&
-    (s.commandId || s.templateId || (s.platform && s.action))
+    (s.kind === "custom"
+      ? Boolean(s.customCommandId)
+      : s.kind === "terminal"
+        ? Boolean(s.commandId) && !s.restored
+        : (s.restored || s.status === "stopped") &&
+          Boolean(s.commandId || s.templateId || (s.platform && s.action)))
   );
+
+  // 终端里的「停止」是 Ctrl+C 中断当前命令，不结束 shell；自定义命令直接结束进程
+  const stopBtn = req<HTMLButtonElement>("#btn-stop");
+  stopBtn.title =
+    s?.kind === "terminal"
+      ? "中断当前命令（发送 Ctrl+C）；不会关闭终端"
+      : s?.kind === "custom"
+        ? "结束自定义命令进程（保留标签与历史）"
+        : "停止当前会话";
+  rerun.title =
+    s?.kind === "terminal"
+      ? "中断当前命令并立即重跑（自动回车）"
+      : s?.kind === "custom"
+        ? "结束当前进程并重新启动这条自定义命令"
+        : "重新执行原命令";
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
 
@@ -1098,7 +1168,7 @@ function renderTree(): void {
       <div class="empty-tree">
         <div class="et-big">＋</div>
         <div class="et-title">还没有项目</div>
-        <div class="et-sub">点击上方「添加 Flutter 项目」<br/>选择一个含 <code>pubspec.yaml</code> 的目录<br/>或含 <code>.vscode/launch.json</code> 的工作区</div>
+        <div class="et-sub">点击上方「添加 Flutter 项目」选择工程目录<br/>或在「导入 ▾」里「添加文件夹 / 目录」挂一个空目录<br/>再用「添加命令」或「从模板导入」补充</div>
       </div>`;
     return;
   }
@@ -1111,7 +1181,9 @@ function renderTree(): void {
     box.className = "proj";
 
     const isCollapsed = collapsed.has(p.id);
-    const info = flutterInfo.get(p.id);
+    // 文件夹项目不参与 Flutter 探测：没有 pubspec，显示「检测中… / 不可用」只会误导
+    const isFolder = p.kind === "folder";
+    const info = isFolder ? undefined : flutterInfo.get(p.id);
     const failed = info != null && !info.ok;
     const loading = info == null;
 
@@ -1129,15 +1201,24 @@ function renderTree(): void {
     const hasDocker = p.commands.some((c) => c.source === "docker");
     const only = (src: string): boolean =>
       p.commands.length > 0 && p.commands.every((c) => c.source === src);
-    const kindLabel =
-      p.kind === "single"
+    const kindLabel = isFolder
+      ? "文件夹"
+      : p.kind === "single"
         ? "应用"
         : only("docker")
           ? "Docker"
           : only("npm")
             ? "Npm"
             : "工作区";
-    const kindIcon = p.kind === "single" ? "📁" : hasDocker ? "🐳" : hasNpm ? "📦" : "🗂";
+    const kindIcon = isFolder
+      ? "📂"
+      : p.kind === "single"
+        ? "📁"
+        : hasDocker
+          ? "🐳"
+          : hasNpm
+            ? "📦"
+            : "🗂";
 
     head.innerHTML = `
       <span class="chev">${isCollapsed ? "▸" : "▾"}</span>
@@ -1145,15 +1226,20 @@ function renderTree(): void {
       <span class="pname">${esc(projectLabel(p))}</span>
       <span class="pmeta">
         <span class="chip kind-${p.kind}">${kindLabel}</span>
-        <span class="chip ${chipCls}">${esc(chipTxt)}</span>
+        ${
+          isFolder
+            ? ""
+            : `<span class="chip ${chipCls}">${esc(chipTxt)}</span>
         ${info?.fvmVersion ? `<span class="chip chip-fvm" title="FVM 工程（.fvmrc 声明 ${esc(info.fvmVersion)}）">FVM</span>` : ""}
-        ${verTxt ? `<span class="fver">${esc(verTxt)}</span>` : ""}
+        ${verTxt ? `<span class="fver">${esc(verTxt)}</span>` : ""}`
+        }
+        <button class="proj-edit" title="重命名项目（只改显示名）">✎</button>
         <button class="proj-x" title="移除项目">×</button>
       </span>
     `;
 
     head.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".proj-x")) return;
+      if ((e.target as HTMLElement).closest(".proj-x, .proj-edit")) return;
       if (collapsed.has(p.id)) collapsed.delete(p.id);
       else collapsed.add(p.id);
       renderTree();
@@ -1165,6 +1251,11 @@ function renderTree(): void {
       e.preventDefault();
       e.stopPropagation();
       openProjectMenu(e, p);
+    });
+
+    head.querySelector(".proj-edit")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void renameProject(p);
     });
 
     head.querySelector(".proj-x")?.addEventListener("click", (e) => {
@@ -1179,7 +1270,7 @@ function renderTree(): void {
       list.className = "cmds";
 
       // Flutter 项目空命令是正常状态（能力在右键「平台 → 动作」），不提示；
-      // 命令集为空说明没导进来，才需要一句引导
+      // 文件夹项目也不提示（用户明确要求去掉）；只有命令集为空才给一句引导
       if (p.commands.length === 0 && p.kind === "workspace") {
         const hint = document.createElement("div");
         hint.className = "cmd hint";
@@ -1342,6 +1433,7 @@ function mountSession(
     projectId?: string;
     commandId?: string;
     templateId?: string;
+    customCommandId?: string;
     platform?: string;
     action?: string;
     target?: string;
@@ -1350,6 +1442,7 @@ function mountSession(
   const session: TermSession = {
     id: res.id,
     title: res.title,
+    pid: res.pid,
     device: res.device,
     mode,
     kind,
@@ -1363,6 +1456,7 @@ function mountSession(
     projectId: origin?.projectId,
     commandId: origin?.commandId,
     templateId: origin?.templateId,
+    customCommandId: origin?.customCommandId,
     platform: origin?.platform,
     action: origin?.action,
     target: origin?.target,
@@ -1424,8 +1518,8 @@ function projectShell(p: Proj): TermSession | undefined {
 }
 
 /** 把一条命令打进项目的常驻终端：有就复用，没有就新开一个 shell */
-async function runInTerminal(p: Proj, c: Cmd): Promise<void> {
-  const existing = projectShell(p);
+async function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<void> {
+  const existing = reuse ?? projectShell(p);
   try {
     const res = await invoke<StartResponse>("run_in_terminal", {
       projectId: p.id,
@@ -1436,11 +1530,13 @@ async function runInTerminal(p: Proj, c: Cmd): Promise<void> {
     });
 
     if (res.reused && existing) {
+      // 记住「这个 shell 最近一次执行的是哪条命令」，重跑按钮据此可用
+      existing.commandId = c.id;
       activateSession(existing.id);
       return;
     }
 
-    mountSession(res, "terminal", "debug", { projectId: p.id });
+    mountSession(res, "terminal", "debug", { projectId: p.id, commandId: c.id });
   } catch (e) {
     toast(String(e), "error");
   }
@@ -1475,10 +1571,16 @@ async function stopActive(): Promise<void> {
   const s = activeSession();
   if (!s) return;
 
-  // 终端是 shell，没有 flutter run 的 `q` 退出键。发 q 只会往命令行里打一个字母，
-  // 5 秒后再被强制关闭——看起来就像"输了 q 然后崩了"。直接结束进程即可。
+  // 自定义命令是直接进程，没有 shell 可回；结束进程但保留标签与历史
+  if (s.kind === "custom") {
+    await invoke("kill_session", { id: s.id }).catch(() => {});
+    return;
+  }
+
+  // 项目终端的「停止」只中断当前命令，不关 shell：
+  // go run / flutter 等长命令按 Ctrl+C 就会回到提示符，历史和环境都还在。
   if (s.kind === "terminal") {
-    await closeSession(s.id);
+    await invoke("write_session", { id: s.id, data: "\x03" }).catch(() => {});
     return;
   }
 
@@ -1526,6 +1628,44 @@ async function addProject(): Promise<void> {
       await importLaunch(added.id, true);
     }
     void refreshFlutter(added.id);
+  } catch (e) {
+    const msg = String(e);
+    // 普通目录不是"错误"：指一下新加的文件夹入口，别让人以为程序坏了
+    toast(
+      msg.includes("不是 Flutter 项目")
+        ? `${msg}；若只想挂任意目录，请用「导入 → 添加文件夹 / 目录」`
+        : msg,
+      "error",
+    );
+  }
+}
+
+/** 添加一个普通文件夹/目录：不解析任何配置，导入后命令列表为空 */
+async function addFolder(): Promise<void> {
+  let picked: string | string[] | null = null;
+  try {
+    picked = await open({
+      directory: true,
+      multiple: false,
+      title: "选择要添加的文件夹 / 目录",
+      defaultPath: lastImportDir ?? state.projects[0]?.path ?? undefined,
+    });
+  } catch (e) {
+    toast(`打开目录选择器失败：${String(e)}`, "error");
+    return;
+  }
+  if (!picked) return;
+
+  const path = Array.isArray(picked) ? picked[0] : picked;
+  if (!path) return;
+  lastImportDir = path;
+
+  try {
+    state = await invoke<State>("add_folder", { path });
+    render();
+    const added = state.projects[state.projects.length - 1];
+    // 刻意不探测 flutter、也不自动导入 launch.json：空文件夹就是空文件夹
+    toast(`已添加文件夹「${added.name}」，用「添加命令」或「从模板导入」补充`);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -1752,7 +1892,843 @@ async function removeProject(p: Proj): Promise<void> {
   }
 }
 
+/**
+ * 重命名项目：只改显示名，不动磁盘目录。
+ *
+ * 不做原生 prompt（没装 dialog 的 prompt 能力），用一个轻量输入弹窗；
+ * 回车保存、Esc 取消。名称的最终清洗在后端（`ops::rename_project_in`）。
+ */
+async function renameProject(p: Proj): Promise<void> {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 460px">
+      <div class="modal-head">
+        <span>重命名项目</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="set-row">
+          <label>项目名称</label>
+          <input
+            class="set-input"
+            id="rename-input"
+            maxlength="60"
+            spellcheck="false"
+            autocomplete="off"
+          />
+        </div>
+        <div class="set-desc" id="rename-path"></div>
+        <div class="set-desc">只改显示名，不会重命名磁盘上的文件夹。</div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="rename-hint"></span>
+        <span class="flex1"></span>
+        <button class="btn" id="rename-cancel">取消</button>
+        <button class="btn primary" id="rename-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const input = overlay.querySelector("#rename-input") as HTMLInputElement;
+  const hint = overlay.querySelector("#rename-hint") as HTMLSpanElement;
+  const pathEl = overlay.querySelector("#rename-path") as HTMLDivElement;
+
+  input.value = p.name;
+  pathEl.textContent = p.path;
+  pathEl.title = p.path;
+  pathEl.style.overflowWrap = "anywhere";
+
+  const close = (): void => overlay.remove();
+
+  const save = (): void => {
+    void (async () => {
+      const name = input.value.trim();
+      if (!name) {
+        hint.textContent = "请填写项目名称";
+        return;
+      }
+      if (name === p.name) {
+        close();
+        return;
+      }
+
+      try {
+        const oldName = p.name;
+        state = await invoke<State>("rename_project", { id: p.id, name });
+        // 已打开标签的标题是后端拼的「项目名 · 命令/终端」，同步改掉前缀
+        let touched = false;
+        for (const s of sessions) {
+          if (s.projectId === p.id && s.title.startsWith(oldName)) {
+            s.title = name + s.title.slice(oldName.length);
+            touched = true;
+          }
+        }
+        // 顺手把会话日志里的标题也落盘，重启后恢复出来的标签不会还是旧名字
+        if (touched) schedulePersist();
+        close();
+        render();
+        toast(`已重命名：${oldName} → ${name}`);
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  };
+
+  overlay.querySelector(".modal-x")?.addEventListener("click", close);
+  overlay.querySelector("#rename-cancel")?.addEventListener("click", close);
+  overlay.querySelector("#rename-save")?.addEventListener("click", save);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+  input.addEventListener("keydown", (e) => {
+    // 别让 Esc / 回车漏给全局快捷键或终端
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      save();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  input.focus();
+  input.select();
+}
+
+/* ---------------- Flutter 重命名（rename CLI） ---------------- */
+
+interface FlutterRenameStatus {
+  installed: boolean;
+  version: string | null;
+  onPath: boolean;
+  exe: string | null;
+  pubBin: string;
+  flutter: string | null;
+  flutterSource: string;
+  error: string | null;
+}
+
+interface FlutterRenameActivation {
+  status: FlutterRenameStatus;
+  log: string;
+}
+
+interface FlutterRenameInfo {
+  projectName: string;
+  projectPath: string;
+  platforms: string[];
+  bundleIds: Record<string, string | null>;
+  appNames: Record<string, string | null>;
+  log: string;
+}
+
+interface FlutterRenameApply {
+  ok: boolean;
+  command: string;
+  log: string;
+  values: Record<string, string | null>;
+}
+
+const RENAME_PLATFORM_LABELS: Record<string, string> = {
+  android: "Android",
+  ios: "iOS",
+  macos: "macOS",
+  linux: "Linux",
+  web: "Web",
+  windows: "Windows",
+};
+
+type RenameAction = "bundle" | "name";
+
+/**
+ * Flutter 重命名面板：读取/修改包名与应用名称。
+ * 实际执行 `rename setBundleId/setAppName --targets ... --value ...`。
+ */
+async function openFlutterRename(p: Proj): Promise<void> {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal fl-rename-modal">
+      <div class="modal-head">
+        <span>Flutter 重命名 · ${esc(p.name)}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="rename-banner" id="flr-banner">正在检查 rename CLI…</div>
+        <div class="rename-warning">
+          会直接修改项目里的包名 / 应用名称；建议先提交 Git。
+          只修改勾选的平台，未勾选的平台保持原样。
+        </div>
+        <div id="flr-body"></div>
+        <pre class="rename-log" id="flr-log" hidden></pre>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-hint" id="flr-hint"></span>
+        <span class="flex1"></span>
+        <button class="btn" id="flr-close">关闭</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const body = overlay.querySelector("#flr-body") as HTMLDivElement;
+  const banner = overlay.querySelector("#flr-banner") as HTMLDivElement;
+  const logEl = overlay.querySelector("#flr-log") as HTMLPreElement;
+  const hint = overlay.querySelector("#flr-hint") as HTMLSpanElement;
+
+  const close = (): void => overlay.remove();
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#flr-close") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+
+  const setBanner = (kind: "ok" | "warn" | "bad", text: string): void => {
+    banner.className = `rename-banner ${kind}`;
+    banner.textContent = text;
+  };
+
+  const showLog = (text: string): void => {
+    logEl.hidden = false;
+    logEl.textContent = text;
+  };
+
+  let status: FlutterRenameStatus;
+  try {
+    status = await invoke<FlutterRenameStatus>("rename_status");
+  } catch (e) {
+    setBanner("bad", `检查 rename 失败：${String(e)}`);
+    return;
+  }
+
+  if (!status.installed) {
+    setBanner(
+      "bad",
+      `未安装 rename。请执行 flutter pub global activate rename，或到「设置 → Flutter」里安装。` +
+        (status.pubBin ? `\npub bin：${status.pubBin}` : "") +
+        (status.error ? `\n${status.error}` : ""),
+    );
+    const go = document.createElement("button");
+    go.className = "btn";
+    go.textContent = "打开设置 → Flutter";
+    go.addEventListener("click", () => {
+      close();
+      openSettings();
+    });
+    body.appendChild(go);
+    return;
+  }
+
+  setBanner(
+    status.onPath ? "ok" : "warn",
+    status.onPath
+      ? `rename ${status.version ?? ""} 已就绪${status.exe ? `（${status.exe}）` : ""}`
+      : `rename ${status.version ?? ""} 已安装，但不在 PATH。AppDeck 会用\n` +
+          `${status.exe ?? status.pubBin} 直接调用；想在终端里直接输入 rename，请把 ${status.pubBin} 加入 PATH。`,
+  );
+
+  let info: FlutterRenameInfo;
+  const loading = document.createElement("div");
+  loading.className = "set-desc";
+  loading.textContent = "正在读取当前包名 / 应用名称…";
+  body.appendChild(loading);
+  try {
+    info = await invoke<FlutterRenameInfo>("rename_project_info", { projectId: p.id });
+  } catch (e) {
+    loading.remove();
+    setBanner("bad", `读取包名/应用名称失败：${String(e)}`);
+    showLog(String(e));
+    return;
+  }
+  loading.remove();
+
+  const pathLine = document.createElement("div");
+  pathLine.className = "set-desc rename-path";
+  pathLine.textContent = info.projectPath;
+  pathLine.title = info.projectPath;
+  body.appendChild(pathLine);
+
+  const commonValue = (
+    map: Record<string, string | null>,
+    targets: string[],
+  ): string => {
+    const vals = targets.map((t) => (map[t] ?? "").trim()).filter(Boolean);
+    if (vals.length !== targets.length) return "";
+    return vals.every((v) => v === vals[0]) ? vals[0] : "";
+  };
+
+  const makeSection = (
+    action: RenameAction,
+    title: string,
+    desc: string,
+    map: Record<string, string | null>,
+  ): void => {
+    // rename 3.1.0 对包名只支持 android/ios/macos；应用名称支持全部。
+    // 以「读到的平台」为准，避免用户勾选后必然报错的平台。
+    const sectionPlatforms = info.platforms.filter((x) => map[x] != null);
+    if (!sectionPlatforms.length) return;
+
+    const section = document.createElement("div");
+    section.className = "rename-section";
+
+    const head = document.createElement("div");
+    head.className = "rename-head";
+    const h = document.createElement("h3");
+    h.textContent = title;
+    const d = document.createElement("span");
+    d.className = "set-desc";
+    d.textContent = desc;
+    head.append(h, d);
+    section.appendChild(head);
+
+    const preferred = sectionPlatforms.filter((x) => x === "android" || x === "ios");
+    const selected = new Set<string>(
+      preferred.length ? preferred : sectionPlatforms.slice(0, 1),
+    );
+    let userEdited = false;
+
+    const current = document.createElement("div");
+    current.className = "rename-current";
+    section.appendChild(current);
+
+    const row = document.createElement("div");
+    row.className = "set-row";
+    const lab = document.createElement("label");
+    lab.textContent = action === "bundle" ? "新包名" : "新名称";
+    const cell = document.createElement("div");
+    cell.className = "set-cell";
+    const input = document.createElement("input");
+    input.className = "set-input";
+    input.spellcheck = false;
+    input.value = commonValue(map, [...selected]);
+    input.placeholder =
+      action === "bundle" ? "如 com.example.app" : "如 Today";
+    cell.appendChild(input);
+    row.append(lab, cell);
+    section.appendChild(row);
+
+    const platforms = document.createElement("div");
+    platforms.className = "rename-platforms";
+    for (const p2 of sectionPlatforms) {
+      const l = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.value = p2;
+      cb.checked = selected.has(p2);
+      cb.addEventListener("change", () => {
+        if (cb.checked) selected.add(p2);
+        else selected.delete(p2);
+        fillFromCommon();
+        sync();
+      });
+      l.append(cb, document.createTextNode(RENAME_PLATFORM_LABELS[p2] ?? p2));
+      platforms.appendChild(l);
+    }
+    section.appendChild(platforms);
+
+    const skipped = info.platforms.filter((x) => !sectionPlatforms.includes(x));
+    if (skipped.length) {
+      const note = document.createElement("div");
+      note.className = "set-desc";
+      note.textContent = `rename 3.1.0 没有提供这些平台的该操作：${skipped
+        .map((x) => RENAME_PLATFORM_LABELS[x] ?? x)
+        .join(" / ")}`;
+      section.appendChild(note);
+    }
+
+    const cmd = document.createElement("code");
+    cmd.className = "rename-cmd";
+    section.appendChild(cmd);
+
+    const actions = document.createElement("div");
+    actions.className = "rename-actions";
+    const btn = document.createElement("button");
+    btn.className = "btn primary";
+    btn.textContent = action === "bundle" ? "更新包名" : "更新名称";
+    actions.appendChild(btn);
+    section.appendChild(actions);
+
+    const targetsNow = (): string[] => sectionPlatforms.filter((x) => selected.has(x));
+    const commandText = (): string => {
+      const targets = targetsNow();
+      const value = input.value.trim() || "…";
+      const cmdName = action === "bundle" ? "setBundleId" : "setAppName";
+      return `rename ${cmdName} --targets ${targets.join(",") || "…"} --value "${value}"`;
+    };
+
+    const sync = (): void => {
+      const targets = targetsNow();
+      current.textContent =
+        "当前：" +
+        (targets.length
+          ? targets
+              .map((t) => `${RENAME_PLATFORM_LABELS[t] ?? t}=${map[t] ?? "读取失败"}`)
+              .join("  ·  ")
+          : "未选择平台");
+      cmd.textContent = commandText();
+      btn.disabled = targets.length === 0 || !input.value.trim();
+    };
+    // 切换平台时，只有在用户没改过输入框的情况下才用当前值补空
+    const fillFromCommon = (): void => {
+      if (userEdited || input.value.trim()) return;
+      const common = commonValue(map, targetsNow());
+      if (common) input.value = common;
+    };
+    input.addEventListener("input", () => {
+      userEdited = true;
+      sync();
+    });
+    btn.addEventListener("click", () => {
+      void (async () => {
+        const targets = targetsNow();
+        const value = input.value.trim();
+        hint.textContent = "";
+        if (!targets.length) {
+          hint.textContent = "请选择至少一个平台";
+          return;
+        }
+        if (!value) {
+          hint.textContent = "请填写新值";
+          return;
+        }
+        if (action === "bundle" && /\s/.test(value)) {
+          hint.textContent = "包名不能包含空格";
+          return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = "更新中…";
+        showLog(`$ ${commandText()}\n\n执行中…`);
+
+        try {
+          const res = await invoke<FlutterRenameApply>("rename_apply", {
+            projectId: p.id,
+            action,
+            targets,
+            value,
+          });
+          for (const [k, v] of Object.entries(res.values)) {
+            if (v) map[k] = v;
+          }
+          showLog(`$ ${res.command}\n\n${res.log}`);
+          sync();
+          toast(`已更新${title}（${targets.join(", ")}）`);
+        } catch (e) {
+          showLog(`$ ${commandText()}\n\n${String(e)}`);
+          toast(String(e), "error");
+        } finally {
+          btn.disabled = false;
+          btn.textContent = action === "bundle" ? "更新包名" : "更新名称";
+        }
+      })();
+    });
+
+    body.appendChild(section);
+    sync();
+  };
+
+  makeSection(
+    "bundle",
+    "包名（Bundle ID）",
+    "Android applicationId / iOS PRODUCT_BUNDLE_IDENTIFIER 等",
+    info.bundleIds,
+  );
+  makeSection(
+    "name",
+    "应用名称",
+    "桌面图标与安装后显示的应用名称",
+    info.appNames,
+  );
+}
+
+/* ---------------- 工具栏自定义命令 ---------------- */
+
+interface ShortcutInfo {
+  target: string;
+  args: string;
+  cwd: string;
+  description: string;
+}
+
+function basename(p: string): string {
+  return p.split(/[\\/]/).filter(Boolean).pop() ?? p;
+}
+
+async function runCustomCommand(c: CustomCommand, replaceId?: string): Promise<void> {
+  try {
+    const res = await invoke<StartResponse>("start_custom_command", {
+      commandId: c.id,
+      rows: 30,
+      cols: 100,
+    });
+    mountSession(res, "custom", "—", { customCommandId: c.id });
+    if (replaceId) await closeSession(replaceId);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+async function deleteCustomCommand(c: CustomCommand): Promise<void> {
+  const ok = await confirm(`删除自定义命令「${c.name}」？`, {
+    title: "删除自定义命令",
+    kind: "warning",
+  });
+  if (!ok) return;
+  try {
+    state = await invoke<State>("remove_custom_command", { id: c.id });
+    closeAllMenus();
+    toast(`已删除：${c.name}`);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> {
+  const draft = {
+    name: existing?.name ?? "",
+    program: existing?.program ?? "",
+    target: existing?.target ?? "",
+    args: existing?.args ?? "",
+    cwd: existing?.cwd ?? "",
+  };
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" style="width: 700px">
+      <div class="modal-head">
+        <span>${existing ? "编辑自定义命令" : "添加自定义命令"}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="set-row">
+          <label>名称</label>
+          <div class="set-cell">
+            <input class="set-input" id="cc-name" maxlength="60" placeholder="如 NPC 服务" />
+          </div>
+        </div>
+        <div class="set-row">
+          <label>程序 / 快捷方式</label>
+          <div class="set-cell">
+            <input class="set-input" id="cc-program" placeholder="选择 .lnk / .exe，或直接填路径" spellcheck="false" />
+            <button class="btn" id="cc-browse">浏览…</button>
+            <button class="btn" id="cc-resolve">解析快捷方式</button>
+          </div>
+        </div>
+        <div class="set-desc" id="cc-target"></div>
+        <div class="set-row">
+          <label>参数</label>
+          <div class="set-cell">
+            <input class="set-input" id="cc-args" placeholder="原样传给程序；快捷方式会自动填入" spellcheck="false" />
+          </div>
+        </div>
+        <div class="set-row">
+          <label>工作目录</label>
+          <div class="set-cell">
+            <input class="set-input" id="cc-cwd" placeholder="可空；快捷方式会自动填入" spellcheck="false" />
+            <button class="btn" id="cc-browse-cwd">浏览…</button>
+          </div>
+        </div>
+        <div class="set-desc">
+          直接启动目标程序（.lnk 会先解析成 exe），不经过 ShellExecute，
+          因此不会弹出系统控制台，也不会在任务栏多一个窗口。
+        </div>
+        <div class="set-desc" id="cc-hint"></div>
+      </div>
+      <div class="modal-foot">
+        <span class="modal-hint">快捷方式参数里的引号会自动去掉再传给目标</span>
+        <span class="flex1"></span>
+        <button class="btn" id="cc-cancel">取消</button>
+        <button class="btn primary" id="cc-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const nameEl = overlay.querySelector("#cc-name") as HTMLInputElement;
+  const programEl = overlay.querySelector("#cc-program") as HTMLInputElement;
+  const argsEl = overlay.querySelector("#cc-args") as HTMLInputElement;
+  const cwdEl = overlay.querySelector("#cc-cwd") as HTMLInputElement;
+  const targetEl = overlay.querySelector("#cc-target") as HTMLDivElement;
+  const hint = overlay.querySelector("#cc-hint") as HTMLDivElement;
+  const saveBtn = overlay.querySelector("#cc-save") as HTMLButtonElement;
+
+  nameEl.value = draft.name;
+  programEl.value = draft.program;
+  argsEl.value = draft.args;
+  cwdEl.value = draft.cwd;
+  nameEl.addEventListener("input", () => (draft.name = nameEl.value));
+  programEl.addEventListener("input", () => {
+    draft.program = programEl.value.trim();
+    if (!draft.program.toLowerCase().endsWith(".lnk")) draft.target = "";
+    renderTarget();
+  });
+  argsEl.addEventListener("input", () => (draft.args = argsEl.value));
+  cwdEl.addEventListener("input", () => (draft.cwd = cwdEl.value.trim()));
+
+  const renderTarget = (): void => {
+    if (draft.target) {
+      targetEl.textContent = `目标：${draft.target}`;
+      targetEl.title = draft.target;
+    } else if (draft.program.toLowerCase().endsWith(".lnk")) {
+      targetEl.textContent = "快捷方式尚未解析；保存或运行时会自动解析。";
+    } else {
+      targetEl.textContent = "";
+    }
+  };
+  renderTarget();
+
+  const resolve = async (): Promise<boolean> => {
+    const program = programEl.value.trim();
+    if (!program.toLowerCase().endsWith(".lnk")) {
+      draft.target = "";
+      renderTarget();
+      return true;
+    }
+    hint.textContent = "正在解析快捷方式…";
+    try {
+      const info = await invoke<ShortcutInfo>("resolve_shortcut", { path: program });
+      draft.program = program;
+      draft.target = info.target;
+      draft.args = info.args;
+      draft.cwd = info.cwd;
+      argsEl.value = draft.args;
+      cwdEl.value = draft.cwd;
+      hint.textContent = "";
+      renderTarget();
+      return true;
+    } catch (e) {
+      hint.textContent = String(e);
+      return false;
+    }
+  };
+
+  const close = (): void => overlay.remove();
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  (overlay.querySelector("#cc-cancel") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+  });
+
+  (overlay.querySelector("#cc-browse") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        const picked = await open({
+          multiple: false,
+          title: "选择程序或快捷方式",
+          filters: [
+            { name: "程序与快捷方式", extensions: ["lnk", "exe"] },
+            { name: "全部文件", extensions: ["*"] },
+          ],
+          defaultPath: programEl.value || undefined,
+        });
+        if (!picked) return;
+        const p = Array.isArray(picked) ? picked[0] : picked;
+        programEl.value = p;
+        draft.program = p;
+        if (p.toLowerCase().endsWith(".lnk")) {
+          await resolve();
+        } else {
+          draft.target = p;
+          renderTarget();
+          if (!cwdEl.value.trim()) {
+            const i = Math.max(p.lastIndexOf("\\"), p.lastIndexOf("/"));
+            if (i > 0) {
+              cwdEl.value = p.slice(0, i);
+              draft.cwd = cwdEl.value;
+            }
+          }
+        }
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
+  (overlay.querySelector("#cc-browse-cwd") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        const picked = await open({
+          directory: true,
+          multiple: false,
+          title: "选择工作目录",
+          defaultPath: cwdEl.value || undefined,
+        });
+        if (typeof picked !== "string") return;
+        cwdEl.value = picked;
+        draft.cwd = picked;
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
+  (overlay.querySelector("#cc-resolve") as HTMLButtonElement).addEventListener("click", () => {
+    void resolve();
+  });
+
+  saveBtn.addEventListener("click", () => {
+    void (async () => {
+      const name = nameEl.value.trim();
+      const program = programEl.value.trim();
+      if (!name) {
+        hint.textContent = "请填写名称";
+        return;
+      }
+      if (!program) {
+        hint.textContent = "请选择程序或快捷方式";
+        return;
+      }
+      const lower = program.toLowerCase();
+      if (lower.endsWith(".bat") || lower.endsWith(".cmd")) {
+        hint.textContent = "暂不支持直接运行 .bat/.cmd，请选择 .lnk 或 .exe";
+        return;
+      }
+      if (program.toLowerCase().endsWith(".lnk") && !draft.target) {
+        if (!(await resolve())) return;
+      }
+
+      saveBtn.disabled = true;
+      saveBtn.textContent = "保存中…";
+      try {
+        const command: CustomCommand = {
+          id: existing?.id ?? "",
+          name,
+          program,
+          target: draft.target.trim() || null,
+          args: argsEl.value.trim(),
+          cwd: cwdEl.value.trim() || null,
+        };
+        state = await invoke<State>("upsert_custom_command", { command });
+        close();
+        toast(existing ? "自定义命令已更新" : "自定义命令已添加");
+      } catch (e) {
+        hint.textContent = String(e);
+      } finally {
+        saveBtn.disabled = false;
+        saveBtn.textContent = "保存";
+      }
+    })();
+  });
+
+  nameEl.focus();
+}
+
+function openCustomCommandMenu(): void {
+  closeAllMenus();
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu custom-cmd-menu";
+  const btn = req<HTMLButtonElement>("#btn-custom-menu");
+  const r = btn.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - 360))}px`;
+  menu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - 320)}px`;
+  menu.innerHTML = `
+    <div class="dm-head">
+      <span>自定义命令</span>
+      <span class="dm-tag">${state.customCommands?.length ?? 0}</span>
+    </div>
+    <div class="dm-body"></div>
+  `;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+
+  const rows: MenuRow[] = [];
+  const commands = state.customCommands ?? [];
+  for (const c of commands) {
+    rows.push({
+      kind: "item",
+      name: c.name,
+      detail: `${basename(c.target || c.program)}${c.cwd ? ` · ${c.cwd}` : ""}`,
+      children: [
+        {
+          kind: "item",
+          name: "运行",
+          detail: "在 AppDeck 内嵌终端运行",
+          onClick: () => void runCustomCommand(c),
+        },
+        {
+          kind: "item",
+          name: "编辑…",
+          detail: "名称 / 程序 / 参数 / 工作目录",
+          onClick: () => void openCustomCommandDialog(c),
+        },
+        { kind: "sep" },
+        {
+          kind: "item",
+          name: "删除…",
+          detail: "从工具栏移除（不影响磁盘文件）",
+          onClick: () => void deleteCustomCommand(c),
+        },
+      ],
+    });
+  }
+
+  if (!commands.length) {
+    const empty = document.createElement("div");
+    empty.className = "dm-empty";
+    empty.textContent = "还没有自定义命令";
+    (menu.querySelector(".dm-body") as HTMLDivElement).appendChild(empty);
+  }
+
+  rows.push(
+    { kind: "sep" },
+    {
+      kind: "item",
+      name: "＋ 添加命令…",
+      detail: "快捷方式 / exe，可填参数与工作目录",
+      onClick: () => void openCustomCommandDialog(),
+    },
+  );
+
+  renderMenuRows(menu.querySelector(".dm-body") as HTMLDivElement, rows);
+}
+
 /* ---------------- PTY 事件 ---------------- */
+
+/** 打开「进程与端口」面板（工具栏按钮 / 开发期 FLA_PROCESSES 共用） */
+function openProcessPanel(): void {
+  openProcessManager({
+    notify: toast,
+    initialPrefs: {
+      hideRules: [...(state.ui?.processHideRules ?? [])],
+      hideRulesEnabled: state.ui?.processHideRulesEnabled ?? true,
+      autoRefresh: state.ui?.processAutoRefresh ?? true,
+    },
+    savePrefs: async (prefs) => {
+      state = await invoke<State>("save_process_prefs", {
+        hideRules: prefs.hideRules,
+        hideRulesEnabled: prefs.hideRulesEnabled,
+        autoRefresh: prefs.autoRefresh,
+      });
+    },
+    // 把 AppDeck 自己拉起的会话标出来，避免误杀时不知道是哪个标签
+    sessionPids: () => {
+      const map = new Map<number, string>();
+      for (const s of sessions) {
+        if (s.pid) map.set(s.pid, s.title);
+      }
+      return map;
+    },
+  });
+}
 
 /** 在项目目录开一个交互终端（继承项目环境）。 */
 async function openProjectTerminal(p: Proj): Promise<void> {
@@ -2338,6 +3314,7 @@ interface SessionLog {
   projectId: string | null;
   commandId: string | null;
   templateId: string | null;
+  customCommandId: string | null;
   platform: string | null;
   action: string | null;
   target: string | null;
@@ -2379,6 +3356,7 @@ async function persistSessions(): Promise<void> {
     projectId: s.projectId ?? null,
     commandId: s.commandId ?? null,
     templateId: s.templateId ?? null,
+    customCommandId: s.customCommandId ?? null,
     platform: s.platform ?? null,
     action: s.action ?? null,
     target: s.target ?? null,
@@ -2425,9 +3403,11 @@ async function restoreSessions(): Promise<void> {
   // 早期版本"重跑"是追加标签，会累积一堆同名死会话，恢复时全列出来只会让人分不清。
   // id 形如 sess-<毫秒>-<序号>，按 id 比较即按时间比较。
   const identity = (l: SessionLog): string =>
-    l.platform
-      ? `${l.projectId}|${l.platform}|${l.action}|${l.target ?? ""}`
-      : `${l.projectId}|${l.commandId ?? l.templateId ?? ""}`;
+    l.customCommandId
+      ? `custom|${l.customCommandId}`
+      : l.platform
+        ? `${l.projectId}|${l.platform}|${l.action}|${l.target ?? ""}`
+        : `${l.projectId}|${l.commandId ?? l.templateId ?? ""}`;
 
   const newest = new Map<string, SessionLog>();
   for (const l of logs) {
@@ -2443,14 +3423,14 @@ async function restoreSessions(): Promise<void> {
     const referenced = state.projects
       .find((p) => p.id === log.projectId)
       ?.commands.find((c) => c.id === log.commandId);
-    const inferredKind = log.platform ? "run" : (referenced?.kind ?? "run");
+    const inferredKind = log.kind || (log.platform ? "run" : (referenced?.kind ?? "run"));
 
     const s: TermSession = {
       id: log.id,
       title: log.title,
       device: log.device || "—",
       mode: log.mode || "debug",
-      kind: log.kind || inferredKind,
+      kind: inferredKind,
       cwd: log.cwd || "",
       artifacts: log.artifacts ?? [],
       status: "stopped",
@@ -2459,6 +3439,7 @@ async function restoreSessions(): Promise<void> {
       projectId: log.projectId ?? undefined,
       commandId: log.commandId ?? undefined,
       templateId: log.templateId ?? undefined,
+      customCommandId: log.customCommandId ?? undefined,
       platform: log.platform ?? undefined,
       action: log.action ?? undefined,
       target: log.target ?? undefined,
@@ -2481,6 +3462,23 @@ async function restoreSessions(): Promise<void> {
     if (s.kind !== "terminal" || !s.projectId) continue;
     void (async () => {
       try {
+        // 历史输出已经写进缓冲区；再补一整屏空行，把历史顶到回滚区。
+        // 新 shell 的 ConPTY 是从自己的第 0 行开始画提示符的，直接接在历史后面时，
+        // 提示符/命令会覆盖到历史顶部，和日志混在一起（实测）。
+        if (s.term) {
+          await new Promise<void>((resolve) => {
+            // 恢复时终端还没 fit，rows 可能只是默认的 24；至少补 60 行，
+            // 保证把历史顶出当前可见区域，给新 shell 留一整屏空白。
+            s.term!.write("\r\n".repeat(Math.max(s.term!.rows * 2, 60)), resolve);
+          });
+          await new Promise<void>((resolve) => {
+            // 清掉可见区（历史已经在上方回滚区），并把光标归位到左上角。
+            // 新 shell 的 ConPTY 也从它自己的第 0 行开始画提示符，坐标对齐后，
+            // 后续 ↑/↓ 重绘不会再跑到顶部和旧日志叠在一起。
+            s.term!.write("\x1b[2J\x1b[H", resolve);
+          });
+        }
+
         const started = await invoke<boolean>("resume_terminal", {
           projectId: s.projectId,
           sessionId: s.id,
@@ -2503,9 +3501,44 @@ async function restoreSessions(): Promise<void> {
 }
 
 async function rerunSession(s: TermSession): Promise<void> {
+  // 工具栏自定义命令：先结束旧进程，再启动一条新标签，成功后才移除旧标签
+  if (s.kind === "custom") {
+    const cmd = state.customCommands?.find((c) => c.id === s.customCommandId);
+    if (!cmd) {
+      toast("原自定义命令已删除", "error");
+      return;
+    }
+    if (s.status !== "stopped") {
+      await invoke("kill_session", { id: s.id }).catch(() => {});
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+    }
+    await runCustomCommand(cmd, s.id);
+    return;
+  }
+
   const project = state.projects.find((p) => p.id === s.projectId);
   if (!project) {
     toast("原项目已不存在，无法重跑", "error");
+    return;
+  }
+
+  // 项目终端：先 Ctrl+C 中断当前命令，等回到提示符，再把同一条命令带 Enter 写进去。
+  // 这样 go run 之类的长命令不需要用户再手动敲一次、按一次回车。
+  if (s.kind === "terminal") {
+    if (s.restored) {
+      toast("终端还在恢复，请稍等", "error");
+      return;
+    }
+    const cmd = s.commandId
+      ? project.commands.find((c) => c.id === s.commandId)
+      : undefined;
+    if (!cmd || cmd.kind !== "custom") {
+      toast("这个终端还没有可重跑的命令", "error");
+      return;
+    }
+    await invoke("write_session", { id: s.id, data: "\x03" }).catch(() => {});
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    await runInTerminal(project, cmd, s);
     return;
   }
 
@@ -3149,6 +4182,96 @@ function showUsageExamples(
 /** 模板库窗口开着时，保存模板后要立刻刷新列表（否则得关掉重开才看到） */
 let templateListRefresh: (() => void) | null = null;
 
+/* ---------------- 命令类型：flutter / 自定义 / 三种 Shell ---------------- */
+
+type ShellType = "powershell" | "cmd" | "bash";
+type CmdType = "run" | "build" | "custom" | ShellType;
+
+/**
+ * Shell 类型只是「预设程序 + 参数包装」的 UI 糖：
+ * 落盘仍是 kind=custom，后端无需区分；编辑时再按 program/args 反推回类型。
+ */
+const SHELL_SPECS: Record<
+  ShellType,
+  {
+    exe: string;
+    label: string;
+    placeholder: string;
+    wrap: (script: string) => string[];
+    note: string;
+  }
+> = {
+  powershell: {
+    exe: "powershell.exe",
+    label: "PowerShell",
+    placeholder: "Get-Process | Sort-Object WS -Descending | Select-Object -First 10",
+    wrap: (script) => [
+      "-NoLogo",
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      script,
+    ],
+    note: "以 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command 执行。",
+  },
+  cmd: {
+    exe: "cmd.exe",
+    label: "CMD",
+    placeholder: "dir /b",
+    wrap: (script) => ["/C", script],
+    note: "以 cmd.exe /C 执行，支持 && / || 等 CMD 语法。",
+  },
+  bash: {
+    exe: "bash.exe",
+    label: "Bash",
+    placeholder: "ls -la",
+    wrap: (script) => ["-lc", script],
+    note: "以 bash.exe -lc 执行（PATH 中需要有 Git Bash / WSL 的 bash）。",
+  },
+};
+
+const isShellType = (t: string): t is ShellType =>
+  t === "powershell" || t === "cmd" || t === "bash";
+
+/** 选中 Shell 类型时自动填的名字：切类型时如果还是自动名字就跟着换 */
+const SHELL_AUTO_NAMES = new Set(
+  Object.values(SHELL_SPECS).map((spec) => `${spec.label} 命令`),
+);
+
+/** 从已保存的命令反推 Shell 类型；不是我们生成的包装就返回 null */
+function shellTypeOf(c: Cmd | undefined): ShellType | null {
+  if (!c || c.kind !== "custom") return null;
+
+  const base = (c.program ?? "").trim().split(/[\\/]/).pop()?.toLowerCase() ?? "";
+  const args = c.args ?? [];
+  const flag = (name: string): boolean => args.some((a) => a.toLowerCase() === name);
+
+  if (
+    ["powershell.exe", "powershell"].includes(base) &&
+    flag("-command")
+  ) {
+    return "powershell";
+  }
+  if (["cmd.exe", "cmd"].includes(base) && args[0]?.toLowerCase() === "/c") {
+    return "cmd";
+  }
+  if (["bash.exe", "bash"].includes(base) && args[0] === "-lc") {
+    return "bash";
+  }
+  return null;
+}
+
+/** 从包装参数里取回用户写的命令文本 */
+function shellScriptOf(c: Cmd, type: ShellType): string {
+  const args = c.args ?? [];
+  if (type === "powershell") {
+    const i = args.findIndex((a) => a.toLowerCase() === "-command");
+    return i >= 0 ? args.slice(i + 1).join(" ") : "";
+  }
+  return args.slice(1).join(" ");
+}
+
 async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> {
   const isTemplate = p === null;
   const overlay = document.createElement("div");
@@ -3185,15 +4308,27 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
     restArgs = restArgs.filter((_, i) => i !== fi && i !== fi + 1);
   }
 
+  const inferredShell = shellTypeOf(existing);
+  const initialType: CmdType =
+    inferredShell ??
+    (existing
+      ? existing.kind === "run" || existing.kind === "build"
+        ? existing.kind
+        : "custom"
+      : p?.kind === "folder"
+        ? "custom"
+        : "run");
+
   const draft = {
     name: existing?.name ?? "",
-    kind: existing?.kind ?? "run",
+    type: initialType,
     program: existing?.program ?? "",
     cwd: existing?.cwd ?? "",
     mode: existing?.flutterMode ?? "debug",
     target: existing?.buildType ?? "apk",
     flavor,
     args: restArgs.join(" "),
+    script: inferredShell && existing ? shellScriptOf(existing, inferredShell) : "",
     envPairs: Object.entries(existing?.env ?? {}) as Array<[string, string]>,
     scope: existing?.scope === "global" ? "global" : "project",
   };
@@ -3235,27 +4370,37 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       const [, cell] = row("类型");
       const sel = document.createElement("select");
       sel.className = "set-input";
-      for (const k of ["run", "build", "custom"]) {
+      const types: Array<[CmdType, string]> = [
+        ["run", "run（flutter 调试运行）"],
+        ["build", "build（flutter 发布构建）"],
+        ["custom", "custom（自定义命令）"],
+        ["powershell", "powershell（执行 PowerShell 命令）"],
+        ["cmd", "cmd（执行 CMD 命令）"],
+        ["bash", "bash（执行 Bash 命令）"],
+      ];
+      for (const [k, label] of types) {
         const o = document.createElement("option");
         o.value = k;
-        o.textContent =
-          k === "run"
-            ? "run（flutter 调试运行）"
-            : k === "build"
-              ? "build（flutter 发布构建）"
-              : "custom（自定义命令）";
-        if (draft.kind === k) o.selected = true;
+        o.textContent = label;
+        if (draft.type === k) o.selected = true;
         sel.appendChild(o);
       }
       sel.disabled = Boolean(existing);
       sel.addEventListener("change", () => {
-        draft.kind = sel.value;
+        const autoNamed = SHELL_AUTO_NAMES.has(draft.name.trim());
+        draft.type = sel.value as CmdType;
+        // 新建 Shell 命令时给一个能直接保存的名称；用户已经填了就不动
+        if (!draft.name.trim() || autoNamed) {
+          draft.name = isShellType(draft.type)
+            ? `${SHELL_SPECS[draft.type].label} 命令`
+            : "";
+        }
         void build();
       });
       cell.appendChild(sel);
     }
 
-    if (draft.kind === "custom") {
+    if (draft.type === "custom") {
       const [, c1] = row("程序");
       input(c1, draft.program, "%FLUTTER% 或 C:\\path\\to\\tool.exe", (v) => {
         draft.program = v;
@@ -3297,7 +4442,31 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         "%FLUTTER% → 该项目的 flutter；%PROJECT% → 项目根；%CWD% → 实际工作目录。" +
         ".ps1 自动用 PowerShell（含 -ExecutionPolicy Bypass）执行；.bat / .cmd 自动用 cmd 包装。";
       body.appendChild(note);
-    } else if (draft.kind === "run") {
+    } else if (isShellType(draft.type)) {
+      const spec = SHELL_SPECS[draft.type];
+
+      const [, c1] = row("命令");
+      const ta = document.createElement("textarea");
+      ta.className = "set-input cmd-script";
+      ta.rows = 3;
+      ta.value = draft.script;
+      ta.placeholder = spec.placeholder;
+      ta.spellcheck = false;
+      ta.addEventListener("input", () => {
+        draft.script = ta.value;
+      });
+      c1.appendChild(ta);
+
+      const [, c2] = row("cwd");
+      input(c2, draft.cwd, "可空（相对项目根，支持 %PROJECT%）", (v) => {
+        draft.cwd = v;
+      });
+
+      const note = document.createElement("div");
+      note.className = "set-desc";
+      note.textContent = `${spec.note} 命令在项目终端中执行，输出进入当前标签。`;
+      body.appendChild(note);
+    } else if (draft.type === "run") {
       const [, c1] = row("program");
       input(c1, draft.program, "lib/main.dart（可空）", (v) => {
         draft.program = v;
@@ -3364,12 +4533,13 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       c2.appendChild(note);
     }
 
-    {
+    // Shell 类型把「命令」单独收在 textarea 里，不再有额外参数
+    if (!isShellType(draft.type)) {
       const [, cell] = row("额外参数");
       input(
         cell,
         draft.args,
-        draft.kind === "custom" ? "原样传给程序" : "--dart-define=ENV=prod",
+        draft.type === "custom" ? "原样传给程序" : "--dart-define=ENV=prod",
         (v) => {
           draft.args = v;
         },
@@ -3452,7 +4622,7 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       cell.appendChild(sel);
     }
 
-    if (draft.kind === "build") {
+    if (draft.type === "build") {
       const tip = document.createElement("div");
       tip.className = "set-desc";
       tip.style.marginTop = "10px";
@@ -3467,6 +4637,8 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
   (overlay.querySelector("#cmd-cancel") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#cmd-examples") as HTMLButtonElement).addEventListener("click", () =>
     showUsageExamples((ex) => {
+      // 示例都是 custom 的写法；新建时切过去，编辑已有命令时不偷偷改类型
+      if (!existing) draft.type = "custom";
       draft.program = ex.program;
       draft.args = ex.args;
       draft.cwd = ex.cwd;
@@ -3510,24 +4682,32 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         return;
       }
 
-      const args = splitArgs(draft.args);
-      if (draft.kind === "build" && draft.flavor.trim()) {
+      const shellSpec = isShellType(draft.type) ? SHELL_SPECS[draft.type] : null;
+      if (shellSpec && !draft.script.trim()) {
+        hint.textContent = "请填写要执行的命令";
+        return;
+      }
+
+      const args = shellSpec ? shellSpec.wrap(draft.script.trim()) : splitArgs(draft.args);
+      if (draft.type === "build" && draft.flavor.trim()) {
         args.unshift("--flavor", draft.flavor.trim());
       }
 
       const cmd: Cmd = {
         id: existing?.id ?? "",
         name: draft.name.trim(),
-        kind: draft.kind,
-        program:
-          draft.kind === "custom" || draft.kind === "run"
+        // Shell 类型落盘仍是 custom，避免后端为每种 shell 再加一套分支
+        kind: shellSpec ? "custom" : draft.type,
+        program: shellSpec
+          ? shellSpec.exe
+          : draft.type === "custom" || draft.type === "run"
             ? draft.program.trim() || null
             : null,
         cwd:
-          draft.kind === "custom" || draft.kind === "run"
+          shellSpec || draft.type === "custom" || draft.type === "run"
             ? draft.cwd.trim() || null
             : null,
-        flutterMode: draft.kind === "run" ? draft.mode : null,
+        flutterMode: draft.type === "run" ? draft.mode : null,
         args,
         env: Object.fromEntries(
           draft.envPairs
@@ -3537,7 +4717,7 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         toolArgs: existing?.toolArgs ?? [],
         deviceId: existing?.deviceId ?? null,
         emulatorId: existing?.emulatorId ?? null,
-        buildType: draft.kind === "build" ? draft.target : null,
+        buildType: draft.type === "build" ? draft.target : null,
         source: isTemplate ? "template" : "manual",
         scope: isTemplate ? draft.scope : "project",
         // 编辑已有命令时保留来源归属，否则 docker 服务节点会被打散
@@ -3632,6 +4812,12 @@ function renderMenuRows(parent: HTMLDivElement, rows: MenuRow[]): void {
         closeSubMenu();
         openSubMenu(el, r.children!);
       });
+      // 除了悬停，点击也能展开二级菜单（触摸/点击操作更直观）
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        closeSubMenu();
+        openSubMenu(el, r.children!);
+      });
     } else {
       el.addEventListener("click", () => {
         // keepOpen：原地刷新某一段（如「平台」），菜单保持打开
@@ -3680,9 +4866,15 @@ let projMenuEl: HTMLDivElement | null = null;
 let devSubmenu: string | null = null;
 
 function openProjectMenu(ev: MouseEvent, p: Proj): void {
+  // 文件夹项目没有可解析的配置文件：直接出精简菜单，省一次后端往返
+  if (p.kind === "folder") {
+    renderFolderMenu(ev, p);
+    return;
+  }
+
   // 先看目录里有没有 package.json / compose 文件，再决定菜单项（几毫秒，用户感知不到）
   void (async () => {
-    let files: ProjectFiles = { packageJson: null, compose: null };
+    let files: ProjectFiles = { packageJson: null, compose: null, android: false };
     try {
       files = await invoke<ProjectFiles>("project_files", { path: p.path });
     } catch {
@@ -3690,6 +4882,74 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
     }
     renderProjectMenu(ev, p, files);
   })();
+}
+
+/**
+ * 文件夹项目的右键：只保留四个通用操作。
+ *
+ * 它没有平台、没有可重读的生态文件，把 Flutter / Compose / 数据库那套菜单挂上来
+ * 只会让人以为这个目录被识别成了什么工程。
+ */
+function renderFolderMenu(ev: MouseEvent, p: Proj): void {
+  closeAllMenus();
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu";
+  menu.style.left = `${Math.min(ev.clientX, window.innerWidth - 320)}px`;
+  menu.style.top = `${Math.min(ev.clientY, window.innerHeight - 240)}px`;
+  menu.innerHTML = `
+    <div class="dm-head">
+      <span>${esc(projectLabel(p))}</span>
+    </div>
+    <div class="dm-body"></div>
+  `;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+
+  const gitReady = (state.settings?.git?.desktopPath ?? "").trim() !== "";
+
+  const rows: MenuRow[] = [
+    {
+      kind: "item",
+      name: "在终端中打开",
+      detail: "注入项目环境后开一个交互终端",
+      onClick: () => void openProjectTerminal(p),
+    },
+    {
+      kind: "item",
+      name: "用编辑器打开目录",
+      detail: "用默认编辑器打开该文件夹",
+      onClick: () => void editFile(p.path),
+    },
+    gitReady
+      ? {
+          kind: "item",
+          name: "在 Git Desktop 中打开",
+          detail: "GitHub Desktop 等客户端，直接打开该目录",
+          onClick: () => {
+            void invoke("open_in_git_desktop", { path: p.path }).catch((e) =>
+              toast(String(e), "error"),
+            );
+          },
+        }
+      : {
+          kind: "item",
+          name: "在 Git Desktop 中打开",
+          detail: "未配置：设置 → Git",
+          disabled: true,
+        },
+    { kind: "sep" },
+    {
+      kind: "item",
+      name: "添加命令",
+      detail: "新建 run / build / custom 命令",
+      onClick: () => void openCommandDialog(p),
+    },
+  ];
+
+  const box = document.createElement("div");
+  (menu.querySelector(".dm-body") as HTMLDivElement).appendChild(box);
+  renderMenuRows(box, rows);
 }
 
 function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
@@ -3833,9 +5093,33 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
   tail.push({
     kind: "item",
     name: "用编辑器打开目录",
-    detail: "VS Code 打开项目文件夹（整个目录当工作区）",
+    detail: "用默认编辑器打开项目文件夹（整个目录当工作区）",
     onClick: () => void editFile(p.path),
   });
+
+  // 只有真正的 Android 工程才有「数据库」可看（工作区/命令集没有 applicationId）
+  if (files.android) {
+    tail.push({
+      kind: "item",
+      name: "数据库…",
+      detail: "只读查看设备上应用的 SQLite（支持 SQL 查询）",
+      onClick: () => void openDbInspector(p),
+    });
+  }
+
+  // 只有设置里填了程序才显示：没配置的人不需要看到一个点了必然报错的菜单项
+  if ((state.settings?.git?.desktopPath ?? "").trim()) {
+    tail.push({
+      kind: "item",
+      name: "在 Git Desktop 中打开",
+      detail: "GitHub Desktop 等客户端，直接打开项目目录",
+      onClick: () => {
+        void invoke("open_in_git_desktop", { path: p.path }).catch((e) =>
+          toast(String(e), "error"),
+        );
+      },
+    });
+  }
 
   if (!isCommandSet) {
     tail.push({
@@ -3852,7 +5136,7 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     tail.push({
       kind: "item",
       name: `编辑 ${name}`,
-      detail: "用默认编辑器打开（VS Code）",
+      detail: "用默认编辑器打开",
       onClick: () => void editFile(files.compose!),
     });
   }
@@ -3860,7 +5144,7 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     tail.push({
       kind: "item",
       name: "编辑 package.json",
-      detail: "用默认编辑器打开（VS Code）",
+      detail: "用默认编辑器打开",
       onClick: () => void editFile(files.packageJson!),
     });
   }
@@ -3904,6 +5188,16 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
       onClick: () => void openCommandDialog(p),
     },
   );
+
+  // 仅 Flutter 工程显示；文件夹项目没有 pubspec/平台目录
+  if (p.kind !== "folder" && flutterInfo.get(p.id)?.ok) {
+    tail.push({
+      kind: "item",
+      name: "Flutter 重命名…",
+      detail: "包名 / 应用名称（rename CLI）",
+      onClick: () => void openFlutterRename(p),
+    });
+  }
 
   const box = document.createElement("div");
   body.appendChild(box);
@@ -4317,6 +5611,14 @@ function renderEmulatorBody(data: AllEmulators, error: string | null): void {
   const menu = emuMenuEl;
   if (!menu) return;
 
+  // 标题栏右侧显示"设备更新于"：点了 ⟳ 有没有真的生效，一眼能看出来
+  const stamp = menu.querySelector<HTMLSpanElement>(".dm-updated");
+  if (stamp) {
+    stamp.textContent = data.devicesAt
+      ? `设备更新于 ${new Date(data.devicesAt).toLocaleTimeString()}`
+      : "";
+  }
+
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
   body.innerHTML = "";
 
@@ -4351,7 +5653,11 @@ function renderEmulatorBody(data: AllEmulators, error: string | null): void {
   // 已连接的设备放最前面：刚从手机插上就想确认"它认到了没"
   const connected = (data.devices ?? []).filter((d) => d.isConnected !== false);
   group(`已连接设备 (${connected.length})`);
-  if (connected.length === 0) note("未检测到已连接设备（手机需开启 USB 调试并授权）");
+  if (connected.length === 0) {
+    note(
+      "未检测到已连接设备（手机需开启 USB 调试并授权；插上后可再点 ⟳ 刷新）",
+    );
+  }
   for (const d of connected) {
     const sub = [d.id, d.sdk ?? d.platformType ?? d.category ?? ""].filter(Boolean).join(" · ");
     item(d.name, sub, () => {
@@ -4394,14 +5700,15 @@ function renderEmulatorBody(data: AllEmulators, error: string | null): void {
   }
 }
 
-/** 真正去查一次。force=false 时后端会用磁盘缓存，跨重启也秒回。 */
-async function loadEmulators(force: boolean): Promise<void> {
+/** 真正去查一次。force=false 时后端会用磁盘缓存（模拟器），设备每次都现查。
+ *  quiet=true：不清空现有内容，静默刷新（打开菜单时先显示缓存、再补齐设备）。 */
+async function loadEmulators(force: boolean, quiet = false): Promise<void> {
   const menu = emuMenuEl;
   if (!menu) return;
 
   const body = menu.querySelector(".dm-body") as HTMLDivElement;
   const refresh = menu.querySelector<HTMLButtonElement>(".dm-refresh");
-  body.innerHTML = `<div class="dm-loading">正在检查电脑上的模拟器…</div>`;
+  if (!quiet) body.innerHTML = `<div class="dm-loading">正在检查电脑上的模拟器…</div>`;
   if (refresh) refresh.disabled = true;
 
   let data: AllEmulators | null = null;
@@ -4431,7 +5738,7 @@ function closeImportMenu(): void {
   importMenuEl = null;
 }
 
-/** 工具栏的「导入」下拉：项目 / launch.json 可用，package.json 与 docker-compose 先占位 */
+/** 工具栏的「导入」下拉：项目 / 文件夹 / launch.json / package.json / compose */
 function openImportMenu(anchor: HTMLElement): void {
   if (importMenuEl) {
     closeImportMenu();
@@ -4460,6 +5767,12 @@ function openImportMenu(anchor: HTMLElement): void {
       label: "添加 Flutter 项目",
       hint: "选择项目目录",
       run: () => void addProject(),
+    },
+    {
+      icon: "📁",
+      label: "添加文件夹 / 目录",
+      hint: "导入为空，命令稍后添加",
+      run: () => void addFolder(),
     },
     {
       icon: "📂",
@@ -4544,6 +5857,7 @@ function openEmulatorMenu(anchor: HTMLElement): void {
   menu.innerHTML = `
     <div class="dm-head">
       <span>设备与模拟器</span>
+      <span class="dm-updated"></span>
       <button class="dm-refresh" title="重新检查设备与模拟器（模拟器结果会缓存，设备每次现查）">⟳</button>
     </div>
     <div class="dm-body"></div>
@@ -4557,13 +5871,523 @@ function openEmulatorMenu(anchor: HTMLElement): void {
     void loadEmulators(true);
   });
 
-  // 有内存缓存直接渲染；否则读磁盘缓存（后端），不再重新分析
-  if (emulatorCache) renderEmulatorBody(emulatorCache, null);
-  else void loadEmulators(false);
+  // 有内存缓存就先把模拟器渲染出来（秒开），但设备列表**每次打开都重查**：
+  // 手机是随时插上的，用旧缓存会让人以为"插上了也不认"。
+  if (emulatorCache) {
+    renderEmulatorBody(emulatorCache, null);
+    void loadEmulators(false, true);
+  } else {
+    void loadEmulators(false);
+  }
 }
 
 
+/* ---------------- Android 数据库（只读快照） ---------------- */
+
+interface DbDeviceInfo {
+  serial: string;
+  state: string;
+  model: string;
+  product: string;
+}
+
+interface DbEnvInfo {
+  adb: string | null;
+  adbVersion: string | null;
+  devices: DbDeviceInfo[];
+  package: string | null;
+  foreground: string | null;
+  notes: string[];
+}
+
+interface DbFileInfo {
+  path: string;
+  size: number;
+}
+
+interface DbTableInfo {
+  name: string;
+  sql: string | null;
+}
+
+interface DbOpenInfo {
+  sessionId: string;
+  localPath: string;
+  remotePath: string;
+  size: number;
+  wal: boolean;
+  tables: DbTableInfo[];
+}
+
+interface DbPageInfo {
+  columns: string[];
+  rows: (string | null)[][];
+  truncated: boolean;
+  elapsedMs: number;
+  total: number | null;
+}
+
+function dbSize(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function dbPkgKey(projectId: string): string {
+  return `appdeck.db.package.${projectId}`;
+}
+
+/** 把 run-as 的原始报错翻译成能指导下一步操作的提示 */
+function dbErrorText(e: unknown): string {
+  const msg = String(e);
+  if (/unknown package|not debuggable|run-as/i.test(msg)) {
+    return `${msg}（只有 debug 包能用 run-as 读取；可用 adb shell pm list packages -3 确认包名）`;
+  }
+  return msg;
+}
+
+/**
+ * Android 数据库查看器：`adb run-as` 拉取 db（+ `-wal`）到本机，只读打开。
+ *
+ * 与 Android Studio Database Inspector 的区别：
+ * - 不需要 IDE、不走 JDWP，也不要求 app 集成任何依赖；
+ * - 看到的是拉取那一刻的快照，点「读取数据库」可重新拉；
+ * - release 包（非 debuggable）没有 `run-as`，这里会直接报错。
+ */
+async function openDbInspector(p: Proj): Promise<void> {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal db-modal">
+      <div class="modal-head">
+        <span>数据库 · ${esc(projectLabel(p))}</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="db-toolbar">
+        <label for="db-device">设备</label>
+        <select id="db-device" class="set-input"></select>
+        <label for="db-pkg">包名</label>
+        <input id="db-pkg" class="set-input" spellcheck="false" autocomplete="off" />
+        <button class="btn" id="db-load">读取数据库</button>
+        <span class="db-hint" id="db-hint">正在探测设备…</span>
+      </div>
+      <div class="db-main">
+        <aside class="db-side">
+          <div class="db-side-title"><span>数据库</span><span id="db-file-count"></span></div>
+          <div class="db-files" id="db-files"></div>
+          <div class="db-side-title"><span>表</span><span id="db-table-count"></span></div>
+          <div class="db-tables" id="db-tables"></div>
+        </aside>
+        <section class="db-work">
+          <div class="db-tabs">
+            <button class="db-tab active" data-tab="data">数据</button>
+            <button class="db-tab" data-tab="sql">SQL</button>
+            <span class="flex1"></span>
+            <button class="btn" id="db-export" disabled>导出副本</button>
+            <button class="btn" id="db-reveal" disabled>在资源管理器中显示</button>
+          </div>
+          <div class="db-pane" id="db-pane-data">
+            <div class="db-grid-wrap"><table class="db-grid" id="db-grid"></table></div>
+            <div class="db-pager">
+              <button class="btn" id="db-prev" disabled>‹ 上一页</button>
+              <span id="db-page-info">—</span>
+              <button class="btn" id="db-next" disabled>下一页 ›</button>
+              <select id="db-limit" class="set-input db-limit">
+                <option value="100">100 行</option>
+                <option value="200" selected>200 行</option>
+                <option value="500">500 行</option>
+                <option value="1000">1000 行</option>
+              </select>
+              <span class="db-status" id="db-status"></span>
+            </div>
+          </div>
+          <div class="db-pane" id="db-pane-sql" hidden>
+            <textarea id="db-sql" class="db-sql" spellcheck="false"
+              placeholder="SELECT * FROM users LIMIT 50;   -- 只读：SELECT / PRAGMA / WITH / EXPLAIN"></textarea>
+            <div class="db-sql-bar">
+              <button class="btn primary" id="db-run">执行（Ctrl+Enter）</button>
+              <span class="db-status" id="db-sql-status"></span>
+            </div>
+            <div class="db-grid-wrap"><table class="db-grid" id="db-sql-grid"></table></div>
+          </div>
+        </section>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const hint = req<HTMLSpanElement>("#db-hint", overlay);
+  const deviceSel = req<HTMLSelectElement>("#db-device", overlay);
+  const pkgInput = req<HTMLInputElement>("#db-pkg", overlay);
+  const loadBtn = req<HTMLButtonElement>("#db-load", overlay);
+  const filesEl = req<HTMLDivElement>("#db-files", overlay);
+  const tablesEl = req<HTMLDivElement>("#db-tables", overlay);
+  const fileCount = req<HTMLSpanElement>("#db-file-count", overlay);
+  const tableCount = req<HTMLSpanElement>("#db-table-count", overlay);
+  const dataGrid = req<HTMLTableElement>("#db-grid", overlay);
+  const sqlGrid = req<HTMLTableElement>("#db-sql-grid", overlay);
+  const pageInfo = req<HTMLSpanElement>("#db-page-info", overlay);
+  const status = req<HTMLSpanElement>("#db-status", overlay);
+  const sqlStatus = req<HTMLSpanElement>("#db-sql-status", overlay);
+  const sqlInput = req<HTMLTextAreaElement>("#db-sql", overlay);
+  const prevBtn = req<HTMLButtonElement>("#db-prev", overlay);
+  const nextBtn = req<HTMLButtonElement>("#db-next", overlay);
+  const limitSel = req<HTMLSelectElement>("#db-limit", overlay);
+  const exportBtn = req<HTMLButtonElement>("#db-export", overlay);
+  const revealBtn = req<HTMLButtonElement>("#db-reveal", overlay);
+  const dataPane = req<HTMLDivElement>("#db-pane-data", overlay);
+  const sqlPane = req<HTMLDivElement>("#db-pane-sql", overlay);
+  const tabs = Array.from(overlay.querySelectorAll<HTMLButtonElement>(".db-tab"));
+
+  let sessionId: string | null = null;
+  let localPath = "";
+  let files: DbFileInfo[] = [];
+  let tables: DbTableInfo[] = [];
+  let activeFile: string | null = null;
+  let activeTable: string | null = null;
+  let total = 0;
+  let offset = 0;
+  let limit = 200;
+
+  const clearGrid = (el: HTMLTableElement): void => {
+    el.innerHTML = "";
+  };
+
+  const renderGrid = (el: HTMLTableElement, page: DbPageInfo): void => {
+    el.innerHTML = "";
+    if (page.columns.length === 0) return;
+
+    const head = el.createTHead().insertRow();
+    for (const c of page.columns) {
+      const th = document.createElement("th");
+      th.textContent = c;
+      head.appendChild(th);
+    }
+    const body = el.createTBody();
+    for (const row of page.rows) {
+      const tr = body.insertRow();
+      for (const cell of row) {
+        const td = tr.insertCell();
+        if (cell === null) {
+          td.textContent = "NULL";
+          td.className = "db-null";
+        } else {
+          td.textContent = cell.length > 500 ? `${cell.slice(0, 500)}…` : cell;
+          if (cell.length > 500) td.title = cell;
+        }
+      }
+    }
+  };
+
+  const switchTab = (tab: string): void => {
+    for (const t of tabs) t.classList.toggle("active", t.dataset.tab === tab);
+    dataPane.hidden = tab !== "data";
+    sqlPane.hidden = tab !== "sql";
+    if (tab === "sql" && sqlInput.value.trim() === "") {
+      sqlInput.value = activeTable
+        ? `SELECT * FROM "${activeTable.replace(/"/g, '""')}" LIMIT 100;`
+        : "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;";
+    }
+  };
+
+  const renderFiles = (): void => {
+    filesEl.innerHTML = "";
+    fileCount.textContent = files.length > 0 ? `(${files.length})` : "";
+    for (const f of files) {
+      const el = document.createElement("div");
+      el.className = `db-file${activeFile === f.path ? " active" : ""}`;
+      const path = document.createElement("div");
+      path.className = "db-file-path";
+      path.textContent = f.path;
+      const size = document.createElement("div");
+      size.className = "db-file-size";
+      size.textContent = dbSize(f.size);
+      el.append(path, size);
+      el.addEventListener("click", () => void openFile(f));
+      filesEl.appendChild(el);
+    }
+    if (files.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "set-desc";
+      empty.textContent = "（还没有读取）";
+      filesEl.appendChild(empty);
+    }
+  };
+
+  const renderTables = (): void => {
+    tablesEl.innerHTML = "";
+    tableCount.textContent = tables.length > 0 ? `(${tables.length})` : "";
+    for (const t of tables) {
+      const el = document.createElement("div");
+      el.className = `db-table-item${t.name === activeTable ? " active" : ""}`;
+      el.textContent = t.name;
+      el.title = t.sql ?? t.name;
+      el.addEventListener("click", () => void selectTable(t.name));
+      tablesEl.appendChild(el);
+    }
+  };
+
+  const closeSession = (): void => {
+    if (sessionId) {
+      const id = sessionId;
+      sessionId = null;
+      void invoke("android_db_close", { sessionId: id }).catch(() => undefined);
+    }
+    localPath = "";
+  };
+
+  const loadRows = async (): Promise<void> => {
+    if (!sessionId || !activeTable) return;
+    status.textContent = "读取中…";
+    try {
+      const page = await invoke<DbPageInfo>("android_db_rows", {
+        sessionId,
+        table: activeTable,
+        offset,
+        limit,
+      });
+      total = page.total ?? 0;
+      renderGrid(dataGrid, page);
+      const from = page.rows.length === 0 ? 0 : offset + 1;
+      const to = offset + page.rows.length;
+      pageInfo.textContent = total === 0 ? "空表" : `${from}–${to} / ${total}`;
+      prevBtn.disabled = offset <= 0;
+      nextBtn.disabled = total === 0 || offset + page.rows.length >= total;
+      status.textContent = `${page.rows.length} 行 · ${page.elapsedMs} ms${page.truncated ? " · 已截断" : ""}`;
+    } catch (e) {
+      status.textContent = String(e);
+    }
+  };
+
+  const selectTable = async (name: string): Promise<void> => {
+    activeTable = name;
+    offset = 0;
+    renderTables();
+    switchTab("data");
+    await loadRows();
+  };
+
+  const openFile = async (f: DbFileInfo): Promise<void> => {
+    const serial = deviceSel.value;
+    const pkg = pkgInput.value.trim();
+    if (!serial || !pkg) return;
+
+    closeSession();
+    activeFile = f.path;
+    activeTable = null;
+    tables = [];
+    offset = 0;
+    total = 0;
+    renderFiles();
+    renderTables();
+    clearGrid(dataGrid);
+    clearGrid(sqlGrid);
+    pageInfo.textContent = "—";
+    status.textContent = "";
+    sqlStatus.textContent = "";
+    exportBtn.disabled = true;
+    revealBtn.disabled = true;
+    hint.textContent = `正在拉取 ${f.path} …`;
+
+    try {
+      const opened = await invoke<DbOpenInfo>("android_db_open", {
+        serial,
+        package: pkg,
+        remotePath: f.path,
+      });
+      sessionId = opened.sessionId;
+      localPath = opened.localPath;
+      tables = opened.tables;
+      renderTables();
+      exportBtn.disabled = false;
+      revealBtn.disabled = false;
+      hint.textContent = `${dbSize(opened.size)} · ${opened.wal ? "已包含 WAL" : "无 WAL"} · 只读快照`;
+      if (tables.length > 0) {
+        await selectTable(tables[0].name);
+      } else {
+        status.textContent = "数据库里没有表";
+      }
+    } catch (e) {
+      hint.textContent = dbErrorText(e);
+    }
+  };
+
+  const loadFiles = async (): Promise<void> => {
+    const serial = deviceSel.value;
+    const pkg = pkgInput.value.trim();
+    if (!serial) {
+      hint.textContent = "没有可用设备（检查 USB 调试与授权）";
+      return;
+    }
+    if (!pkg) {
+      hint.textContent = "请填写包名（applicationId）";
+      return;
+    }
+    localStorage.setItem(dbPkgKey(p.id), pkg);
+
+    closeSession();
+    files = [];
+    activeFile = null;
+    activeTable = null;
+    tables = [];
+    renderFiles();
+    renderTables();
+    clearGrid(dataGrid);
+    clearGrid(sqlGrid);
+    exportBtn.disabled = true;
+    revealBtn.disabled = true;
+    hint.textContent = "读取数据库列表…";
+    loadBtn.disabled = true;
+    try {
+      files = await invoke<DbFileInfo[]>("android_db_files", { serial, package: pkg });
+      renderFiles();
+      if (files.length === 0) {
+        hint.textContent = "没找到 .db / .sqlite 文件（release 包、未安装，或 run-as 不可用）";
+        return;
+      }
+      hint.textContent = `找到 ${files.length} 个数据库文件`;
+      await openFile(files[0]);
+    } catch (e) {
+      hint.textContent = dbErrorText(e);
+    } finally {
+      loadBtn.disabled = false;
+    }
+  };
+
+  const runSql = async (): Promise<void> => {
+    if (!sessionId) {
+      sqlStatus.textContent = "先打开一个数据库";
+      return;
+    }
+    const sql = sqlInput.value.trim();
+    if (!sql) return;
+    sqlStatus.textContent = "执行中…";
+    try {
+      const page = await invoke<DbPageInfo>("android_db_query", { sessionId, sql, limit });
+      renderGrid(sqlGrid, page);
+      sqlStatus.textContent = `${page.rows.length} 行${page.truncated ? "（已截断）" : ""} · ${page.elapsedMs} ms`;
+    } catch (e) {
+      sqlStatus.textContent = String(e);
+    }
+  };
+
+  const exportCopy = async (): Promise<void> => {
+    if (!sessionId) return;
+    const base = (activeFile ?? "database.db").split("/").pop() ?? "database.db";
+    const suggested = `${base.replace(/\.(db|sqlite|sqlite3|db3)$/i, "")}.view.db`;
+    const dest = await save({
+      title: "导出数据库副本",
+      defaultPath: suggested,
+      filters: [{ name: "SQLite", extensions: ["db", "sqlite"] }],
+    });
+    if (typeof dest !== "string" || !dest) return;
+    try {
+      await invoke("android_db_export", { sessionId, dest });
+      toast("已导出副本，可直接用 DB Browser / DataGrip 打开");
+    } catch (e) {
+      toast(String(e), "error");
+    }
+  };
+
+  const revealCopy = async (): Promise<void> => {
+    if (!localPath) return;
+    try {
+      await revealItemInDir(localPath);
+    } catch (e) {
+      toast(String(e), "error");
+    }
+  };
+
+  for (const t of tabs) {
+    t.addEventListener("click", () => switchTab(t.dataset.tab ?? "data"));
+  }
+  loadBtn.addEventListener("click", () => void loadFiles());
+  prevBtn.addEventListener("click", () => {
+    offset = Math.max(0, offset - limit);
+    void loadRows();
+  });
+  nextBtn.addEventListener("click", () => {
+    offset += limit;
+    void loadRows();
+  });
+  limitSel.addEventListener("change", () => {
+    limit = Number(limitSel.value) || 200;
+    offset = 0;
+    void loadRows();
+  });
+  exportBtn.addEventListener("click", () => void exportCopy());
+  revealBtn.addEventListener("click", () => void revealCopy());
+  req<HTMLButtonElement>("#db-run", overlay).addEventListener("click", () => void runSql());
+  sqlInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      void runSql();
+    }
+  });
+
+  const close = (): void => {
+    closeSession();
+    overlay.remove();
+  };
+  (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
+  overlay.addEventListener("mousedown", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  const boot = async (): Promise<void> => {
+    try {
+      const env = await invoke<DbEnvInfo>("android_db_env", { projectId: p.id });
+      const devices = env.devices.filter((d) => d.state === "device");
+      deviceSel.innerHTML = "";
+      for (const d of devices) {
+        const o = document.createElement("option");
+        o.value = d.serial;
+        o.textContent = `${d.model || d.serial}（${d.serial}）`;
+        deviceSel.appendChild(o);
+      }
+      const saved = localStorage.getItem(dbPkgKey(p.id)) ?? "";
+      pkgInput.value = saved || env.package || env.foreground || "";
+      hint.textContent =
+        [env.adbVersion, ...env.notes].filter(Boolean).join(" · ") || "就绪";
+      if (devices.length === 0) {
+        hint.textContent = env.notes.join(" · ") || "没有可用设备（检查 USB 调试）";
+        return;
+      }
+      if (pkgInput.value.trim()) void loadFiles();
+    } catch (e) {
+      hint.textContent = String(e);
+    }
+  };
+  void boot();
+
+  deviceSel.addEventListener("change", () => {
+    if (pkgInput.value.trim()) void loadFiles();
+  });
+  pkgInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") void loadFiles();
+  });
+}
+
 /* ---------------- 设置页 ---------------- */
+
+/** 最后一次编译（打包）的时间：exe 修改时间与前端打包时间取较大者。
+ *  exe mtime ≈ 最后一次编译链接/打包；前端常量覆盖"只重打包了前端"的情况。 */
+async function buildStamp(): Promise<string | null> {
+  let ms = 0;
+  try {
+    const exeMs = await invoke<number | null>("build_time");
+    if (typeof exeMs === "number" && exeMs > 0) ms = exeMs;
+  } catch {
+    // 老后端 / 非 Tauri 环境：忽略，退回前端打包时间
+  }
+  const feMs = Date.parse(__BUILD_TIME__);
+  if (Number.isFinite(feMs) && feMs > ms) ms = feMs;
+  if (!ms) return null;
+
+  const d = new Date(ms);
+  const p2 = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}/${p2(d.getMonth() + 1)}/${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`;
+}
 
 function openSettings(): void {
   const overlay = document.createElement("div");
@@ -4596,11 +6420,12 @@ function openSettings(): void {
     会话恢复: 3,
     终端: 4,
     编辑器: 5,
-    Flutter: 6,
-    Android: 7,
-    HarmonyOS: 8,
-    Npm: 9,
-    Docker: 10,
+    Git: 6,
+    Flutter: 7,
+    Android: 8,
+    HarmonyOS: 9,
+    Npm: 10,
+    Docker: 11,
   };
 
   /** 上一次「自动检测」的结果；只用来在输入框下面提示，不直接改用户填的值 */
@@ -4613,10 +6438,15 @@ function openSettings(): void {
 
   const close = (): void => overlay.remove();
 
-  // 版本信息：原来在工具栏上，移到设置页底部（固定可见，不用滚到底）
-  (
-    overlay.querySelector("#settings-version") as HTMLSpanElement
-  ).textContent = `${APP_NAME} · state schema v${state.schemaVersion}`;
+  // 左下角：最后一次编译（打包）时间。原来显示 "state schema vN"——
+  // 内部版本号对用户没意义，拿到包只需要知道"这个版本是什么时候出的"。
+  const versionEl = overlay.querySelector("#settings-version") as HTMLSpanElement;
+  versionEl.textContent = `${APP_NAME} · 正在读取编译时间…`;
+  void buildStamp().then((t) => {
+    versionEl.textContent = t
+      ? `${APP_NAME} · 最后编译 ${t}`
+      : `${APP_NAME} · 编译时间未知`;
+  });
 
   const section = (title: string, desc: string): HTMLDivElement => {
     const s = document.createElement("div");
@@ -4668,7 +6498,9 @@ function openSettings(): void {
       };
       v = m[label];
     } else if (sec === "编辑器") {
-      v = label.startsWith("VS Code") ? d.editor.vscodePath : null;
+      v = label === "编辑器程序" ? d.editor.path : null;
+    } else if (sec === "Git") {
+      v = d.git.desktopPath;
     } else if (sec === "Npm") {
       v = label === "node 目录" ? d.npm.nodePath : null;
     } else if (sec === "Docker") {
@@ -4824,6 +6656,117 @@ function openSettings(): void {
       field(s, "自定义路径", draft.flutterTool.customPath, (v) => {
         draft.flutterTool.customPath = v;
       });
+
+      // rename CLI：检查 pub global 安装与 PATH；安装/更新也放这里，避免用户另开终端
+      const renameRow = document.createElement("div");
+      renameRow.className = "set-row";
+      const renameLab = document.createElement("label");
+      renameLab.textContent = "rename CLI";
+      const renameCell = document.createElement("div");
+      renameCell.className = "set-cell";
+      const renameState = document.createElement("span");
+      renameState.className = "set-desc";
+      renameState.textContent = "检查中…";
+      const renameCheck = document.createElement("button");
+      renameCheck.className = "btn";
+      renameCheck.textContent = "重新检查";
+      const renameInstall = document.createElement("button");
+      renameInstall.className = "btn";
+      renameInstall.textContent = "安装 / 更新";
+      const renameCopy = document.createElement("button");
+      renameCopy.className = "btn";
+      renameCopy.textContent = "复制 PATH 目录";
+      renameCopy.hidden = true;
+      renameCell.append(renameState, renameCheck, renameInstall, renameCopy);
+      renameRow.append(renameLab, renameCell);
+      s.appendChild(renameRow);
+
+      const renameNote = document.createElement("div");
+      renameNote.className = "set-desc";
+      s.appendChild(renameNote);
+
+      let renamePubBin = "";
+      const renderRename = (st: FlutterRenameStatus): void => {
+        renamePubBin = st.pubBin;
+        renameState.classList.remove("rename-ok", "rename-warn", "rename-bad");
+        if (!st.installed) {
+          renameState.textContent = "未安装";
+          renameState.classList.add("rename-bad");
+        } else if (!st.onPath) {
+          renameState.textContent = `已安装 ${st.version ?? ""} · 不在 PATH`;
+          renameState.classList.add("rename-warn");
+        } else {
+          renameState.textContent = `已安装 ${st.version ?? ""} · PATH 已就绪`;
+          renameState.classList.add("rename-ok");
+        }
+
+        const parts: string[] = [];
+        if (st.exe) parts.push(`命令：${st.exe}`);
+        if (!st.onPath) {
+          parts.push(
+            `pub bin：${st.pubBin}（把这个目录加入用户 PATH 后，终端里才能直接运行 rename）`,
+          );
+        }
+        if (!st.installed) {
+          parts.push("点「安装 / 更新」会执行：flutter pub global activate rename");
+        }
+        if (st.error) parts.push(st.error);
+        renameNote.textContent = parts.join("\n");
+        renameNote.style.whiteSpace = "pre-line";
+        renameCopy.hidden = st.onPath;
+        renameCopy.title = `复制 ${st.pubBin}`;
+      };
+
+      const refreshRename = async (force = false): Promise<void> => {
+        renameCheck.disabled = true;
+        renameState.textContent = "检查中…";
+        try {
+          const st = await invoke<FlutterRenameStatus>(
+            force ? "rename_refresh" : "rename_status",
+          );
+          renderRename(st);
+        } catch (e) {
+          renameState.textContent = "检查失败";
+          renameState.classList.add("rename-bad");
+          renameNote.textContent = String(e);
+        } finally {
+          renameCheck.disabled = false;
+        }
+      };
+
+      renameCheck.addEventListener("click", () => void refreshRename(true));
+      renameInstall.addEventListener("click", () => {
+        void (async () => {
+          renameInstall.disabled = true;
+          renameInstall.textContent = "安装中…";
+          renameState.textContent = "正在执行 flutter pub global activate rename…";
+          try {
+            const res = await invoke<FlutterRenameActivation>("rename_activate");
+            renderRename(res.status);
+            toast(
+              res.status.onPath
+                ? `rename 已安装并在 PATH 中：${res.status.version ?? ""}`
+                : `rename 已安装，但不在 PATH；请把 ${res.status.pubBin} 加入 PATH`,
+            );
+          } catch (e) {
+            renameState.textContent = "安装失败";
+            renameState.classList.add("rename-bad");
+            renameNote.textContent = String(e);
+            toast(String(e), "error");
+          } finally {
+            renameInstall.disabled = false;
+            renameInstall.textContent = "安装 / 更新";
+          }
+        })();
+      });
+      renameCopy.addEventListener("click", () => {
+        if (!renamePubBin) return;
+        void navigator.clipboard
+          .writeText(renamePubBin)
+          .then(() => toast("已复制 PATH 目录"))
+          .catch((e) => toast(String(e), "error"));
+      });
+      void refreshRename();
     }
 
     // 命令模板
@@ -5086,13 +7029,13 @@ function openSettings(): void {
       );
       field(
         s,
-        "VS Code（Code.exe）",
-        draft.editor?.vscodePath ?? "",
+        "编辑器程序",
+        draft.editor?.path ?? "",
         (v) => {
           const t = (v ?? "").trim();
-          draft.editor = { vscodePath: t === "" ? null : t };
+          draft.editor = { path: t === "" ? null : t };
         },
-        { browse: "none" }, // 下面有带 exe 过滤的「浏览 Code.exe…」
+        { browse: "none" }, // 下面有带 exe 过滤的「浏览 exe…」
       );
 
       const bar = document.createElement("div");
@@ -5103,19 +7046,19 @@ function openSettings(): void {
 
       const browseBtn = document.createElement("button");
       browseBtn.className = "btn";
-      browseBtn.textContent = "浏览 Code.exe…";
+      browseBtn.textContent = "浏览 exe…";
       browseBtn.addEventListener("click", () => {
         void (async () => {
           try {
             const picked = await open({
               multiple: false,
-              title: "选择 VS Code 的 Code.exe",
+              title: "选择编辑器程序（Code.exe / zed.exe / sublime_text.exe…）",
               filters: [{ name: "可执行文件", extensions: ["exe"] }],
-              defaultPath: draft.editor?.vscodePath ?? undefined,
+              defaultPath: draft.editor?.path ?? undefined,
             });
             if (!picked) return;
             const p = Array.isArray(picked) ? picked[0] : picked;
-            draft.editor = { vscodePath: p };
+            draft.editor = { path: p };
             build();
           } catch (e) {
             toast(String(e), "error");
@@ -5129,7 +7072,8 @@ function openSettings(): void {
       const hint = document.createElement("div");
       hint.className = "set-desc";
       hint.textContent =
-        "留空则自动探测。要选 Code.exe，不是 bin 目录里的 code.cmd（后者是脚本，不能直接执行）";
+        "留空则自动探测（VS Code / Zed / Sublime Text / Cursor / Notepad++）。" +
+        "请选 GUI 程序，不要选 bin 目录里的 code.cmd、subl 这类启动脚本";
       s.appendChild(hint);
 
       // 留空时告诉用户实际会用哪一个，免得"未配置"让人以为不能用
@@ -5137,13 +7081,89 @@ function openSettings(): void {
         try {
           const auto = await invoke<string | null>("detect_editor_path");
           // 跑过「自动检测」后，输入框下面已经有「检测到：…」，这里不再重复
-          if (!draft.editor?.vscodePath && auto && !detected) {
+          if (!draft.editor?.path && auto && !detected) {
             hint.textContent = `留空时使用：${auto}`;
           }
         } catch {
           /* 探测失败就保持通用提示 */
         }
       })();
+    }
+
+    // Git 桌面客户端（GitHub Desktop 等）
+    {
+      const s = section(
+        "Git",
+        "填了程序后，项目右键会出现「在 Git Desktop 中打开」；留空则不显示该项",
+      );
+
+      field(
+        s,
+        "Git Desktop 程序",
+        draft.git?.desktopPath ?? "",
+        (v) => {
+          const t = (v ?? "").trim();
+          draft.git = { desktopPath: t === "" ? null : t };
+        },
+        { browse: "none" }, // 下面有带 exe 过滤的「浏览…」
+      );
+
+      const bar = document.createElement("div");
+      bar.className = "set-desc";
+      bar.style.display = "flex";
+      bar.style.gap = "8px";
+      bar.style.alignItems = "center";
+
+      const browseBtn = document.createElement("button");
+      browseBtn.className = "btn";
+      browseBtn.textContent = "浏览 GitHubDesktop.exe…";
+      browseBtn.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const picked = await open({
+              multiple: false,
+              title: "选择 Git 桌面客户端（GitHubDesktop.exe / SourceTree.exe…）",
+              filters: [{ name: "可执行文件", extensions: ["exe"] }],
+              defaultPath: draft.git?.desktopPath ?? undefined,
+            });
+            if (!picked) return;
+            const p = Array.isArray(picked) ? picked[0] : picked;
+            draft.git = { desktopPath: p };
+            build();
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      const fillBtn = document.createElement("button");
+      fillBtn.className = "btn";
+      fillBtn.textContent = "读取已安装的 GitHub Desktop";
+      fillBtn.addEventListener("click", () => {
+        void (async () => {
+          try {
+            const auto = await invoke<string | null>("detect_git_desktop_path");
+            if (!auto) {
+              toast("没有自动检测到 GitHub Desktop，请手动浏览 exe", "error");
+              return;
+            }
+            draft.git = { desktopPath: auto };
+            build();
+            toast("已填入探测到的 GitHub Desktop");
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+
+      bar.append(browseBtn, fillBtn);
+      s.appendChild(bar);
+
+      const hint = document.createElement("div");
+      hint.className = "set-desc";
+      hint.textContent =
+        "GitHub Desktop 会自动用 --cli-open 打开项目目录；其它客户端按「程序 + 目录」启动。";
+      s.appendChild(hint);
     }
 
     // Npm
@@ -5288,35 +7308,15 @@ async function boot(): Promise<void> {
   app.innerHTML = `
     <div class="app">
       <header class="toolbar">
-        <div class="brand" title="${APP_NAME}">
-          <span class="logo">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <defs>
-                <linearGradient id="brand-card" x1="0" y1="0" x2="1" y2="1">
-                  <stop offset="0" stop-color="#7c5cff" />
-                  <stop offset="1" stop-color="#2f8bff" />
-                </linearGradient>
-              </defs>
-              <rect x="7.6" y="2.6" width="12.6" height="15.8" rx="3.4" fill="#3a4777" />
-              <rect
-                x="3.4" y="5.4" width="12.6" height="15.8" rx="3.4"
-                fill="url(#brand-card)" stroke="#ffffff" stroke-opacity="0.18" stroke-width="0.6"
-              />
-              <path
-                d="M7.2 10.3 L12.2 13.3 L7.2 16.3 Z"
-                fill="#ffffff" stroke="#ffffff" stroke-width="1.2" stroke-linejoin="round"
-              />
-            </svg>
-          </span>
-          <span class="title">${APP_NAME}</span>
-        </div>
         <div class="tb-menu">
           <button class="btn menu-btn" id="btn-import-menu">导入 ▾</button>
+          <button class="btn menu-btn" id="btn-custom-menu">自定义命令 ▾</button>
         </div>
         <div class="tb-center"></div>
         <div class="tb-right">
           <button class="btn" id="btn-filing" title="安卓备案信息：选择 APK 查看包名 / MD5 / 公钥">📋 备案</button>
           <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
+          <button class="btn" id="btn-processes" title="进程与端口：排查端口占用、结束残留的 flutter/dart/java 进程">🧩 进程</button>
           <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
           <button class="btn icon" id="btn-settings" title="设置">⚙</button>
         </div>
@@ -5337,7 +7337,7 @@ async function boot(): Promise<void> {
               <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
               <button class="cbtn" id="btn-find" disabled title="搜索日志（Ctrl+F）"><i class="hi">🔍</i>搜索</button>
               <button class="cbtn" id="btn-clear" disabled title="清空当前会话的日志（含回滚区；不影响进程）"><i class="hi">🧹</i>清空</button>
-              <button class="cbtn" id="btn-open-proj" disabled title="用编辑器打开本会话的项目目录（VS Code）"><i class="hi">📂</i>项目</button>
+              <button class="cbtn" id="btn-open-proj" disabled title="用编辑器打开本会话的项目目录"><i class="hi">📂</i>项目</button>
             </span>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
@@ -5436,6 +7436,10 @@ async function boot(): Promise<void> {
     e.stopPropagation();
     openImportMenu(e.currentTarget as HTMLElement);
   });
+  req<HTMLButtonElement>("#btn-custom-menu").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openCustomCommandMenu();
+  });
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
@@ -5454,6 +7458,7 @@ async function boot(): Promise<void> {
   req<HTMLButtonElement>("#btn-emulators").addEventListener("click", (e) =>
     openEmulatorMenu(e.currentTarget as HTMLElement),
   );
+  req<HTMLButtonElement>("#btn-processes").addEventListener("click", () => openProcessPanel());
   req<HTMLButtonElement>("#btn-reload").addEventListener("click", () => sendKey("r"));
   req<HTMLButtonElement>("#btn-restart").addEventListener("click", () => sendKey("R"));
   req<HTMLButtonElement>("#btn-stop").addEventListener("click", () => void stopActive());
@@ -5510,7 +7515,10 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
   }
 
   render();
-  for (const p of state.projects) void refreshFlutter(p.id);
+  // 文件夹项目不是 Flutter 工程，不做探测（否则会在树里显示「不可用」）
+  for (const p of state.projects) {
+    if (p.kind !== "folder") void refreshFlutter(p.id);
+  }
 
   // D-10：恢复上次的 tab 壳与历史输出（进程不拉起）
   await restoreSessions();
@@ -5640,6 +7648,10 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
       const anchor = document.querySelector<HTMLButtonElement>("#btn-emulators");
       if (anchor) openEmulatorMenu(anchor);
     }
+    // 开发期：直接打开「进程与端口」面板（用于截图核对）
+    if (await invoke<string | null>("dev_env", { name: "FLA_PROCESSES" })) {
+      window.setTimeout(() => openProcessPanel(), 600);
+    }
     const pkgHook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_PKG" });
     if (pkgHook) {
       window.setTimeout(() => {
@@ -5752,6 +7764,13 @@ req<HTMLButtonElement>("#term-search-close").addEventListener("click", () => clo
     }
     const filingHook = await invoke<string | null>("dev_env", { name: "FLA_FILING" });
     if (filingHook) void showFilingInfo(filingHook);
+
+    // 数据库查看器：FLA_DB="<项目id>" 启动即打开，便于截图/无人值守验证
+    const dbHook = await invoke<string | null>("dev_env", { name: "FLA_DB" });
+    if (dbHook) {
+      const target = state.projects.find((x) => x.id === dbHook);
+      if (target) void openDbInspector(target);
+    }
 
     const projMenu = await invoke<string | null>("dev_env", { name: "FLA_PROJ_MENU" });
     if (projMenu) {

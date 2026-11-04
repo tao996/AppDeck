@@ -6,6 +6,13 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
 
+  // 前端打包时间戳：设置页左下角显示"最后编译"。
+  // 编译期注入字符串常量，运行时零开销；取 exe mtime 与它中的较大值，
+  // 这样只重新打包前端（没重编 Rust）也能反映出来。
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
