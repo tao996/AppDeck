@@ -357,6 +357,94 @@ pub fn detect_package(project_path: &str) -> Option<String> {
 
 const FIND_BODY: &str = r#"find . -maxdepth 4 -type f \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" -o -name "*.db3" \)"#;
 
+/// shared_prefs 目录只找 XML；Flutter 的键在 FlutterSharedPreferences.xml 里。
+const PREFS_FIND_BODY: &str =
+    r#"find ./shared_prefs -maxdepth 1 -type f -name "*.xml""#;
+
+fn list_xml_files(
+    adb: &Path,
+    serial: &str,
+    package: &str,
+    find_body: &str,
+) -> Result<Vec<DbFile>, String> {
+    if !valid_serial(serial) {
+        return Err("设备序号不合法".into());
+    }
+    if !valid_package(package) {
+        return Err("包名不合法".into());
+    }
+
+    let with_stat = format!(
+        "run-as {package} sh -c '{find_body} -exec stat -c \"%s %n\" {{}} + 2>/dev/null'"
+    );
+    let text = shell(adb, serial, &with_stat).unwrap_or_default();
+    let mut files = parse_find_output(&text);
+
+    if files.is_empty() {
+        let plain = format!("run-as {package} sh -c '{find_body} 2>/dev/null'");
+        let text = shell(adb, serial, &plain)?;
+        if text.trim().is_empty() {
+            let probe = format!("run-as {package} true");
+            if let Err(e) = shell(adb, serial, &probe) {
+                return Err(format!(
+                    "无法以 {package} 的身份读取数据目录（release 包或未安装？）：{e}"
+                ));
+            }
+        }
+        files = parse_find_output(&text);
+    }
+
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(files)
+}
+
+/// 列出 `<app>/shared_prefs/*.xml`（Flutter 的 SharedPreferences 就在这里）。
+pub fn list_pref_files(
+    adb: &Path,
+    serial: &str,
+    package: &str,
+) -> Result<Vec<DbFile>, String> {
+    list_xml_files(adb, serial, package, PREFS_FIND_BODY)
+}
+
+fn valid_pref_path(remote: &str) -> bool {
+    remote.starts_with("./shared_prefs/")
+        && remote.ends_with(".xml")
+        && !remote.contains("..")
+        && !remote.contains('\0')
+        && remote.len() <= 512
+}
+
+/// 读取一个 shared_prefs XML 的原文；解析交给前端 DOMParser。
+pub fn read_pref_file(
+    adb: &Path,
+    serial: &str,
+    package: &str,
+    remote: &str,
+) -> Result<String, String> {
+    if !valid_serial(serial) || !valid_package(package) {
+        return Err("设备或包名不合法".into());
+    }
+    if !valid_pref_path(remote) {
+        return Err("SharedPreferences 文件路径不合法".into());
+    }
+
+    let cmd = format!("run-as {package} cat {}", shell_quote(remote));
+    let out = run(adb, &["-s", serial, "exec-out", &cmd])?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if err.is_empty() {
+            format!("读取 {remote} 失败（adb 退出码 {:?}）", out.status.code())
+        } else {
+            format!("读取 {remote} 失败：{err}")
+        });
+    }
+    if out.stdout.len() > 4 * 1024 * 1024 {
+        return Err("SharedPreferences 文件超过 4 MB，拒绝在面板里展开".into());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// 解析 `-exec stat -c "%s %n"` 的输出；没有 stat 时退回只有路径的 find 输出。
 pub fn parse_find_output(text: &str) -> Vec<DbFile> {
     let mut out = Vec::new();
@@ -821,6 +909,16 @@ pub fn env(project_path: Option<&str>, settings: &AndroidSettings) -> DbEnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_shared_prefs_path() {
+        assert!(valid_pref_path("./shared_prefs/FlutterSharedPreferences.xml"));
+        assert!(valid_pref_path("./shared_prefs/com.app_preferences.xml"));
+        assert!(!valid_pref_path("./databases/app.db"));
+        assert!(!valid_pref_path("./shared_prefs/../secret.xml"));
+        assert!(!valid_pref_path("./shared_prefs/a.xml.exe"));
+        assert!(!valid_pref_path("/data/data/com.app/shared_prefs/a.xml"));
+    }
 
     #[test]
     fn parses_adb_devices() {

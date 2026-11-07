@@ -2255,6 +2255,50 @@ select.set-input {
   border-color: var(--line-2);
 }
 
+.db-subtabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+  background: #15191f;
+}
+
+.db-subtab {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  padding: 2px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.db-subtab:hover {
+  color: var(--fg);
+}
+
+.db-subtab.active {
+  color: var(--fg);
+  background: var(--bg-4);
+  border-color: var(--line-2);
+}
+
+.db-cell-menu {
+  z-index: 1200;
+  min-width: 280px;
+  max-width: 420px;
+}
+
+/* 表格单元格可选中复制；body 默认是 user-select:none */
+.db-grid td,
+.db-grid th,
+.prefs-grid td,
+.prefs-grid th {
+  user-select: text;
+}
+
 .db-pane {
   flex: 1;
   display: flex;
@@ -2303,6 +2347,92 @@ select.set-input {
 .db-grid td.db-null {
   color: var(--fg-faint);
   font-style: italic;
+}
+
+/* ---------------- SharedPreferences 查看 ---------------- */
+
+.prefs-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+  flex: 0 0 auto;
+}
+
+.prefs-bar label {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.prefs-bar .set-input {
+  width: auto;
+}
+
+#prefs-file {
+  min-width: 260px;
+  max-width: 460px;
+  flex: 0 1 auto;
+}
+
+#prefs-search {
+  width: 220px;
+}
+
+.prefs-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.prefs-check input {
+  accent-color: var(--accent);
+}
+
+.prefs-table-wrap {
+  padding: 0 10px 6px;
+}
+
+.prefs-grid {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.prefs-grid th:nth-child(1) {
+  width: 30%;
+}
+
+.prefs-grid th:nth-child(2) {
+  width: 90px;
+}
+
+.prefs-grid td.prefs-key {
+  font-family: var(--mono);
+  color: #b9d0ee;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.prefs-grid td.prefs-type {
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.prefs-grid td.prefs-value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.prefs-path {
+  flex: 0 0 auto;
+  padding: 0 12px 8px;
+  color: var(--fg-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  overflow-wrap: anywhere;
 }
 
 .db-pager,

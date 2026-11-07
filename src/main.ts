@@ -397,6 +397,10 @@ interface TermSession {
   devToolsUrl?: string;
   /** 用于跨数据块匹配锚点的滚动窗口 */
   scan: string;
+  /** 命令来源（npm / docker / launch-json…）：区分「外部程序 run」和 flutter run */
+  source?: string;
+  /** 检测 cmd 批处理提示用的滚动尾巴（跨数据块拼接提示文本） */
+  promptTail?: string;
   /** 恢复自磁盘（进程未运行，禁止写 PTY） */
   restored?: boolean;
   /** run 会话里 flutter 是否正在运行（决定热重载工具条显不显示） */
@@ -736,6 +740,20 @@ async function revealLocation(cwd: string, raw: string): Promise<void> {
   }
 }
 
+/** 网址走系统浏览器；其余仍按磁盘位置处理 */
+async function openLinkText(cwd: string, raw: string): Promise<void> {
+  if (!isUrlText(raw)) {
+    await openLocation(cwd, raw);
+    return;
+  }
+  const url = browserUrl(raw);
+  try {
+    await openUrl(url);
+  } catch (e) {
+    toast(`无法打开链接：${url}\n${String(e)}`, "error");
+  }
+}
+
 /** 把一行的字符下标映射到终端列号（CJK 宽字符占两格，不能按字符数直接算） */
 function mapLine(term: Terminal, y: number): { text: string; xs: number[] } | null {
   const line = term.buffer.active.getLine(y - 1);
@@ -755,11 +773,43 @@ function mapLine(term: Terminal, y: number): { text: string; xs: number[] } | nu
   return { text, xs };
 }
 
+/** 网址：终端里 flutter / vite 输出的访问地址，用浏览器打开 */
+const URL_PATTERNS: RegExp[] = [
+  /\b(?:https?|ftp):\/\/[^\s"'<>|\u3000]+/gi,
+  // 没写协议的本地地址：localhost:8080、127.0.0.1:3000
+  /\b(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d{1,5})(?:\/[^\s"'<>|]*)?/gi,
+];
+
 /** 候选：`package:` URI、盘符绝对路径（行尾的 :行:列 由后端拆） */
 const LOCATE_PATTERNS: RegExp[] = [
   /package:[A-Za-z0-9_]+\/[^\s"'<>|]+/g,
-  /[A-Za-z]:[\\/][^\s"'<>|]+/g,
+  // 前缀捕获而不是 lookbehind：盘符前不能紧邻字母/数字/+-.
+  // 否则 `https://host` 里的 `s://` 会被当成 S 盘，解析成 `s:\host` 再提示"文件不存在"
+  /(^|[^A-Za-z0-9+.\-])([A-Za-z]:[\\/][^\s"'<>|]+)/g,
 ];
+
+/** 行尾标点不该算进链接（`path.txt,`、`http://a.cn）。`） */
+function trimLinkTail(raw: string): string {
+  return raw.replace(/[,\u3002\uff09)\]]+$/, "");
+}
+
+/** 网址再额外去掉句末的英文句点（`访问 https://a.cn.` 里的点不属于域名） */
+function trimUrlTail(raw: string): string {
+  return trimLinkTail(raw).replace(/\.+$/, "");
+}
+
+/** 是否是网址（含不带协议的 localhost:端口） */
+function isUrlText(raw: string): boolean {
+  return (
+    /^(?:https?|ftp):\/\//i.test(raw) ||
+    /^(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d/i.test(raw)
+  );
+}
+
+/** 交给浏览器的地址：没写协议时补 http:// */
+function browserUrl(raw: string): string {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `http://${raw}`;
+}
 
 let linkMenuEl: HTMLDivElement | null = null;
 
@@ -770,7 +820,7 @@ function openOnce(cwd: string, raw: string): void {
   const now = Date.now();
   if (lastOpen.key === key && now - lastOpen.at < 300) return;
   lastOpen = { key, at: now };
-  void openLocation(cwd, raw);
+  void openLinkText(cwd, raw);
 }
 
 function closeLinkMenu(): void {
@@ -800,15 +850,26 @@ function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
     body.appendChild(el);
   };
 
+  if (isUrlText(raw)) {
+    item("使用浏览器打开", browserUrl(raw), () => void openLinkText(cwd, raw));
+    item("复制链接", "", () => {
+      void copyPlainText(raw)
+        .then(() => toast("已复制"))
+        .catch((e) => toast(String(e), "error"));
+    });
+    return;
+  }
+
   item("用编辑器打开", "用默认编辑器，定位到对应行", () => void openLocation(cwd, raw));
   item("在资源管理器中定位", "选中该文件", () => void revealLocation(cwd, raw));
   item("复制路径", "", () => {
-    void navigator.clipboard?.writeText(raw).catch(() => undefined);
-    toast("已复制");
+    void copyPlainText(raw)
+      .then(() => toast("已复制"))
+      .catch((e) => toast(String(e), "error"));
   });
 }
 
-/** 给终端注册"可点击位置"：Ctrl+单击打开，右键出菜单 */
+/** 给终端注册"可点击位置"：网址用浏览器打开，磁盘路径用编辑器/资源管理器；Ctrl+单击，右键出菜单 */
 function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): void {
   const cwd = s.cwd || "";
   // 悬停状态按会话隔离：多个终端同时开着时，全局变量会互相串
@@ -824,33 +885,66 @@ function attachLinkProvider(term: Terminal, pane: HTMLElement, s: TermSession): 
 
       const { text, xs } = mapped;
       const links: ILink[] = [];
+      /** 已被识别成网址的区间：里面的 `s://` 不能再当盘符路径 */
+      const urlSpans: Array<{ start: number; end: number }> = [];
+
+      const overlapsUrl = (start: number, end: number): boolean =>
+        urlSpans.some((span) => start < span.end && end > span.start);
+
+      const addLink = (raw: string, start: number): void => {
+        if (raw.length < 4) return;
+        const end = start + raw.length;
+        if (end > xs.length) return;
+
+        links.push({
+          range: { start: { x: xs[start], y }, end: { x: xs[end - 1], y } },
+          text: raw,
+          decorations: { underline: true, pointerCursor: true },
+          activate: (event: MouseEvent) => {
+            // 跟随 VS Code / Android Studio：Ctrl+单击
+            if (!event.ctrlKey && !event.metaKey) return;
+            openOnce(cwd, raw);
+          },
+          hover: () => {
+            hovered = { raw };
+          },
+          leave: () => {
+            if (hovered?.raw === raw) hovered = null;
+          },
+        });
+      };
+
+      // 网址优先：命中后同一段文字不再参与盘符匹配
+      for (const re of URL_PATTERNS) {
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          const raw = trimUrlTail(m[0]);
+          if (raw.length < 4) continue;
+          const start = m.index;
+          const end = start + raw.length;
+          if (end > xs.length) continue;
+          if (overlapsUrl(start, end)) continue;
+
+          urlSpans.push({ start, end });
+          addLink(raw, start);
+        }
+      }
 
       for (const re of LOCATE_PATTERNS) {
         re.lastIndex = 0;
         let m: RegExpExecArray | null;
         while ((m = re.exec(text)) !== null) {
-          const raw = m[0].replace(/[,\u3002\uff09)\]]+$/, "");
+          // 盘符规则带一个"前导分隔符"捕获组，链接本体是第 2 组
+          const body = m[2] ?? m[0];
+          const start = m.index + (m[0].length - body.length);
+          const raw = trimLinkTail(body);
           if (raw.length < 4) continue;
-          const start = m.index;
           const end = start + raw.length;
           if (end > xs.length) continue;
+          if (overlapsUrl(start, end)) continue;
 
-          links.push({
-            range: { start: { x: xs[start], y }, end: { x: xs[end - 1], y } },
-            text: raw,
-            decorations: { underline: true, pointerCursor: true },
-            activate: (event: MouseEvent) => {
-              // 跟随 VS Code / Android Studio：Ctrl+单击
-              if (!event.ctrlKey && !event.metaKey) return;
-              openOnce(cwd, raw);
-            },
-            hover: () => {
-              hovered = { raw };
-            },
-            leave: () => {
-              if (hovered?.raw === raw) hovered = null;
-            },
-          });
+          addLink(raw, start);
         }
       }
 
@@ -909,7 +1003,7 @@ function ensureTerm(s: TermSession): void {
 
   term.open(pane);
 
-  // 终端里的路径 / package: URI 可点（Ctrl+单击打开，右键出菜单）
+  // 终端里的网址 / 路径 / package: URI 可点（Ctrl+单击打开，右键出菜单）
   attachLinkProvider(term, pane, s);
 
   try {
@@ -1023,18 +1117,20 @@ function updateControls(): void {
 
   // 终端里的「停止」是 Ctrl+C 中断当前命令，不结束 shell；自定义命令直接结束进程
   const stopBtn = req<HTMLButtonElement>("#btn-stop");
-  stopBtn.title =
-    s?.kind === "terminal"
+  stopBtn.title = !s
+    ? "停止当前会话"
+    : s.kind === "terminal"
       ? "中断当前命令（发送 Ctrl+C）；不会关闭终端"
-      : s?.kind === "custom"
-        ? "结束自定义命令进程（保留标签与历史）"
-        : "停止当前会话";
-  rerun.title =
-    s?.kind === "terminal"
+      : s.kind === "custom" || s.kind === "build" || isExternalRunSession(s)
+        ? "结束进程（保留标签与历史）"
+        : "向 flutter run 发送 q，优雅退出";
+  rerun.title = !s
+    ? "重新执行原命令"
+    : s.kind === "terminal"
       ? "中断当前命令并立即重跑（自动回车）"
-      : s?.kind === "custom"
+      : s.kind === "custom"
         ? "结束当前进程并重新启动这条自定义命令"
-        : "重新执行原命令";
+        : "重新执行原命令（自动运行）";
   const info = req<HTMLSpanElement>("#ctx-info");
   info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
 
@@ -1308,7 +1404,9 @@ function renderTree(): void {
           .filter(Boolean)
           .join("\n");
 
-        row.addEventListener("dblclick", () => {
+        row.addEventListener("dblclick", (e) => {
+          // 双击 ▶ 按钮时 click 已经跑过一次了，别再补一刀
+          if ((e.target as HTMLElement).closest(".run-btn")) return;
           if (upCmd) void runCommand(p, upCmd);
         });
         row.querySelector(".run-btn")?.addEventListener("click", (e) => {
@@ -1350,7 +1448,11 @@ function renderTree(): void {
           .join("\n");
 
         row.addEventListener("click", () => selectCommand(c.id));
-        row.addEventListener("dblclick", () => void runCommand(p, c));
+        row.addEventListener("dblclick", (e) => {
+          // 双击 ▶ 按钮会先触发两次 click（各运行一次），这里不能再运行
+          if ((e.target as HTMLElement).closest(".run-btn")) return;
+          void runCommand(p, c);
+        });
         row.querySelector(".run-btn")?.addEventListener("click", (e) => {
           e.stopPropagation();
           void runCommand(p, c);
@@ -1425,6 +1527,16 @@ function selectCommand(id: string): void {
   renderTree();
 }
 
+/** npm / docker 是「外部程序」：后端直接执行 program+args，没有交互 shell。
+ *  kind 同为 run，但它们的停止 / 重跑 / 状态判定和 flutter run 完全不同。 */
+function isExternalSource(source: string | undefined): boolean {
+  return source === "npm" || source === "docker";
+}
+
+function isExternalRunSession(s: TermSession): boolean {
+  return s.kind === "run" && isExternalSource(s.source);
+}
+
 function mountSession(
   res: StartResponse,
   kind: string,
@@ -1437,8 +1549,10 @@ function mountSession(
     platform?: string;
     action?: string;
     target?: string;
+    source?: string;
   },
 ): void {
+  const externalRun = kind === "run" && isExternalSource(origin?.source);
   const session: TermSession = {
     id: res.id,
     title: res.title,
@@ -1449,10 +1563,10 @@ function mountSession(
     cwd: res.cwd,
     artifacts: [],
     // 只有 `flutter run` 有明确的"就绪"标志（输出 Flutter run key commands.）。
-    // 其他类型（build / custom / terminal）没有这个标志，若从 starting 起步
-    // 就会永远黄点闪烁——终端尤其明显（shell 根本不退出）。
-    status: kind === "run" ? "starting" : "running",
+    // 外部程序（npm run dev / docker logs -f）启动即已在跑，等标志只会永远黄点。
+    status: kind === "run" && !externalRun ? "starting" : "running",
     scan: "",
+    source: origin?.source,
     projectId: origin?.projectId,
     commandId: origin?.commandId,
     templateId: origin?.templateId,
@@ -1483,15 +1597,47 @@ function mountSession(
   });
 }
 
-async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
+/** 同一身份（项目+命令 / 模板 / 自定义命令 / 平台动作）当前活着的会话。
+ *  用于"重复点 ▶ 只切回已有标签"——同一个命令起两个进程通常只会互相抢端口。 */
+function liveSessionFor(match: (s: TermSession) => boolean): TermSession | undefined {
+  return sessions.find((s) => !s.restored && s.status !== "stopped" && match(s));
+}
+
+/** 正在启动的 key：双击 ▶ 时第二次点击往往早于第一次的会话挂载完成，
+ *  此时 liveSessionFor 还看不到它，只能靠这个集合挡住。 */
+const launchingKeys = new Set<string>();
+
+/** 返回 true 表示这次点击被吞掉（同一个 key 已经在启动中） */
+function markLaunching(key: string): boolean {
+  if (launchingKeys.has(key)) {
+    toast("正在启动，请稍候…");
+    return true;
+  }
+  launchingKeys.add(key);
+  return false;
+}
+
+async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<boolean> {
   selectCommand(c.id);
 
   // 普通命令（docker up/stop、npm test…）跑完就退出，没必要占一个标签：
   // 投递到项目的常驻终端里，跑完 shell 还在，可以接着敲
   if (c.kind === "custom") {
-    await runInTerminal(p, c);
-    return;
+    return runInTerminal(p, c);
   }
+
+  // 同一条命令已经在跑：切回那个标签，不再起第二个进程 / 第二个标签
+  const live = liveSessionFor(
+    (s) => s.projectId === p.id && s.commandId === c.id && s.kind !== "terminal",
+  );
+  if (live) {
+    activateSession(live.id);
+    toast(`该命令已在运行：${live.title}`);
+    return true;
+  }
+
+  const key = `cmd|${p.id}|${c.id}`;
+  if (markLaunching(key)) return false;
 
   try {
     const res = await invoke<StartResponse>("start_session", {
@@ -1504,9 +1650,14 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<void> {
     mountSession(res, c.kind, c.flutterMode ?? "debug", {
       projectId: p.id,
       commandId: c.id,
+      source: c.source ?? undefined,
     });
+    return true;
   } catch (e) {
     toast(String(e), "error");
+    return false;
+  } finally {
+    launchingKeys.delete(key);
   }
 }
 
@@ -1517,8 +1668,38 @@ function projectShell(p: Proj): TermSession | undefined {
   );
 }
 
+/** 同一项目的命令投递串行化：双击时第二次会等第一次把 shell 建好再复用，
+ *  否则两个并发请求都看不到 shell，各开一个终端。 */
+const terminalQueue = new Map<string, Promise<unknown>>();
+
+/** 自定义命令的「双击防抖」：鼠标双击会连发两次 click，
+ *  第二个 click 不该把同一条命令再敲一遍（重跑传 reuse，不走这层）。 */
+const lastTerminalRun = new Map<string, number>();
+
+function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<boolean> {
+  if (!reuse) {
+    const runKey = `${p.id}|${c.id}`;
+    const now = Date.now();
+    if (now - (lastTerminalRun.get(runKey) ?? 0) < 800) return Promise.resolve(false);
+    lastTerminalRun.set(runKey, now);
+  }
+
+  const prev = terminalQueue.get(p.id) ?? Promise.resolve();
+  const task = prev
+    .catch(() => undefined)
+    .then(() => runInTerminalNow(p, c, reuse));
+  terminalQueue.set(p.id, task);
+  void task
+    .finally(() => {
+      if (terminalQueue.get(p.id) === task) terminalQueue.delete(p.id);
+    })
+    .catch(() => undefined);
+  return task;
+}
+
 /** 把一条命令打进项目的常驻终端：有就复用，没有就新开一个 shell */
-async function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<void> {
+async function runInTerminalNow(p: Proj, c: Cmd, reuse?: TermSession): Promise<boolean> {
+  // 串行化之后这里再取一次：上一次点击可能刚建好 shell
   const existing = reuse ?? projectShell(p);
   try {
     const res = await invoke<StartResponse>("run_in_terminal", {
@@ -1533,17 +1714,30 @@ async function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<void
       // 记住「这个 shell 最近一次执行的是哪条命令」，重跑按钮据此可用
       existing.commandId = c.id;
       activateSession(existing.id);
-      return;
+      return true;
     }
 
     mountSession(res, "terminal", "debug", { projectId: p.id, commandId: c.id });
+    return true;
   } catch (e) {
     toast(String(e), "error");
+    return false;
   }
 }
 
 /// 全局模板：不写入项目命令列表，直接起一个会话
 async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
+  // 同一个模板已在跑：切回它，不再多开一个进程
+  const live = liveSessionFor((s) => s.projectId === p.id && s.templateId === t.id);
+  if (live) {
+    activateSession(live.id);
+    toast(`该模板已在运行：${live.title}`);
+    return;
+  }
+
+  const key = `tpl|${p.id}|${t.id}`;
+  if (markLaunching(key)) return;
+
   try {
     const res = await invoke<StartResponse>("start_template_session", {
       projectId: p.id,
@@ -1555,9 +1749,12 @@ async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
     mountSession(res, t.kind, t.flutterMode ?? "debug", {
       projectId: p.id,
       templateId: t.id,
+      source: t.source ?? undefined,
     });
   } catch (e) {
     toast(String(e), "error");
+  } finally {
+    launchingKeys.delete(key);
   }
 }
 
@@ -1584,6 +1781,15 @@ async function stopActive(): Promise<void> {
     return;
   }
 
+  // 外部程序（npm run dev / docker logs -f）和 build 没有 flutter 的 `q` 退出键：
+  // 发 q 只会往 stdin 里打一个字母，再等 5 秒强关标签。直接结束进程树，
+  // 退出事件会把状态标成「已停止」，标签与历史都保留。
+  if (isExternalRunSession(s) || s.kind === "build") {
+    await invoke("kill_session", { id: s.id }).catch(() => {});
+    return;
+  }
+
+  // flutter run：q 是 flutter 自己的退出键，先礼后兵
   sendKey("q");
   window.setTimeout(() => {
     const still = sessions.find((x) => x.id === s.id && x.status !== "stopped");
@@ -2365,6 +2571,21 @@ function basename(p: string): string {
 }
 
 async function runCustomCommand(c: CustomCommand, replaceId?: string): Promise<void> {
+  // 同一个自定义命令已在跑：切回已有标签（「重跑」传了 replaceId，跳过这层）
+  if (!replaceId) {
+    const live = liveSessionFor(
+      (s) => s.kind === "custom" && s.customCommandId === c.id,
+    );
+    if (live) {
+      activateSession(live.id);
+      toast(`该命令已在运行：${live.title}`);
+      return;
+    }
+  }
+
+  const key = `custom|${c.id}`;
+  if (markLaunching(key)) return;
+
   try {
     const res = await invoke<StartResponse>("start_custom_command", {
       commandId: c.id,
@@ -2375,6 +2596,8 @@ async function runCustomCommand(c: CustomCommand, replaceId?: string): Promise<v
     if (replaceId) await closeSession(replaceId);
   } catch (e) {
     toast(String(e), "error");
+  } finally {
+    launchingKeys.delete(key);
   }
 }
 
@@ -3436,6 +3659,12 @@ async function restoreSessions(): Promise<void> {
       status: "stopped",
       exitCode: log.exitCode ?? null,
       scan: "",
+      // 日志里没存 source：按它引用的命令/模板补回来，否则恢复的 npm 会话
+      // 会被当成 flutter run（停止时发 q、重跑走错分支）
+      source:
+        referenced?.source ??
+        state.commandTemplates.find((t) => t.id === log.templateId)?.source ??
+        undefined,
       projectId: log.projectId ?? undefined,
       commandId: log.commandId ?? undefined,
       templateId: log.templateId ?? undefined,
@@ -3501,6 +3730,17 @@ async function restoreSessions(): Promise<void> {
 }
 
 async function rerunSession(s: TermSession): Promise<void> {
+  // 连点「重跑」时第二次点击会看到同一个旧会话，不能让它再起一个进程
+  const key = `rerun|${s.id}`;
+  if (markLaunching(key)) return;
+  try {
+    await rerunSessionNow(s);
+  } finally {
+    launchingKeys.delete(key);
+  }
+}
+
+async function rerunSessionNow(s: TermSession): Promise<void> {
   // 工具栏自定义命令：先结束旧进程，再启动一条新标签，成功后才移除旧标签
   if (s.kind === "custom") {
     const cmd = state.customCommands?.find((c) => c.id === s.customCommandId);
@@ -3545,32 +3785,16 @@ async function rerunSession(s: TermSession): Promise<void> {
   if (s.commandId) {
     const cmd = project.commands.find((c) => c.id === s.commandId);
     if (cmd) {
-      // run 会话：新开一个终端并预填命令（按 Enter 才执行），
-      // 然后用它**替换**掉旧标签——flutter run 的会话没有"恢复现场"这回事，
-      // 留一堆死标签只会让人分不清哪个是活的。
+      // run 会话的「重跑」= 立刻重跑：外部程序（npm run dev 等）重新起一条会话，
+      // flutter run 重新走「shell + 哨兵」的执行链。
+      // 以前这里走 prefill_run（只把命令敲到提示符、不回车），用户还得手动按 Enter。
+      // 新会话先挂上（失败时旧标签还在），成功后再把旧标签**替换**掉：
+      // flutter run 没有"恢复现场"这回事，留一堆死标签只会让人分不清哪个是活的。
       // 用命令本身的类型判定，而不是会话记录里的 kind——
       // 老会话记录可能没有 kind 字段，会导致 run 走错分支（不替换标签）
-      if (cmd.kind === "run") {
-        const oldId = s.id;
-        try {
-          const res = await invoke<StartResponse>("prefill_run", {
-            projectId: project.id,
-            commandId: cmd.id,
-            rows: 30,
-            cols: 100,
-          });
-          // 先挂新的（保证失败时旧标签还在），再关旧的
-          mountSession(res, "run", "debug", {
-            projectId: project.id,
-            commandId: cmd.id,
-          });
-          await closeSession(oldId);
-        } catch (e) {
-          toast(String(e), "error");
-        }
-        return;
-      }
-      await runCommand(project, cmd);
+      const replace = cmd.kind === "run" && s.kind !== "terminal" ? s.id : null;
+      const ok = await runCommand(project, cmd);
+      if (ok && replace) await closeSession(replace);
       return;
     }
   }
@@ -3661,6 +3885,22 @@ function handleOutput(id: string, data: string): void {
       updateControls();
     }
   }
+
+  // 批处理提示：不回答的话 cmd.exe 会一直等，会话状态就永远停不下来
+  answerBatchPrompt(s, data);
+}
+
+/** cmd.exe 在批处理里收到 Ctrl+C 会问「终止批处理操作吗(Y/N)?」并一直等输入。
+ *  没人回答时 `cmd /c` 这层包装永远不退出 → pty://exit 不来，
+ *  于是终端里程序已经没了、状态还显示「运行中」。
+ *  用户按 Ctrl+C 就是要停，这里替他回答 Y（一次提示只答一次）。 */
+const BATCH_JOB_PROMPT = /(?:终止批处理操作吗|Terminate batch job)[^\r\n]*?\(Y\/N\)\?\s*$/i;
+
+function answerBatchPrompt(s: TermSession, chunk: string): void {
+  s.promptTail = ((s.promptTail ?? "") + chunk).slice(-200);
+  if (!BATCH_JOB_PROMPT.test(s.promptTail)) return;
+  s.promptTail = "";
+  void invoke("write_session", { id: s.id, data: "Y\r" }).catch(() => {});
 }
 
 function handleExit(id: string, code: number | null): void {
@@ -5284,6 +5524,25 @@ async function runPlatformAction(
   /** 「重跑」时传旧会话 id：新会话挂上后再关旧的（替换而不是追加） */
   replaceId?: string,
 ): Promise<void> {
+  // 同一个平台动作已经在跑：切回已有标签，别重复起进程（重跑路径跳过这层）
+  if (!replaceId) {
+    const live = liveSessionFor(
+      (s) =>
+        s.projectId === p.id &&
+        s.platform === platform &&
+        s.action === a.action &&
+        (s.target ?? "") === (a.target ?? ""),
+    );
+    if (live) {
+      activateSession(live.id);
+      toast(`该动作已在运行：${live.title}`);
+      return;
+    }
+  }
+
+  const key = `plat|${p.id}|${platform}|${a.action}|${a.target ?? ""}`;
+  if (markLaunching(key)) return;
+
   try {
     const res = await invoke<StartResponse>("start_platform_action", {
       projectId: p.id,
@@ -5307,6 +5566,8 @@ async function runPlatformAction(
     if (replaceId) await closeSession(replaceId);
   } catch (e) {
     toast(String(e), "error");
+  } finally {
+    launchingKeys.delete(key);
   }
 }
 
@@ -5927,6 +6188,13 @@ interface DbPageInfo {
   total: number | null;
 }
 
+interface PrefEntry {
+  key: string;
+  /** string / int / long / float / boolean / set */
+  type: string;
+  value: string;
+}
+
 function dbSize(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -5954,6 +6222,73 @@ function dbErrorText(e: unknown): string {
  * - 看到的是拉取那一刻的快照，点「读取数据库」可重新拉；
  * - release 包（非 debuggable）没有 `run-as`，这里会直接报错。
  */
+/** 复制文本：优先 Clipboard API，失败时退回 textarea + execCommand（WebView 未聚焦时也能用） */
+async function copyPlainText(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return;
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.readOnly = true;
+    ta.style.position = "fixed";
+    ta.style.left = "-9999px";
+    ta.style.top = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    if (!ok) throw new Error("复制失败：剪贴板不可用");
+  }
+}
+
+/** 右键单元格：复制完整内容（长文本在格子里是截断的，dataset.full 存原文） */
+function showDbCellMenu(ev: MouseEvent, td: HTMLTableCellElement): void {
+  closeAllMenus();
+
+  const tr = td.parentElement as HTMLTableRowElement | null;
+  const cellText = td.dataset.full ?? td.textContent ?? "";
+  const rowText = tr
+    ? Array.from(tr.children)
+        .map((c) => (c as HTMLElement).dataset.full ?? c.textContent ?? "")
+        .join("\t")
+    : cellText;
+
+  const menu = document.createElement("div");
+  menu.className = "device-menu db-cell-menu";
+  menu.innerHTML = `<div class="dm-head"><span>复制单元格</span></div><div class="dm-body"></div>`;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+
+  const rows: MenuRow[] = [
+    {
+      kind: "item",
+      name: "复制单元格",
+      detail: cellText.length > 80 ? `${cellText.slice(0, 80)}…` : cellText || "（空）",
+      onClick: () =>
+        void copyPlainText(cellText)
+          .then(() => toast("已复制单元格"))
+          .catch((e) => toast(String(e), "error")),
+    },
+    {
+      kind: "item",
+      name: "复制整行",
+      detail: "列之间用 Tab 分隔，可直接粘到 Excel",
+      onClick: () =>
+        void copyPlainText(rowText)
+          .then(() => toast("已复制整行"))
+          .catch((e) => toast(String(e), "error")),
+    },
+  ];
+  renderMenuRows(menu.querySelector(".dm-body") as HTMLDivElement, rows);
+
+  const w = menu.offsetWidth || 280;
+  const h = menu.offsetHeight || 120;
+  menu.style.left = `${Math.max(8, Math.min(ev.clientX, window.innerWidth - w - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(ev.clientY, window.innerHeight - h - 8))}px`;
+}
+
 async function openDbInspector(p: Proj): Promise<void> {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -5980,11 +6315,15 @@ async function openDbInspector(p: Proj): Promise<void> {
         </aside>
         <section class="db-work">
           <div class="db-tabs">
-            <button class="db-tab active" data-tab="data">数据</button>
-            <button class="db-tab" data-tab="sql">SQL</button>
+            <button class="db-tab active" data-mode="db">数据库</button>
+            <button class="db-tab" data-mode="prefs">SharedPreferences</button>
             <span class="flex1"></span>
             <button class="btn" id="db-export" disabled>导出副本</button>
             <button class="btn" id="db-reveal" disabled>在资源管理器中显示</button>
+          </div>
+          <div class="db-subtabs" id="db-subtabs">
+            <button class="db-subtab active" data-tab="data">数据</button>
+            <button class="db-subtab" data-tab="sql">SQL</button>
           </div>
           <div class="db-pane" id="db-pane-data">
             <div class="db-grid-wrap"><table class="db-grid" id="db-grid"></table></div>
@@ -6009,6 +6348,22 @@ async function openDbInspector(p: Proj): Promise<void> {
               <span class="db-status" id="db-sql-status"></span>
             </div>
             <div class="db-grid-wrap"><table class="db-grid" id="db-sql-grid"></table></div>
+          </div>
+          <div class="db-pane" id="db-pane-prefs" hidden>
+            <div class="prefs-bar">
+              <label for="prefs-file">文件</label>
+              <select id="prefs-file" class="set-input"></select>
+              <button class="btn" id="prefs-refresh">刷新</button>
+              <input id="prefs-search" class="set-input" placeholder="搜索 key / value" spellcheck="false" />
+              <label class="prefs-check">
+                <input type="checkbox" id="prefs-flutter" /> 只看 Flutter 键
+              </label>
+              <span class="db-status" id="prefs-status"></span>
+            </div>
+            <div class="db-grid-wrap prefs-table-wrap">
+              <table class="db-grid prefs-grid" id="prefs-grid"></table>
+            </div>
+            <div class="prefs-path" id="prefs-path"></div>
           </div>
         </section>
       </div>
@@ -6037,7 +6392,18 @@ async function openDbInspector(p: Proj): Promise<void> {
   const revealBtn = req<HTMLButtonElement>("#db-reveal", overlay);
   const dataPane = req<HTMLDivElement>("#db-pane-data", overlay);
   const sqlPane = req<HTMLDivElement>("#db-pane-sql", overlay);
-  const tabs = Array.from(overlay.querySelectorAll<HTMLButtonElement>(".db-tab"));
+  const prefsPane = req<HTMLDivElement>("#db-pane-prefs", overlay);
+  const dbSide = req<HTMLElement>(".db-side", overlay);
+  const prefsFile = req<HTMLSelectElement>("#prefs-file", overlay);
+  const prefsRefresh = req<HTMLButtonElement>("#prefs-refresh", overlay);
+  const prefsSearch = req<HTMLInputElement>("#prefs-search", overlay);
+  const prefsFlutter = req<HTMLInputElement>("#prefs-flutter", overlay);
+  const prefsGrid = req<HTMLTableElement>("#prefs-grid", overlay);
+  const prefsStatus = req<HTMLSpanElement>("#prefs-status", overlay);
+  const prefsPathEl = req<HTMLDivElement>("#prefs-path", overlay);
+  const topTabs = Array.from(overlay.querySelectorAll<HTMLButtonElement>(".db-tab"));
+  const subTabs = Array.from(overlay.querySelectorAll<HTMLButtonElement>(".db-subtab"));
+  const subtabsEl = req<HTMLDivElement>("#db-subtabs", overlay);
 
   let sessionId: string | null = null;
   let localPath = "";
@@ -6048,6 +6414,13 @@ async function openDbInspector(p: Proj): Promise<void> {
   let total = 0;
   let offset = 0;
   let limit = 200;
+  let currentTab = "data";
+  let dbSubTab = "data";
+  let prefsFiles: DbFileInfo[] = [];
+  let prefsEntries: PrefEntry[] = [];
+  let prefsLoadedFor = "";
+  let prefsActivePath = "";
+  let savedDbHint = "";
 
   const clearGrid = (el: HTMLTableElement): void => {
     el.innerHTML = "";
@@ -6073,21 +6446,58 @@ async function openDbInspector(p: Proj): Promise<void> {
           td.className = "db-null";
         } else {
           td.textContent = cell.length > 500 ? `${cell.slice(0, 500)}…` : cell;
-          if (cell.length > 500) td.title = cell;
+          if (cell.length > 500) {
+            td.title = cell;
+            td.dataset.full = cell;
+          }
         }
       }
     }
   };
 
-  const switchTab = (tab: string): void => {
-    for (const t of tabs) t.classList.toggle("active", t.dataset.tab === tab);
+  const switchTab = (tab: "data" | "sql"): void => {
+    const prevTab = currentTab;
+    currentTab = tab;
+    dbSubTab = tab;
+    if (prevTab === "prefs" && savedDbHint) hint.textContent = savedDbHint;
+
+    for (const t of topTabs) t.classList.toggle("active", t.dataset.mode === "db");
+    for (const t of subTabs) t.classList.toggle("active", t.dataset.tab === tab);
+    dbSide.hidden = false;
+    subtabsEl.hidden = false;
     dataPane.hidden = tab !== "data";
     sqlPane.hidden = tab !== "sql";
+    prefsPane.hidden = true;
+    exportBtn.hidden = false;
+    revealBtn.hidden = false;
     if (tab === "sql" && sqlInput.value.trim() === "") {
       sqlInput.value = activeTable
         ? `SELECT * FROM "${activeTable.replace(/"/g, '""')}" LIMIT 100;`
         : "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name;";
     }
+  };
+
+  const switchMode = (mode: "db" | "prefs"): void => {
+    if (mode === "prefs") {
+      if (currentTab === "prefs") return;
+      savedDbHint = hint.textContent;
+      if (currentTab === "sql" || currentTab === "data") dbSubTab = currentTab;
+      currentTab = "prefs";
+      for (const t of topTabs) t.classList.toggle("active", t.dataset.mode === "prefs");
+      dbSide.hidden = true;
+      subtabsEl.hidden = true;
+      dataPane.hidden = true;
+      sqlPane.hidden = true;
+      prefsPane.hidden = false;
+      exportBtn.hidden = true;
+      revealBtn.hidden = true;
+      hint.textContent = "SharedPreferences 只读查看（run-as）";
+      void loadPrefs();
+      return;
+    }
+
+    if (currentTab === "prefs" && savedDbHint) hint.textContent = savedDbHint;
+    switchTab(dbSubTab === "sql" ? "sql" : "data");
   };
 
   const renderFiles = (): void => {
@@ -6124,6 +6534,168 @@ async function openDbInspector(p: Proj): Promise<void> {
       el.title = t.sql ?? t.name;
       el.addEventListener("click", () => void selectTable(t.name));
       tablesEl.appendChild(el);
+    }
+  };
+
+  /* ---------- SharedPreferences ---------- */
+
+  const parsePrefsXml = (xml: string): PrefEntry[] => {
+    const doc = new DOMParser().parseFromString(xml, "application/xml");
+    const err = doc.querySelector("parsererror");
+    if (err) {
+      throw new Error(`SharedPreferences XML 解析失败：${err.textContent ?? "格式错误"}`);
+    }
+    const root = doc.documentElement;
+    const out: PrefEntry[] = [];
+    for (const el of Array.from(root.children)) {
+      const key = el.getAttribute("name") ?? "";
+      if (!key) continue;
+      const type = el.tagName.toLowerCase();
+      let value = "";
+      if (type === "set") {
+        value = Array.from(el.children)
+          .map((c) => c.textContent ?? "")
+          .join(", ");
+      } else if (["int", "long", "float", "boolean"].includes(type)) {
+        // Android 把这些类型写在 value 属性里：<int name="x" value="3" />
+        value = el.getAttribute("value") ?? el.textContent ?? "";
+      } else {
+        value = el.textContent ?? "";
+      }
+      out.push({ key, type, value });
+    }
+    out.sort((a, b) => a.key.localeCompare(b.key));
+    return out;
+  };
+
+  const renderPrefs = (): void => {
+    const q = prefsSearch.value.trim().toLowerCase();
+    const flutterOnly = prefsFlutter.checked;
+    const list = prefsEntries.filter((e) => {
+      if (flutterOnly && !e.key.startsWith("flutter.")) return false;
+      if (!q) return true;
+      return e.key.toLowerCase().includes(q) || e.value.toLowerCase().includes(q);
+    });
+
+    prefsGrid.innerHTML = "";
+    const head = prefsGrid.createTHead().insertRow();
+    for (const h of ["键", "类型", "值"]) {
+      const th = document.createElement("th");
+      th.textContent = h;
+      head.appendChild(th);
+    }
+    const body = prefsGrid.createTBody();
+    for (const e of list) {
+      const tr = body.insertRow();
+      const k = tr.insertCell();
+      k.textContent = e.key;
+      k.className = "prefs-key";
+      k.title = e.key;
+      const t = tr.insertCell();
+      t.textContent = e.type === "set" ? "set" : e.type;
+      t.className = "prefs-type";
+      const v = tr.insertCell();
+      const shown = e.value.length > 1200 ? `${e.value.slice(0, 1200)}…` : e.value;
+      v.textContent = shown;
+      v.className = "prefs-value";
+      if (e.value.length > 1200) {
+        v.title = e.value;
+        v.dataset.full = e.value;
+      }
+    }
+    if (list.length === 0) {
+      const tr = body.insertRow();
+      const td = tr.insertCell();
+      td.colSpan = 3;
+      td.className = "db-null";
+      td.textContent = prefsEntries.length
+        ? "没有匹配的键"
+        : "这个文件里没有键值（或尚未读取）";
+    }
+
+    const filtered = list.length !== prefsEntries.length;
+    prefsStatus.textContent = prefsEntries.length
+      ? `${list.length}${filtered ? ` / ${prefsEntries.length}` : ""} 项`
+      : "";
+    prefsPathEl.textContent = prefsActivePath;
+    prefsPathEl.title = prefsActivePath;
+  };
+
+  const readPrefs = async (remotePath: string): Promise<void> => {
+    const serial = deviceSel.value;
+    const pkg = pkgInput.value.trim();
+    if (!serial || !pkg) return;
+    prefsStatus.textContent = "读取中…";
+    try {
+      const xml = await invoke<string>("android_prefs_read", {
+        serial,
+        package: pkg,
+        remotePath,
+      });
+      prefsEntries = parsePrefsXml(xml);
+      prefsActivePath = remotePath;
+      renderPrefs();
+    } catch (e) {
+      prefsEntries = [];
+      prefsActivePath = remotePath;
+      renderPrefs();
+      prefsStatus.textContent = dbErrorText(e);
+    }
+  };
+
+  const loadPrefs = async (force = false): Promise<void> => {
+    const serial = deviceSel.value;
+    const pkg = pkgInput.value.trim();
+    if (!serial) {
+      prefsStatus.textContent = "没有可用设备（检查 USB 调试与授权）";
+      return;
+    }
+    if (!pkg) {
+      prefsStatus.textContent = "请填写包名（applicationId）";
+      return;
+    }
+    const key = `${serial}|${pkg}`;
+    if (!force && prefsLoadedFor === key && prefsFiles.length > 0) {
+      renderPrefs();
+      return;
+    }
+
+    prefsStatus.textContent = "读取 shared_prefs 列表…";
+    prefsRefresh.disabled = true;
+    try {
+      const old = prefsFile.value;
+      prefsFiles = await invoke<DbFileInfo[]>("android_prefs_files", {
+        serial,
+        package: pkg,
+      });
+      prefsFile.innerHTML = "";
+      for (const f of prefsFiles) {
+        const o = document.createElement("option");
+        o.value = f.path;
+        const name = f.path.split("/").pop() ?? f.path;
+        o.textContent = `${name}（${dbSize(f.size)}）`;
+        prefsFile.appendChild(o);
+      }
+      if (prefsFiles.length === 0) {
+        prefsEntries = [];
+        prefsActivePath = "";
+        prefsLoadedFor = key;
+        prefsFile.innerHTML = "";
+        renderPrefs();
+        prefsStatus.textContent =
+          "没有找到 shared_prefs/*.xml（release 包、未安装，或 run-as 不可用）";
+        return;
+      }
+      const wanted = prefsFiles.some((f) => f.path === old)
+        ? old
+        : prefsFiles[0].path;
+      prefsFile.value = wanted;
+      await readPrefs(wanted);
+      prefsLoadedFor = key;
+    } catch (e) {
+      prefsStatus.textContent = dbErrorText(e);
+    } finally {
+      prefsRefresh.disabled = false;
     }
   };
 
@@ -6230,6 +6802,12 @@ async function openDbInspector(p: Proj): Promise<void> {
     activeFile = null;
     activeTable = null;
     tables = [];
+    prefsFiles = [];
+    prefsEntries = [];
+    prefsLoadedFor = "";
+    prefsActivePath = "";
+    prefsFile.innerHTML = "";
+    prefsGrid.innerHTML = "";
     renderFiles();
     renderTables();
     clearGrid(dataGrid);
@@ -6298,9 +6876,27 @@ async function openDbInspector(p: Proj): Promise<void> {
     }
   };
 
-  for (const t of tabs) {
-    t.addEventListener("click", () => switchTab(t.dataset.tab ?? "data"));
+  for (const t of topTabs) {
+    t.addEventListener("click", () =>
+      switchMode(t.dataset.mode === "prefs" ? "prefs" : "db"),
+    );
   }
+  for (const t of subTabs) {
+    t.addEventListener("click", () =>
+      switchTab(t.dataset.tab === "sql" ? "sql" : "data"),
+    );
+  }
+  const bindCellCopy = (grid: HTMLTableElement): void => {
+    grid.addEventListener("contextmenu", (e) => {
+      const td = (e.target as HTMLElement).closest("td");
+      if (!td || !grid.contains(td)) return;
+      e.preventDefault();
+      showDbCellMenu(e, td as HTMLTableCellElement);
+    });
+  };
+  bindCellCopy(dataGrid);
+  bindCellCopy(sqlGrid);
+  bindCellCopy(prefsGrid);
   loadBtn.addEventListener("click", () => void loadFiles());
   prevBtn.addEventListener("click", () => {
     offset = Math.max(0, offset - limit);
@@ -6324,6 +6920,12 @@ async function openDbInspector(p: Proj): Promise<void> {
       void runSql();
     }
   });
+  prefsFile.addEventListener("change", () => {
+    if (prefsFile.value) void readPrefs(prefsFile.value);
+  });
+  prefsRefresh.addEventListener("click", () => void loadPrefs(true));
+  prefsSearch.addEventListener("input", renderPrefs);
+  prefsFlutter.addEventListener("change", renderPrefs);
 
   const close = (): void => {
     closeSession();
@@ -6361,10 +6963,16 @@ async function openDbInspector(p: Proj): Promise<void> {
   void boot();
 
   deviceSel.addEventListener("change", () => {
+    if (currentTab === "prefs") {
+      void loadPrefs(true);
+      return;
+    }
     if (pkgInput.value.trim()) void loadFiles();
   });
   pkgInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") void loadFiles();
+    if (e.key !== "Enter") return;
+    if (currentTab === "prefs") void loadPrefs(true);
+    else void loadFiles();
   });
 }
 

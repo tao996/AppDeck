@@ -2099,6 +2099,33 @@ fn android_db_close(
     android_db::close(&sessions, &session_id)
 }
 
+/// 列出 app 的 `shared_prefs/*.xml`（Flutter 的 SharedPreferences 文件）。
+#[tauri::command(async)]
+fn android_prefs_files(
+    app: AppHandle,
+    serial: String,
+    package: String,
+) -> Result<Vec<android_db::DbFile>, String> {
+    let state = store::load(&app)?;
+    let adb = android_db::resolve_adb(&effective_android(&state))
+        .ok_or_else(|| "没有找到 adb：请到「设置 → Android」填 SDK 目录".to_string())?;
+    android_db::list_pref_files(&adb, &serial, &package)
+}
+
+/// 读取 SharedPreferences XML 原文，前端用 DOMParser 解析成键值表。
+#[tauri::command(async)]
+fn android_prefs_read(
+    app: AppHandle,
+    serial: String,
+    package: String,
+    remote_path: String,
+) -> Result<String, String> {
+    let state = store::load(&app)?;
+    let adb = android_db::resolve_adb(&effective_android(&state))
+        .ok_or_else(|| "没有找到 adb：请到「设置 → Android」填 SDK 目录".to_string())?;
+    android_db::read_pref_file(&adb, &serial, &package, &remote_path)
+}
+
 /* ---------------- 托盘 / 关闭行为 ---------------- */
 
 const TRAY_SHOW: &str = "tray-show";
@@ -2295,6 +2322,8 @@ pub fn run() {
             android_db_query,
             android_db_export,
             android_db_close,
+            android_prefs_files,
+            android_prefs_read,
             open_in_git_desktop,
             detect_git_desktop_path,
             rename_tool::rename_status,

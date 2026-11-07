@@ -41,6 +41,11 @@ pub fn resolve(cwd: &Path, text: &str) -> Option<Location> {
     let cleaned = raw.trim_end_matches([',', ';', '.', ')', ']', '}', '。', '，', '）']);
     let cleaned = cleaned.trim();
 
+    // 网址不是磁盘路径：`https://demo.gu19.cn` 里的 `s://` 会被盘符规则认成 `s:\demo.gu19.cn`
+    if is_url(cleaned) {
+        return None;
+    }
+
     // 拆尾部的 :行[:列]
     let (target, line, col) = split_line_col(cleaned);
 
@@ -92,6 +97,20 @@ fn split_line_col(text: &str) -> (&str, Option<u32>, Option<u32>) {
         1 => (head, Some(nums[0]), None),
         _ => (head, Some(nums[1]), Some(nums[0])),
     }
+}
+
+/// `https://host`、`ftp://...` 这类带协议的文本不是磁盘路径
+fn is_url(text: &str) -> bool {
+    let Some((scheme, rest)) = text.split_once("://") else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.len() <= 16
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        && !rest.is_empty()
 }
 
 fn resolve_path(cwd: &Path, target: &str) -> Option<PathBuf> {
@@ -270,6 +289,19 @@ mod tests {
         assert!(loc.exists, "路径应存在: {:?}", loc.path);
         assert_eq!(loc.line, Some(3));
         assert_eq!(loc.col, Some(1));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn url_is_not_a_file_path() {
+        let root = temp_project("url");
+
+        // 曾经 `https://demo.gu19.cn` 被盘符规则拆成 `s://demo.gu19.cn`，
+        // 再被当成 `s:\demo.gu19.cn` 报"文件不存在"
+        assert!(resolve(&root, "https://demo.gu19.cn").is_none());
+        assert!(resolve(&root, "http://127.0.0.1:8080/index.html").is_none());
+        assert!(resolve(&root, "ftp://example.com/a.txt").is_none());
 
         let _ = std::fs::remove_dir_all(&root);
     }

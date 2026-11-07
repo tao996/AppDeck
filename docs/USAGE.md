@@ -292,6 +292,11 @@ tauri info             custom  npm run tauri -- info
   - **停止** = 给当前命令发 `Ctrl+C`，**不会关闭 shell**（关标签才结束会话）
   - **重跑** = 先 `Ctrl+C` 中断当前命令，再把上一条命令**带 Enter** 打回同一个 shell，
     不需要再手动按回车
+- `run` 里要分两类：**flutter run** 和 **npm / docker 这类外部程序**（`npm run dev`、
+  `docker compose logs -f`）：
+  - 外部程序启动即算「运行中」（不再等 `Flutter run key commands.` 那行）；
+  - **停止**直接结束进程树，标签与历史保留（它们没有 flutter 的 `q` 退出键）；
+  - **重跑**立刻重新执行并替换旧标签，不会再停在提示符等你按回车
 
 ![终端工具](shot-terminal-tools.png)
 
@@ -310,25 +315,32 @@ tauri info             custom  npm run tauri -- info
 - **流式 UTF-8 解码**：多字节字符被数据块切断时保留尾部，中文日志不乱码
 - **DSR 握手**：ConPTY 启动即发 `ESC[6n` 查询光标位置，不应答会**永久卡住**；由后端统一应答 `ESC[1;1R` 并剔除该序列（只应答一次）
 - **进程树回收**：Windows Job Object + `KILL_ON_JOB_CLOSE`，关标签/退出应用时连带杀掉 `flutter → dart → gradle`
-- **会话状态机**：命中 `Flutter run key commands.` → 🟢；进程退出 → 🔴 并记录退出码
-- **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 发 `q`；项目终端发 `Ctrl+C`）、
-  重跑（项目终端会先中断再自动回车重放）、DevTools（从输出解析 URL 打开）
+- **会话状态机**：flutter run 命中 `Flutter run key commands.` → 🟢；进程退出 → 🔴 并记录退出码
+- **批处理提示自动应答**：`cmd /d /c` 跑 `.cmd`（npm / pnpm / yarn）时，`Ctrl+C` 会问
+  「终止批处理操作吗(Y/N)?」。没人回答，包装进程就永远不退、状态卡在运行中，
+  所以 AppDeck 检测到该提示会替用户回 `Y`（一次提示只答一次）
+- **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 发 `q`；项目终端发 `Ctrl+C`；
+  外部程序 / 构建直接结束进程）、重跑（项目终端会先中断再自动回车重放；run 会话直接重新执行）、
+  DevTools（从输出解析 URL 打开）
 - **命令拼装**：`.bat` 经 `cmd.exe /d /c`（**不加 `/s`**），路径与参数逐项传参，避免引号被二次转义
 
-## 终端里的路径可点（Ctrl+单击）
+## 终端里的路径与网址可点（Ctrl+单击）
 
 `flutter run` 的报错栈、构建错误、`doctor`、docker 日志里都会出现位置文本，
 现在可以直接点开：
 
 | 形态 | 例子 | 打开方式 |
 |---|---|---|
+| 网址 | `https://demo.gu19.cn`、`http://localhost:5173/` | 系统浏览器 |
 | `package:` URI | `package:tao996/src/translation/translation.dart:119:7` | 编辑器跳到 119 行第 7 列 |
 | 绝对路径 | `C:/Users/mb/jbook\screenshots\a.png`（斜杠混用是真实存在的） | 系统默认程序 |
 | 相对路径 | `lib/main.dart:12:5`（相对会话 cwd） | 编辑器跳到行列 |
 
 - **Ctrl+单击**才打开（跟随 VS Code / Android Studio 终端），避免选文字时误触
-- **右键**在链接上可「用编辑器打开 / 在资源管理器中定位 / 复制路径」
+- **右键**在链接上：网址给「使用浏览器打开 / 复制链接」，文件给「用编辑器打开 / 在资源管理器中定位 / 复制路径」
 - 文件不存在时提示「文件不存在：<路径>」，不做静默失败
+- 网址优先于“盘符路径”识别：`https://demo.gu19.cn` 不会再被拆成 `s://demo.gu19.cn`
+  而提示 `s:\demo.gu19.cn` 不存在
 
 **`package:` 怎么解析**：从会话 cwd 逐级向上找 `.dart_tool/package_config.json`，
 取 `rootUri`（可能是 `file:///…` 绝对 URI，也可能是 `../../packages/foo` 相对路径），
@@ -457,7 +469,14 @@ VS Code 自动升级会换哈希目录（实测从 `6d62b1d5da` 变成 `e6468682
 - 用 `adb run-as <包名>` 列出 `databases/` / `files/` 下的 `.db` / `.sqlite` / `.sqlite3`，点哪个拉哪个
 - 拉取时连同 `-wal` 一起带走——**未 checkpoint 的最新数据也能看到**
 - 内置查看器：表列表 / 字段 / 分页数据 / SQL 查询 / 导出干净的单个 `.db`
+- **SharedPreferences 页签**：顶部「数据库 | SharedPreferences」切换；列出 `shared_prefs/*.xml`，
+  解析成「键 / 类型 / 值」表格；支持搜索、只看 `flutter.` 键、刷新；
+  string / int / long / float / boolean / set 都会展开
+- **复制数据**：单元格可拖选复制，也可右键「复制单元格 / 复制整行」；
+  整行用 Tab 分隔，可直接粘到 Excel
 - 本机副本落在临时目录，关闭弹窗或退出应用即删除
+
+![SharedPreferences](shot-prefs.png)
 
 **只读是硬限制**：SQL 面板只允许 `SELECT` / `PRAGMA` / `WITH` / `EXPLAIN`；
 后端用 `Statement::readonly()` 加 `PRAGMA query_only` 双重拦截，写语句直接报错。
