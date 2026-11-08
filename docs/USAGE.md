@@ -204,7 +204,7 @@
 判定要照顾一个坑：`launch.json` 生成的命令 **program 是空的**（后端才拼 `flutter run`），
 只看 program 会把它们误判成"不需要设备"。
 
-## 多生态导入（npm / Docker）
+## 多生态导入（npm / Docker / Qt）
 
 **同一个目录可能既是 Flutter 工程、又是前端工程、还带 compose 文件**，
 所以"生态"挂在**命令**上（`Command.source`），不挂在项目上：
@@ -213,6 +213,7 @@
 |---|---|
 | 导入 `package.json` | 按 `scripts` 每条生成一条命令；包管理器按 lockfile 探测（pnpm > yarn > npm），设置里可强制 |
 | 导入 `docker-compose.yaml` | 每个 service 生成 6 个动作 + 整份文件 3 个项目级动作 |
+| 导入 Qt / CMake 工程 | 按 `CMakePresets.json` 生成配置 / 构建命令，根目录有 run 脚本时再生成「运行」 |
 
 **转发型脚本会被展开**：`"tauri": "tauri"` 这种脚本单独一条命令毫无意义（跑起来只打印帮助），
 导入时会**跑一次 `npm run tauri -- --help` 解析出子命令**，换成：
@@ -271,6 +272,39 @@ tauri info             custom  npm run tauri -- info
     所以一个目录同时有 compose 和 package.json 时两条都会出现
 - 只有**这个项目真有对应文件**才显示「重新读取 xxx」（compose / package.json / launch.json 各自独立）
 - 状态栏的"N 条命令"按**树里看得见的条目**计，不把折叠的服务动作算进去
+
+## Qt / CMake 工程
+
+工具栏「导入 ▾ → 导入 Qt / CMake 工程」选目录（也可直接选目录里的 `CMakeLists.txt` /
+`CMakePresets.json`）。判定与生成：
+
+| 目录里有 | 生成什么 |
+|---|---|
+| `CMakePresets.json`（含 `CMakeUserPresets.json`） | 每个 configurePreset → `配置 · <名>` = `cmake --preset <名>`；每个 buildPreset → `构建 · <名>` = `cmake --build --preset <名>` |
+| 只有 `CMakeLists.txt` | 兜底 `配置 (CMake)` = `cmake -S . -B build`、`构建 (CMake)` = `cmake --build build` |
+| `run.ps1` / `run.cmd` / `run.bat` | `运行` = 执行该脚本（PowerShell 脚本自动用 `-ExecutionPolicy Bypass -File`） |
+| 只有 `*.pro`（qmake） | 识别为 Qt 工程，但不自动生成构建命令，提示手动补 qmake / make |
+
+- **工具链自动定位**：Qt 工程一般没把 Qt Tools 加进 PATH（README 里都是先
+  `$env:Path = "D:\apps\Qt\...\bin;...;$env:Path"`）。导入时从 preset 的
+  `CMAKE_PREFIX_PATH` / `CMAKE_CXX_COMPILER` 逐级向上找 Qt 安装根，
+  找到 `Tools/CMake_64/bin/cmake.exe` 就用**绝对路径**；
+  Ninja 不在 PATH 时配置命令自动补 `-DCMAKE_MAKE_PROGRAM=<ninja>`，
+  所以双击「配置 / 构建」就能跑，不用先开终端配 PATH
+- **合并规则和 npm / compose 一样**：重复导入按确定性 id 合并，不重复添加；
+  preset 被删掉时命令标「已失效」并划线，不删数据
+- 项目徽章显示 `Qt`（🔧），命令行图标也是 🔧；右键有「编辑 CMakePresets.json」
+  「重新读取 Qt / CMake」（文件存在时才出现）
+- 配置 / 构建 / 运行都是 `custom`：在**项目常驻终端**里执行，跑完 shell 还在
+
+以 `D:\demo\code\qtProjects\mediaCutQt` 为例，导入后命令是：
+
+```
+配置 · mingw   D:\apps\Qt\Tools\CMake_64\bin\cmake.exe --preset mingw
+               -DCMAKE_MAKE_PROGRAM=D:/apps/Qt/Tools/Ninja/ninja.exe
+构建 · mingw   同上 cmake --build --preset mingw
+运行           D:\demo\code\qtProjects\mediaCutQt\run.ps1
+```
 
 ## 普通命令共用项目终端
 

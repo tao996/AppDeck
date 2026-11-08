@@ -39,7 +39,8 @@ pub fn add_project_to(state: &mut State, raw_path: &str) -> Result<Project, Stri
     if !has_pubspec && !has_launch && !has_package && !has_compose {
         return Err(
             "这个目录不是 Flutter 项目（无 pubspec.yaml）、工作区（无 .vscode/launch.json）、\
-             前端项目（无 package.json）或 Compose 项目（无 docker-compose.yml）"
+             前端项目（无 package.json）或 Compose 项目（无 docker-compose.yml）。\
+             Qt / CMake 工程请用「导入 → 导入 Qt / CMake 工程」"
                 .to_string(),
         );
     }
@@ -116,6 +117,45 @@ pub fn add_folder_to(state: &mut State, raw_path: &str) -> Result<Project, Strin
         kind: "folder".to_string(),
         flutter_tool: None,
         // 有意为空：不解析 launch.json / package.json，也不套用模板
+        commands: Vec::new(),
+        env: Default::default(),
+    };
+
+    state.projects.push(project.clone());
+    Ok(project)
+}
+
+/// 新建一个"命令集"项目（无 pubspec 的 workspace）。
+///
+/// 不做生态校验：调用方（如 Qt 导入）已经验证过目录；这里只负责建项目壳。
+fn add_command_set_to(state: &mut State, raw_path: &str) -> Result<Project, String> {
+    let p = normalize(raw_path);
+    if p.is_empty() {
+        return Err("路径为空".to_string());
+    }
+    let pb = PathBuf::from(&p);
+    if !pb.is_dir() {
+        return Err(format!("目录不存在：{p}"));
+    }
+    if state
+        .projects
+        .iter()
+        .any(|x| normalize(&x.path).eq_ignore_ascii_case(&p))
+    {
+        return Err("该项目已在列表中".to_string());
+    }
+
+    let name = pb
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| p.clone());
+
+    let project = Project {
+        id: make_id("proj", &p.to_lowercase()),
+        name,
+        path: p,
+        kind: "workspace".to_string(),
+        flutter_tool: None,
         commands: Vec::new(),
         env: Default::default(),
     };
@@ -365,6 +405,69 @@ pub fn import_package_from_path(
 
     let outcome = crate::npm::merge_into(project, &scripts, manager, &expanded);
     Ok((project.clone(), outcome, created, manager))
+}
+
+/// 导入 Qt / CMake 工程：解析 CMakePresets / run 脚本，生成配置 / 构建 / 运行命令。
+///
+/// 与 package.json / compose 一致：同路径项目复用（合并命令），否则新建。
+/// 之前用「添加文件夹」挂进来的目录，这次识别成功后会升级成 workspace。
+pub fn import_qt_from_path(
+    state: &mut State,
+    raw: &str,
+) -> Result<(Project, crate::qt::QtInfo, crate::qt::MergeOutcome, bool), String> {
+    let root = resolve_qt_root(raw)?;
+
+    // **先校验再改状态**（同 package.json / launch.json 的做法）
+    let info = crate::qt::detect(std::path::Path::new(&root))?;
+    let fresh = crate::qt::commands_for(&info);
+
+    let existing = state
+        .projects
+        .iter()
+        .find(|p| normalize(&p.path).eq_ignore_ascii_case(&normalize(&root)))
+        .map(|p| p.id.clone());
+
+    let (id, created) = match existing {
+        Some(id) => (id, false),
+        None => {
+            let p = add_command_set_to(state, &root)?;
+            (p.id, true)
+        }
+    };
+
+    let project = state
+        .projects
+        .iter_mut()
+        .find(|p| p.id == id)
+        .ok_or_else(|| "项目不存在".to_string())?;
+
+    if project.kind == "folder" {
+        project.kind = "workspace".to_string();
+    }
+
+    let outcome = crate::qt::merge_into(project, fresh);
+    Ok((project.clone(), info, outcome, created))
+}
+
+/// 定位 Qt 工程根：可以选目录，也可以选 CMakeLists.txt / CMakePresets.json
+fn resolve_qt_root(raw: &str) -> Result<String, String> {
+    let p = PathBuf::from(raw.trim());
+    if p.as_os_str().is_empty() {
+        return Err("路径为空".to_string());
+    }
+
+    let dir = if p.is_file() {
+        p.parent()
+            .map(|x| x.to_path_buf())
+            .ok_or_else(|| "路径无效".to_string())?
+    } else {
+        p
+    };
+
+    if !dir.is_dir() {
+        return Err(format!("目录不存在：{}", dir.display()));
+    }
+    Ok(normalize(&dir.display().to_string()))
 }
 
 /// 定位 package.json 所在目录：可以选文件（必须是 package.json）或目录

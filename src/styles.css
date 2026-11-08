@@ -108,13 +108,20 @@ body {
 
 .import-label {
   flex: 1;
+  /* 文案再长也只在右边省略，不能把标签挤成多行（导入菜单曾经被长 hint 挤成 4 行） */
+  min-width: 0;
   font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .import-hint {
+  flex: 0 0 auto;
   font-size: 10.5px;
   color: var(--fg-faint);
   font-family: var(--mono);
+  white-space: nowrap;
 }
 
 .import-item.disabled {

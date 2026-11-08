@@ -145,6 +145,10 @@ interface ProjectFiles {
   compose: string | null;
   /** 有没有 Android 工程（决定是否显示「数据库…」） */
   android: boolean;
+  /** 是不是 Qt / CMake 工程（CMakeLists.txt / CMakePresets.json / *.pro） */
+  qt: boolean;
+  /** CMakePresets.json 的完整路径（有就显示「编辑」） */
+  cmakePresets: string | null;
 }
 
 /** 用默认编辑器打开一个文件 */
@@ -1292,9 +1296,10 @@ function renderTree(): void {
     const verTxt = loading ? "" : info.ok ? info.version ?? "" : "不可用";
 
     // 徽章按"里面装了什么"来叫，而不是内部 kind：
-    // 只有 npm 命令的项目叫「Npm」，比笼统的「工作区」准确
+    // 只有 npm / docker / qt 命令的项目分别叫「Npm」「Docker」「Qt」
     const hasNpm = p.commands.some((c) => c.source === "npm");
     const hasDocker = p.commands.some((c) => c.source === "docker");
+    const hasQt = p.commands.some((c) => c.source === "qt");
     const only = (src: string): boolean =>
       p.commands.length > 0 && p.commands.every((c) => c.source === src);
     const kindLabel = isFolder
@@ -1305,7 +1310,9 @@ function renderTree(): void {
           ? "Docker"
           : only("npm")
             ? "Npm"
-            : "工作区";
+            : only("qt")
+              ? "Qt"
+              : "工作区";
     const kindIcon = isFolder
       ? "📂"
       : p.kind === "single"
@@ -1314,7 +1321,9 @@ function renderTree(): void {
           ? "🐳"
           : hasNpm
             ? "📦"
-            : "🗂";
+            : hasQt
+              ? "🔧"
+              : "🗂";
 
     head.innerHTML = `
       <span class="chev">${isCollapsed ? "▸" : "▾"}</span>
@@ -1430,7 +1439,15 @@ function renderTree(): void {
           "cmd" + (selectedCommand === c.id ? " selected" : "") + (c.stale ? " stale" : "");
         const mode = c.flutterMode ?? "debug";
         const icon =
-          c.source === "npm" ? "⬢" : c.source === "docker" ? "🐳" : c.kind === "build" ? "📦" : "🚀";
+          c.source === "npm"
+            ? "⬢"
+            : c.source === "docker"
+              ? "🐳"
+              : c.source === "qt"
+                ? "🔧"
+                : c.kind === "build"
+                  ? "📦"
+                  : "🚀";
         row.innerHTML = `
           <span class="cico">${icon}</span>
           <span class="cname">${esc(c.name)}</span>
@@ -1991,6 +2008,82 @@ async function importPackagePath(): Promise<void> {
     toast(`${how}「${res.projectName}」：${res.manager}${detail}`);
 
     if (res.stale.length) console.warn("[package.json] 脚本已不存在：", res.stale);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+interface QtImportResponse {
+  state: State;
+  projectId: string;
+  projectName: string;
+  created: boolean;
+  configurePresets: string[];
+  buildPresets: string[];
+  runScript: string | null;
+  warnings: string[];
+  added: string[];
+  kept: string[];
+  stale: string[];
+}
+
+/** 导入 Qt / CMake 工程：按 CMakePresets 生成「配置 / 构建」，根目录有 run 脚本再加「运行」 */
+async function importQtPath(): Promise<void> {
+  let picked: string | string[] | null = null;
+  try {
+    picked = await open({
+      directory: true,
+      multiple: false,
+      title: "选择 Qt / CMake 工程目录",
+      defaultPath: lastImportDir ?? state.projects[0]?.path ?? undefined,
+    });
+  } catch (e) {
+    toast(`打开目录选择器失败：${String(e)}`, "error");
+    return;
+  }
+  if (!picked) return;
+
+  const path = Array.isArray(picked) ? picked[0] : picked;
+  if (!path) return;
+  lastImportDir = path;
+
+  try {
+    const res = await invoke<QtImportResponse>("import_qt_path", { path });
+    state = res.state;
+    render();
+    void refreshFlutter(res.projectId);
+
+    const how = res.created ? "已导入" : "已更新";
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    const detail = parts.length ? `（${parts.join(" · ")}）` : "";
+    toast(`${how}「${res.projectName}」：Qt / CMake${detail}`);
+
+    // 一条命令都没生成（如 qmake 工程）时，提示要显眼；其余警告只写控制台
+    if (res.warnings.length) {
+      if (res.added.length === 0) toast(res.warnings.join("\n"), "error");
+      else console.warn("[Qt]", res.warnings);
+    }
+    if (res.stale.length) console.warn("[Qt] 已消失的预设：", res.stale);
+  } catch (e) {
+    toast(String(e), "error");
+  }
+}
+
+/** 项目右键「重新读取 CMakePresets.json」 */
+async function rereadQt(p: Proj): Promise<void> {
+  try {
+    const res = await invoke<QtImportResponse>("import_qt_path", { path: p.path });
+    state = res.state;
+    render();
+    const parts: string[] = [];
+    if (res.added.length) parts.push(`新增 ${res.added.length}`);
+    if (res.kept.length) parts.push(`已存在 ${res.kept.length}`);
+    if (res.stale.length) parts.push(`已失效 ${res.stale.length}`);
+    toast(`「${res.projectName}」Qt / CMake（${parts.join(" · ") || "无变化"}）`);
+    if (res.warnings.length) console.warn("[Qt]", res.warnings);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -5114,7 +5207,13 @@ function openProjectMenu(ev: MouseEvent, p: Proj): void {
 
   // 先看目录里有没有 package.json / compose 文件，再决定菜单项（几毫秒，用户感知不到）
   void (async () => {
-    let files: ProjectFiles = { packageJson: null, compose: null, android: false };
+    let files: ProjectFiles = {
+      packageJson: null,
+      compose: null,
+      android: false,
+      qt: false,
+      cmakePresets: null,
+    };
     try {
       files = await invoke<ProjectFiles>("project_files", { path: p.path });
     } catch {
@@ -5198,11 +5297,18 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
   // 命令集（无 pubspec 的 workspace）本身就是命令列表：不显示平台，也不显示全局命令
   const isCommandSet = p.kind !== "single";
 
-  // 生态判定：看它有哪些来源的命令（一个目录可能同时有 npm 和 docker）
+  // 生态判定：看它有哪些来源的命令（一个目录可能同时有 npm / docker / qt）
   const dockerCmds = p.commands.filter((c) => c.source === "docker");
   const npmCmds = p.commands.filter((c) => c.source === "npm");
+  const qtCmds = p.commands.filter((c) => c.source === "qt");
   const launchCmds = p.commands.filter((c) => c.source === "launch-json");
-  const ecoTag = dockerCmds.length ? "Docker" : npmCmds.length ? "Npm" : "命令集";
+  const ecoTag = dockerCmds.length
+    ? "Docker"
+    : npmCmds.length
+      ? "Npm"
+      : qtCmds.length
+        ? "Qt"
+        : "命令集";
 
   const menu = document.createElement("div");
   menu.className = "device-menu";
@@ -5388,6 +5494,14 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
       onClick: () => void editFile(files.packageJson!),
     });
   }
+  if (files.cmakePresets) {
+    tail.push({
+      kind: "item",
+      name: "编辑 CMakePresets.json",
+      detail: "用默认编辑器打开",
+      onClick: () => void editFile(files.cmakePresets!),
+    });
+  }
 
   if (dockerCmds.length) {
     tail.push({
@@ -5411,6 +5525,14 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
       name: "重新读取 launch.json",
       detail: "按 .vscode/launch.json 刷新命令",
       onClick: () => void importLaunch(p.id),
+    });
+  }
+  if (qtCmds.length || files.qt) {
+    tail.push({
+      kind: "item",
+      name: "重新读取 Qt / CMake",
+      detail: "按 CMakePresets.json 刷新配置 / 构建命令",
+      onClick: () => void rereadQt(p),
     });
   }
 
@@ -6052,6 +6174,12 @@ function openImportMenu(anchor: HTMLElement): void {
       label: "导入 docker-compose.yaml",
       hint: "按 service 生成命令",
       run: () => void importComposePath(),
+    },
+    {
+      icon: "🛠️",
+      label: "导入 Qt / CMake 工程",
+      hint: "CMakePresets",
+      run: () => void importQtPath(),
     },
   ];
 

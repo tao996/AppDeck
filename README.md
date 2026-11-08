@@ -12,7 +12,7 @@
 
 | 能力 | 说明 |
 |---|---|
-| 多生态项目 | Flutter / npm `package.json` / Docker Compose / 鸿蒙工程 / 任意文件夹，统一项目树与命令 |
+| 多生态项目 | Flutter / npm `package.json` / Docker Compose / Qt / CMake / 鸿蒙工程 / 任意文件夹，统一项目树与命令 |
 | 平台菜单 | 按「项目 + 宿主 + 设备」派生调试 / 性能分析 / 发布运行与各平台构建，不硬编码 |
 | 内嵌终端 | ConPTY + xterm.js；热重载 / 热重启 / 停止 / DevTools，普通命令复用项目终端 |
 | 自定义命令 | 工具栏快捷启动 .lnk / exe，解析快捷方式后在内嵌终端运行，不弹系统控制台；二级菜单运行 / 编辑 / 删除 |

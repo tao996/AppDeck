@@ -24,6 +24,7 @@ mod model;
 mod npm;
 mod ops;
 mod pty;
+mod qt;
 mod rename_tool;
 mod store;
 mod sysmon;
@@ -192,6 +193,50 @@ struct NpmImportResponse {
     project_name: String,
     manager: String,
     created: bool,
+    added: Vec<String>,
+    kept: Vec<String>,
+    stale: Vec<String>,
+}
+
+/// 导入 Qt / CMake 工程：按 CMakePresets 生成「配置 / 构建」命令，
+/// 根目录有 run.ps1 / run.cmd / run.bat 时再生成「运行」。
+#[tauri::command]
+fn import_qt_path(app: AppHandle, path: String) -> Result<QtImportResponse, String> {
+    let mut state = store::load(&app)?;
+    let (project, info, outcome, created) = ops::import_qt_from_path(&mut state, &path)?;
+    store::save(&app, &state)?;
+
+    Ok(QtImportResponse {
+        state,
+        project_id: project.id,
+        project_name: project.name,
+        created,
+        configure_presets: info
+            .presets
+            .configure
+            .iter()
+            .map(|p| p.name.clone())
+            .collect(),
+        build_presets: info.presets.build,
+        run_script: info.run_script.map(|p| p.display().to_string()),
+        warnings: info.warnings,
+        added: outcome.added,
+        kept: outcome.kept,
+        stale: outcome.stale,
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QtImportResponse {
+    state: State,
+    project_id: String,
+    project_name: String,
+    created: bool,
+    configure_presets: Vec<String>,
+    build_presets: Vec<String>,
+    run_script: Option<String>,
+    warnings: Vec<String>,
     added: Vec<String>,
     kept: Vec<String>,
     stale: Vec<String>,
@@ -2281,6 +2326,7 @@ pub fn run() {
             import_launch_path,
             import_package_path,
             import_compose_path,
+            import_qt_path,
             start_platform_action,
             filing_info,
             upsert_command,

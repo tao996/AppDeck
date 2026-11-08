@@ -13,6 +13,10 @@ pub struct ProjectFiles {
     pub compose: Option<String>,
     /// 是不是 Android 工程（右键菜单据此显示「数据库…」）
     pub android: bool,
+    /// 是不是 Qt / CMake 工程（CMakeLists.txt / CMakePresets.json / *.pro）
+    pub qt: bool,
+    /// CMakePresets.json 的完整路径（有就显示「编辑 CMakePresets.json」）
+    pub cmake_presets: Option<String>,
 }
 
 /// compose 文件的候选名，按优先级排列。
@@ -37,11 +41,14 @@ pub fn detect(dir: &Path) -> ProjectFiles {
         .join("main")
         .join("AndroidManifest.xml")
         .is_file();
+    let presets = dir.join("CMakePresets.json");
 
     ProjectFiles {
         package_json: pkg.is_file().then(|| pkg.display().to_string()),
         compose: compose.map(|p: PathBuf| p.display().to_string()),
         android,
+        qt: crate::qt::has_markers(dir),
+        cmake_presets: presets.is_file().then(|| presets.display().to_string()),
     }
 }
 
@@ -96,12 +103,26 @@ mod tests {
     }
 
     #[test]
+    fn detects_qt_project_files() {
+        let dir = temp_dir("qt");
+        std::fs::write(dir.join("CMakeLists.txt"), "project(x)").unwrap();
+        std::fs::write(dir.join("CMakePresets.json"), "{}").unwrap();
+
+        let f = detect(&dir);
+        assert!(f.qt);
+        assert!(f.cmake_presets.unwrap().ends_with("CMakePresets.json"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn empty_dir_has_nothing() {
         let dir = temp_dir("empty");
         let f = detect(&dir);
         assert!(f.package_json.is_none());
         assert!(f.compose.is_none());
         assert!(!f.android);
+        assert!(!f.qt);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
