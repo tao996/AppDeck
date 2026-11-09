@@ -140,12 +140,89 @@ impl JobGuard {
             Some(JobGuard(job))
         }
     }
+
+    /// 复制一份 Job 句柄，给退出线程等「整棵进程树」结束用。
+    ///
+    /// 场景：`run.ps1` 这类启动器本身很快退出，但拉起的 GUI 程序还在跑；
+    /// 只看直接子进程的话，会话会立刻被标成"已停止"。等 Job 里所有进程
+    /// 都结束再报退出，状态才跟真正的程序生命周期一致。
+    pub(crate) fn duplicate(&self) -> Option<JobHandle> {
+        use std::ptr;
+        use windows_sys::Win32::Foundation::{DuplicateHandle, DUPLICATE_SAME_ACCESS};
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+        unsafe {
+            let mut out = ptr::null_mut();
+            let ok = DuplicateHandle(
+                GetCurrentProcess(),
+                self.0,
+                GetCurrentProcess(),
+                &mut out,
+                0,
+                0,
+                DUPLICATE_SAME_ACCESS,
+            );
+            if ok == 0 {
+                None
+            } else {
+                Some(JobHandle(out))
+            }
+        }
+    }
+}
+
+/// 退出线程持有的 Job 句柄副本（Drop 时关闭）
+#[cfg(windows)]
+pub(crate) struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+unsafe impl Send for JobHandle {}
+
+#[cfg(windows)]
+impl Drop for JobHandle {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+/// 等 Job 里所有进程结束。
+///
+/// 注意：Job 句柄**不会**在进程清空时自动发信号（实测 `WaitForSingleObject`
+/// 会一直等下去），只能轮询 `ActiveProcesses`。
+#[cfg(windows)]
+fn wait_job_empty(job: &JobHandle) {
+    use windows_sys::Win32::System::JobObjects::{
+        JobObjectBasicAccountingInformation, QueryInformationJobObject,
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+    };
+
+    loop {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let ok = unsafe {
+            QueryInformationJobObject(
+                job.0,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        if ok == 0 || info.ActiveProcesses == 0 {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    }
 }
 
 #[cfg(windows)]
 impl Drop for JobGuard {
     fn drop(&mut self) {
+        // 显式结束整棵树：退出线程可能还持有一份 Job 句柄副本，
+        // 光靠 KILL_ON_JOB_CLOSE 会等到副本关闭才生效（关标签就杀不掉了）。
         unsafe {
+            let _ = windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1);
             windows_sys::Win32::Foundation::CloseHandle(self.0);
         }
     }
@@ -210,6 +287,20 @@ impl DsrFilter {
 
 /* ---------------- 会话创建 ---------------- */
 
+/// 这条命令是不是"启动器 + 真程序"的形态（PowerShell `-File script.ps1`）。
+///
+/// 只有这种会话才需要等整棵进程树：脚本拉起 GUI 后自己先退，
+/// 直接看子进程会把会话误标成"已停止"。flutter / npm 这类命令跑完就是跑完，
+/// 必须按直接子进程的退出立刻上报，否则会一直绿着。
+fn wants_tree_wait(program: &str, args: &[String]) -> bool {
+    let name = std::path::Path::new(program)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let is_powershell = name == "pwsh" || name == "powershell";
+    is_powershell && args.iter().any(|a| a.eq_ignore_ascii_case("-file"))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
     app: AppHandle,
@@ -245,6 +336,13 @@ pub fn spawn(
 
     let pid = child.process_id().unwrap_or(0);
     let job = JobGuard::assign(pid);
+    // 给退出线程一份 Job 句柄：只有「脚本启动器」才需要等整棵进程树结束
+    #[cfg(windows)]
+    let job_wait = if wants_tree_wait(program, args) {
+        job.as_ref().and_then(|j| j.duplicate())
+    } else {
+        None
+    };
 
     let mut reader = pair
         .master
@@ -302,8 +400,19 @@ pub fn spawn(
     // 退出线程（持有 child，拿到退出码）
     let exit_app = app.clone();
     let exit_id = id.clone();
+    #[cfg(windows)]
+    let exit_job = job_wait;
     std::thread::spawn(move || {
         let code = child.wait().ok().map(|s| s.exit_code() as i32);
+
+        // 启动器（如 run.ps1 → GUI 程序）退出时，真正的程序可能还在 Job 里跑。
+        // 等 Job 空掉再报退出，会话状态（绿点 / 停止按钮）才跟真正的程序一致。
+        #[cfg(windows)]
+        if let Some(job) = exit_job {
+            wait_job_empty(&job);
+            drop(job);
+        }
+
         let _ = exit_app.emit(
             "pty://exit",
             ExitPayload {
@@ -355,7 +464,30 @@ pub fn kill(reg: &Registry, id: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DsrFilter, Utf8Stream};
+    use super::{wants_tree_wait, DsrFilter, Utf8Stream};
+
+    #[test]
+    fn tree_wait_only_for_powershell_script_launchers() {
+        let file = |p: &str| vec!["-NoLogo".to_string(), "-File".to_string(), p.to_string()];
+        // run.ps1 这类启动器：脚本自己先退，GUI 还在跑
+        assert!(wants_tree_wait("pwsh.exe", &file("run.ps1")));
+        assert!(wants_tree_wait(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            &file("run.ps1")
+        ));
+        assert!(wants_tree_wait("pwsh", &["-File".to_string(), "a.ps1".to_string()]));
+
+        // flutter / npm / 普通命令：跑完就是跑完，必须立刻上报退出
+        assert!(!wants_tree_wait("flutter.bat", &["run".to_string()]));
+        assert!(!wants_tree_wait(
+            "cmd.exe",
+            &["/d".into(), "/c".into(), "npm.cmd".into(), "run".into(), "dev".into()]
+        ));
+        assert!(!wants_tree_wait(
+            "pwsh",
+            &["-NoLogo".to_string(), "-NoExit".to_string(), "-Command".to_string(), "flutter run".to_string()]
+        ));
+    }
 
     #[test]
     fn decodes_split_multibyte_sequence() {

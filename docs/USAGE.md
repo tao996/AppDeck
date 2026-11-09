@@ -295,7 +295,9 @@ tauri info             custom  npm run tauri -- info
   preset 被删掉时命令标「已失效」并划线，不删数据
 - 项目徽章显示 `Qt`（🔧），命令行图标也是 🔧；右键有「编辑 CMakePresets.json」
   「重新读取 Qt / CMake」（文件存在时才出现）
-- 配置 / 构建 / 运行都是 `custom`：在**项目常驻终端**里执行，跑完 shell 还在
+- **配置 / 构建**是 `custom`：在**项目常驻终端**里执行，跑完 shell 还在
+- **运行**是独立的 `run` 会话：`run.ps1` 拉起的 GUI 程序跑多久，标签就绿多久
+  （后端等整棵进程树结束才算退出）；「停止」结束进程树，标签变红、历史保留
 
 以 `D:\demo\code\qtProjects\mediaCutQt` 为例，导入后命令是：
 
@@ -323,14 +325,18 @@ tauri info             custom  npm run tauri -- info
 - 终端标签**恢复后直接可以输入**：旧历史留在上方回滚区，新 shell 在干净的一屏里启动，
   避免 ConPTY 的绝对光标把提示符覆盖进旧日志
 - 普通终端也默认显示「停止 / 重跑 / 搜索 / 清空」：
-  - **停止** = 给当前命令发 `Ctrl+C`，**不会关闭 shell**（关标签才结束会话）
-  - **重跑** = 先 `Ctrl+C` 中断当前命令，再把上一条命令**带 Enter** 打回同一个 shell，
-    不需要再手动按回车
-- `run` 里要分两类：**flutter run** 和 **npm / docker 这类外部程序**（`npm run dev`、
-  `docker compose logs -f`）：
+  - **停止** = 给当前命令发 `Ctrl+C`，**不会关闭 shell**；标签状态跟着命令走，
+    停止后变🔴「已停止」，下次投递命令再变回🟢
+  - **重跑** = 直接向当前终端重发原命令（已经停止就跳过 `Ctrl+C`），
+    **在同一个 shell、同一个标签位置**执行，不会关掉终端再在末尾新开一个
+- `run` 里要分两类：**flutter run** 和 **npm / docker / Qt 这类外部程序**（`npm run dev`、
+  `docker compose logs -f`、`run.ps1`）：
   - 外部程序启动即算「运行中」（不再等 `Flutter run key commands.` 那行）；
   - **停止**直接结束进程树，标签与历史保留（它们没有 flutter 的 `q` 退出键）；
-  - **重跑**立刻重新执行并替换旧标签，不会再停在提示符等你按回车
+  - **重跑**立刻重新执行；新会话**原位替换**旧标签（不会跑到标签栏最后），
+    同一条命令再次运行也不会出现两个同名标签
+  - 会话是否退出按**整棵进程树**算：`run.ps1` 这类启动器自己先退出、拉起的 GUI 还在跑时，
+    标签保持🟢，直到程序真正关闭（或点停止）
 
 ![终端工具](shot-terminal-tools.png)
 
@@ -349,12 +355,15 @@ tauri info             custom  npm run tauri -- info
 - **流式 UTF-8 解码**：多字节字符被数据块切断时保留尾部，中文日志不乱码
 - **DSR 握手**：ConPTY 启动即发 `ESC[6n` 查询光标位置，不应答会**永久卡住**；由后端统一应答 `ESC[1;1R` 并剔除该序列（只应答一次）
 - **进程树回收**：Windows Job Object + `KILL_ON_JOB_CLOSE`，关标签/退出应用时连带杀掉 `flutter → dart → gradle`
+- **会话退出按进程树算（只对 PowerShell 启动器）**：`pwsh -File run.ps1` 这类脚本拉起 GUI 后自己先退，
+  要等 Job 里所有进程结束才报退出；flutter / npm 等命令按自身退出**立刻**上报，
+  否则设备断连（`Lost connection to device.`）后会一直绿着
 - **会话状态机**：flutter run 命中 `Flutter run key commands.` → 🟢；进程退出 → 🔴 并记录退出码
 - **批处理提示自动应答**：`cmd /d /c` 跑 `.cmd`（npm / pnpm / yarn）时，`Ctrl+C` 会问
   「终止批处理操作吗(Y/N)?」。没人回答，包装进程就永远不退、状态卡在运行中，
   所以 AppDeck 检测到该提示会替用户回 `Y`（一次提示只答一次）
 - **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 发 `q`；项目终端发 `Ctrl+C`；
-  外部程序 / 构建直接结束进程）、重跑（项目终端会先中断再自动回车重放；run 会话直接重新执行）、
+  外部程序 / 构建直接结束进程）、重跑（项目终端在同一个 shell 里重发；run 会话新开一个后**原位替换**旧标签）、
   DevTools（从输出解析 URL 打开）
 - **命令拼装**：`.bat` 经 `cmd.exe /d /c`（**不加 `/s`**），路径与参数逐项传参，避免引号被二次转义
 

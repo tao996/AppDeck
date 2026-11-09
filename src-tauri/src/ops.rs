@@ -796,14 +796,14 @@ pub fn prefill_plan(
     ))
 }
 
-/// npm / docker 这类命令是"外部程序"，不该走 flutter 分支。
+/// npm / docker / Qt 这类命令是"外部程序"，不该走 flutter 分支。
 ///
 /// **不能用 kind 判断**：kind=run 现在表示"开发阶段（长时间运行）"，
-/// flutter run 和 `npm run dev` / `docker compose logs -f` 都是 run，
+/// flutter run 和 `npm run dev` / `docker compose logs -f` / Qt 的 `run.ps1` 都是 run，
 /// 但后者必须直接执行 program，不能拼成 `flutter run -f ...`。
 fn external_program(command: &Command) -> Option<(String, Vec<String>)> {
     let src = command.source.as_deref().unwrap_or("");
-    if !matches!(src, "npm" | "docker") {
+    if !matches!(src, "npm" | "docker" | "qt") {
         return None;
     }
     let prog = command.program.as_deref().unwrap_or("").trim();
@@ -906,11 +906,17 @@ pub fn build_plan_for(
         }
     };
 
-    // npm / docker 是"外部程序"：必须按 program+args 直接执行。
+    // npm / docker / Qt 是"外部程序"：必须按 program+args 直接执行。
     // **不能只看 kind**——kind=run 表示"开发阶段"，flutter run 与 npm run dev / docker logs -f
     // 都是 run，但后者拼进 flutter 命令行就成了 `flutter run -f ...`（实测踩过）。
+    // Qt 的 `运行` 是 run.ps1：.ps1 不能 CreateProcess，交给 PowerShell。
     let (program, args) = if let Some((prog, list)) = external_program(command) {
-        wrap_batch(prog, list)
+        if prog.to_ascii_lowercase().ends_with(".ps1") {
+            let ps = crate::terminal::powershell_for(state.settings.terminal.path.as_deref());
+            crate::terminal::wrap_ps1(&ps, &prog, &list)
+        } else {
+            wrap_batch(prog, list)
+        }
     } else {
         match command.kind.as_str() {
         "custom" => {

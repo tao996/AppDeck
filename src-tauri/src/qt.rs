@@ -483,7 +483,11 @@ pub fn commands_for(info: &QtInfo) -> Vec<Command> {
     }
 
     if let Some(script) = &info.run_script {
-        out.push(command("run", "运行", &script.display().to_string(), &[]));
+        let mut cmd = command("run", "运行", &script.display().to_string(), &[]);
+        // 运行是长时间驻留的进程（Qt GUI）：独立 run 会话，
+        // 停止 = 结束进程树 → 退出事件能把状态准确标成「已停止」。
+        cmd.kind = "run".to_string();
+        out.push(cmd);
     }
 
     out
@@ -507,6 +511,9 @@ pub fn merge_into(project: &mut Project, fresh: Vec<Command>) -> MergeOutcome {
             Some(existing) => {
                 existing.program = c.program.clone();
                 existing.args = c.args.clone();
+                // qt 命令的执行方式也由导入器定义（例如「运行」是独立 run 会话），
+                // 一起同步，否则升级后老项目还按 custom 在共享终端里跑
+                existing.kind = c.kind.clone();
                 existing.stale = false;
                 if existing.name.trim().is_empty() {
                     existing.name = c.name.clone();
@@ -579,6 +586,8 @@ mod tests {
         let cmds = commands_for(&info);
         assert_eq!(names(&cmds), vec!["配置 · mingw", "构建 · mingw", "运行"]);
         assert_eq!(cmds[1].args, vec!["--build", "--preset", "mingw"]);
+        assert_eq!(cmds[0].kind, "custom", "配置在项目终端里执行");
+        assert_eq!(cmds[2].kind, "run", "运行是独立 run 会话，停止能准确标红");
         assert!(cmds.iter().all(|c| c.source.as_deref() == Some("qt")));
 
         let _ = fs::remove_dir_all(&dir);

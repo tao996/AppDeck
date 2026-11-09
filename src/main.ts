@@ -1293,7 +1293,6 @@ function renderTree(): void {
 
     const chipCls = loading ? "src-auto" : `src-${info.source}`;
     const chipTxt = loading ? "检测中…" : SOURCE_TEXT[info.source];
-    const verTxt = loading ? "" : info.ok ? info.version ?? "" : "不可用";
 
     // 徽章按"里面装了什么"来叫，而不是内部 kind：
     // 只有 npm / docker / qt 命令的项目分别叫「Npm」「Docker」「Qt」
@@ -1305,7 +1304,7 @@ function renderTree(): void {
     const kindLabel = isFolder
       ? "文件夹"
       : p.kind === "single"
-        ? "应用"
+        ? "Flutter"
         : only("docker")
           ? "Docker"
           : only("npm")
@@ -1334,17 +1333,13 @@ function renderTree(): void {
         ${
           isFolder
             ? ""
-            : `<span class="chip ${chipCls}">${esc(chipTxt)}</span>
-        ${info?.fvmVersion ? `<span class="chip chip-fvm" title="FVM 工程（.fvmrc 声明 ${esc(info.fvmVersion)}）">FVM</span>` : ""}
-        ${verTxt ? `<span class="fver">${esc(verTxt)}</span>` : ""}`
+            : `${info?.source === "custom" ? "" : `<span class="chip ${chipCls}">${esc(chipTxt)}</span>`}
+        ${info?.fvmVersion ? `<span class="chip chip-fvm" title="FVM 工程（.fvmrc 声明 ${esc(info.fvmVersion)}）">FVM</span>` : ""}`
         }
-        <button class="proj-edit" title="重命名项目（只改显示名）">✎</button>
-        <button class="proj-x" title="移除项目">×</button>
       </span>
     `;
 
-    head.addEventListener("click", (e) => {
-      if ((e.target as HTMLElement).closest(".proj-x, .proj-edit")) return;
+    head.addEventListener("click", () => {
       if (collapsed.has(p.id)) collapsed.delete(p.id);
       else collapsed.add(p.id);
       renderTree();
@@ -1356,16 +1351,6 @@ function renderTree(): void {
       e.preventDefault();
       e.stopPropagation();
       openProjectMenu(e, p);
-    });
-
-    head.querySelector(".proj-edit")?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void renameProject(p);
-    });
-
-    head.querySelector(".proj-x")?.addEventListener("click", (e) => {
-      e.stopPropagation();
-      void removeProject(p);
     });
 
     box.appendChild(head);
@@ -1544,10 +1529,10 @@ function selectCommand(id: string): void {
   renderTree();
 }
 
-/** npm / docker 是「外部程序」：后端直接执行 program+args，没有交互 shell。
+/** npm / docker / qt 是「外部程序」：后端直接执行 program+args，没有交互 shell。
  *  kind 同为 run，但它们的停止 / 重跑 / 状态判定和 flutter run 完全不同。 */
 function isExternalSource(source: string | undefined): boolean {
-  return source === "npm" || source === "docker";
+  return source === "npm" || source === "docker" || source === "qt";
 }
 
 function isExternalRunSession(s: TermSession): boolean {
@@ -1568,7 +1553,7 @@ function mountSession(
     target?: string;
     source?: string;
   },
-): void {
+): TermSession {
   const externalRun = kind === "run" && isExternalSource(origin?.source);
   const session: TermSession = {
     id: res.id,
@@ -1612,6 +1597,39 @@ function mountSession(
     const cols = session.term?.cols ?? 100;
     void invoke("resize_session", { id: session.id, rows, cols }).catch(() => {});
   });
+  return session;
+}
+
+/** 同一身份（项目+命令 / 模板 / 自定义命令 / 平台动作）已经停止的会话。
+ *  再次运行时用它原来的标签位置替换，避免同名 tab 越堆越多。 */
+function staleSessionFor(match: (s: TermSession) => boolean): TermSession | undefined {
+  return sessions.find((s) => s.status === "stopped" && match(s));
+}
+
+/** 用新会话替换旧会话，并**保持旧会话在标签栏里的位置**。
+ *  重跑 / 同一命令再次运行都走这里：直接关旧开新会把它追加到列表末尾，顺序就乱了。 */
+function replaceSessionInPlace(oldId: string, newId: string): void {
+  if (oldId === newId) return;
+  const oldIdx = sessions.findIndex((s) => s.id === oldId);
+  if (oldIdx < 0) return;
+  if (!sessions.some((s) => s.id === newId)) return;
+
+  const [old] = sessions.splice(oldIdx, 1);
+  old.term?.dispose();
+  old.pane?.remove();
+  pendingOutput.delete(old.id);
+  // 旧会话理论上已经结束；万一还活着（例如标记为已停止但 shell 还在），一并收掉
+  void invoke("kill_session", { id: old.id }).catch(() => {});
+
+  const newIdx = sessions.findIndex((s) => s.id === newId);
+  if (newIdx >= 0) {
+    const [fresh] = sessions.splice(newIdx, 1);
+    sessions.splice(Math.min(oldIdx, sessions.length), 0, fresh);
+  }
+  renderTabs();
+  renderStatus();
+  updateControls();
+  schedulePersist();
 }
 
 /** 同一身份（项目+命令 / 模板 / 自定义命令 / 平台动作）当前活着的会话。
@@ -1634,7 +1652,7 @@ function markLaunching(key: string): boolean {
   return false;
 }
 
-async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<boolean> {
+async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<TermSession | null> {
   selectCommand(c.id);
 
   // 普通命令（docker up/stop、npm test…）跑完就退出，没必要占一个标签：
@@ -1643,18 +1661,22 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<boolean> 
     return runInTerminal(p, c);
   }
 
+  const sameCommand = (s: TermSession): boolean =>
+    s.projectId === p.id && s.commandId === c.id && s.kind !== "terminal";
+
   // 同一条命令已经在跑：切回那个标签，不再起第二个进程 / 第二个标签
-  const live = liveSessionFor(
-    (s) => s.projectId === p.id && s.commandId === c.id && s.kind !== "terminal",
-  );
+  const live = liveSessionFor(sameCommand);
   if (live) {
     activateSession(live.id);
     toast(`该命令已在运行：${live.title}`);
-    return true;
+    return live;
   }
 
+  // 之前跑过、已经停止的同名标签：新会话放回它原来的位置，而不是在末尾再挂一个
+  const stale = staleSessionFor(sameCommand);
+
   const key = `cmd|${p.id}|${c.id}`;
-  if (markLaunching(key)) return false;
+  if (markLaunching(key)) return null;
 
   try {
     const res = await invoke<StartResponse>("start_session", {
@@ -1664,25 +1686,28 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<boolean> 
       rows: 30,
       cols: 100,
     });
-    mountSession(res, c.kind, c.flutterMode ?? "debug", {
+    const session = mountSession(res, c.kind, c.flutterMode ?? "debug", {
       projectId: p.id,
       commandId: c.id,
       source: c.source ?? undefined,
     });
-    return true;
+    if (stale && stale.id !== session.id) replaceSessionInPlace(stale.id, session.id);
+    return session;
   } catch (e) {
     toast(String(e), "error");
-    return false;
+    return null;
   } finally {
     launchingKeys.delete(key);
   }
 }
 
-/** 项目当前活着的终端（kind=terminal 且未结束） */
+/** 项目终端：优先活着的 shell；停止过但 shell 可能还在的也留给复用，
+ *  真正失效时后端会退回新建，前端再把旧标签原位替换掉。 */
 function projectShell(p: Proj): TermSession | undefined {
-  return sessions.find(
-    (s) => s.kind === "terminal" && s.projectId === p.id && s.status !== "stopped",
+  const shells = sessions.filter(
+    (s) => s.kind === "terminal" && s.projectId === p.id,
   );
+  return shells.find((s) => s.status !== "stopped") ?? shells[0];
 }
 
 /** 同一项目的命令投递串行化：双击时第二次会等第一次把 shell 建好再复用，
@@ -1693,11 +1718,11 @@ const terminalQueue = new Map<string, Promise<unknown>>();
  *  第二个 click 不该把同一条命令再敲一遍（重跑传 reuse，不走这层）。 */
 const lastTerminalRun = new Map<string, number>();
 
-function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<boolean> {
+function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<TermSession | null> {
   if (!reuse) {
     const runKey = `${p.id}|${c.id}`;
     const now = Date.now();
-    if (now - (lastTerminalRun.get(runKey) ?? 0) < 800) return Promise.resolve(false);
+    if (now - (lastTerminalRun.get(runKey) ?? 0) < 800) return Promise.resolve(null);
     lastTerminalRun.set(runKey, now);
   }
 
@@ -1715,7 +1740,11 @@ function runInTerminal(p: Proj, c: Cmd, reuse?: TermSession): Promise<boolean> {
 }
 
 /** 把一条命令打进项目的常驻终端：有就复用，没有就新开一个 shell */
-async function runInTerminalNow(p: Proj, c: Cmd, reuse?: TermSession): Promise<boolean> {
+async function runInTerminalNow(
+  p: Proj,
+  c: Cmd,
+  reuse?: TermSession,
+): Promise<TermSession | null> {
   // 串行化之后这里再取一次：上一次点击可能刚建好 shell
   const existing = reuse ?? projectShell(p);
   try {
@@ -1730,27 +1759,46 @@ async function runInTerminalNow(p: Proj, c: Cmd, reuse?: TermSession): Promise<b
     if (res.reused && existing) {
       // 记住「这个 shell 最近一次执行的是哪条命令」，重跑按钮据此可用
       existing.commandId = c.id;
+      // 命令开始执行：标签恢复绿色（停止后会被标记成已停止）
+      if (existing.status !== "running") {
+        existing.status = "running";
+        renderTabs();
+      }
       activateSession(existing.id);
-      return true;
+      updateControls();
+      return existing;
     }
 
-    mountSession(res, "terminal", "debug", { projectId: p.id, commandId: c.id });
-    return true;
+    const session = mountSession(res, "terminal", "debug", {
+      projectId: p.id,
+      commandId: c.id,
+    });
+    // 同一个项目里旧的终端标签（已停止/已结束）占着位置：新 shell 放回原位
+    const stale = staleSessionFor(
+      (s) => s.kind === "terminal" && s.projectId === p.id && s.id !== session.id,
+    );
+    if (stale) replaceSessionInPlace(stale.id, session.id);
+    return session;
   } catch (e) {
     toast(String(e), "error");
-    return false;
+    return null;
   }
 }
 
 /// 全局模板：不写入项目命令列表，直接起一个会话
 async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
+  const sameTemplate = (s: TermSession): boolean =>
+    s.projectId === p.id && s.templateId === t.id;
+
   // 同一个模板已在跑：切回它，不再多开一个进程
-  const live = liveSessionFor((s) => s.projectId === p.id && s.templateId === t.id);
+  const live = liveSessionFor(sameTemplate);
   if (live) {
     activateSession(live.id);
     toast(`该模板已在运行：${live.title}`);
     return;
   }
+
+  const stale = staleSessionFor(sameTemplate);
 
   const key = `tpl|${p.id}|${t.id}`;
   if (markLaunching(key)) return;
@@ -1763,11 +1811,12 @@ async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
       rows: 30,
       cols: 100,
     });
-    mountSession(res, t.kind, t.flutterMode ?? "debug", {
+    const session = mountSession(res, t.kind, t.flutterMode ?? "debug", {
       projectId: p.id,
       templateId: t.id,
       source: t.source ?? undefined,
     });
+    if (stale && stale.id !== session.id) replaceSessionInPlace(stale.id, session.id);
   } catch (e) {
     toast(String(e), "error");
   } finally {
@@ -1793,8 +1842,16 @@ async function stopActive(): Promise<void> {
 
   // 项目终端的「停止」只中断当前命令，不关 shell：
   // go run / flutter 等长命令按 Ctrl+C 就会回到提示符，历史和环境都还在。
+  // 但状态要跟着命令走：命令停了就把标签标成「已停止」（红点），
+  // 下次投递命令时再恢复「运行中」——否则点完停止还是一直挂绿点。
   if (s.kind === "terminal") {
     await invoke("write_session", { id: s.id, data: "\x03" }).catch(() => {});
+    if (s.status !== "stopped") {
+      s.status = "stopped";
+      renderTabs();
+      updateControls();
+      schedulePersist();
+    }
     return;
   }
 
@@ -2664,17 +2721,20 @@ function basename(p: string): string {
 }
 
 async function runCustomCommand(c: CustomCommand, replaceId?: string): Promise<void> {
+  const sameCustom = (s: TermSession): boolean =>
+    s.kind === "custom" && s.customCommandId === c.id;
+
   // 同一个自定义命令已在跑：切回已有标签（「重跑」传了 replaceId，跳过这层）
   if (!replaceId) {
-    const live = liveSessionFor(
-      (s) => s.kind === "custom" && s.customCommandId === c.id,
-    );
+    const live = liveSessionFor(sameCustom);
     if (live) {
       activateSession(live.id);
       toast(`该命令已在运行：${live.title}`);
       return;
     }
   }
+
+  const stale = staleSessionFor(sameCustom);
 
   const key = `custom|${c.id}`;
   if (markLaunching(key)) return;
@@ -2685,8 +2745,10 @@ async function runCustomCommand(c: CustomCommand, replaceId?: string): Promise<v
       rows: 30,
       cols: 100,
     });
-    mountSession(res, "custom", "—", { customCommandId: c.id });
-    if (replaceId) await closeSession(replaceId);
+    const session = mountSession(res, "custom", "—", { customCommandId: c.id });
+    // 重跑传了 replaceId 就替换它；否则把同名且已停止的旧标签原位替换掉
+    const oldId = replaceId ?? stale?.id;
+    if (oldId && oldId !== session.id) replaceSessionInPlace(oldId, session.id);
   } catch (e) {
     toast(String(e), "error");
   } finally {
@@ -2730,13 +2792,13 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
         <div class="set-row">
           <label>名称</label>
           <div class="set-cell">
-            <input class="set-input" id="cc-name" maxlength="60" placeholder="如 NPC 服务" />
+            <input class="set-input" id="cc-name" maxlength="60" placeholder="如 NPC 服务" autocomplete="off" autocapitalize="off" spellcheck="false" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
           </div>
         </div>
         <div class="set-row">
           <label>程序 / 快捷方式</label>
           <div class="set-cell">
-            <input class="set-input" id="cc-program" placeholder="选择 .lnk / .exe，或直接填路径" spellcheck="false" />
+            <input class="set-input" id="cc-program" placeholder="选择 .lnk / .exe，或直接填路径" spellcheck="false" autocomplete="off" autocapitalize="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
             <button class="btn" id="cc-browse">浏览…</button>
             <button class="btn" id="cc-resolve">解析快捷方式</button>
           </div>
@@ -2745,13 +2807,13 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
         <div class="set-row">
           <label>参数</label>
           <div class="set-cell">
-            <input class="set-input" id="cc-args" placeholder="原样传给程序；快捷方式会自动填入" spellcheck="false" />
+            <input class="set-input" id="cc-args" placeholder="原样传给程序；快捷方式会自动填入" spellcheck="false" autocomplete="off" autocapitalize="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
           </div>
         </div>
         <div class="set-row">
           <label>工作目录</label>
           <div class="set-cell">
-            <input class="set-input" id="cc-cwd" placeholder="可空；快捷方式会自动填入" spellcheck="false" />
+            <input class="set-input" id="cc-cwd" placeholder="可空；快捷方式会自动填入" spellcheck="false" autocomplete="off" autocapitalize="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
             <button class="btn" id="cc-browse-cwd">浏览…</button>
           </div>
         </div>
@@ -3054,7 +3116,12 @@ async function openProjectTerminal(p: Proj): Promise<void> {
       rows: 30,
       cols: 100,
     });
-    mountSession(res, "terminal", "terminal", { projectId: p.id });
+    const session = mountSession(res, "terminal", "terminal", { projectId: p.id });
+    // 已结束的旧终端标签别留着变成同名重复 tab：新终端放回它的位置
+    const stale = staleSessionFor(
+      (s) => s.kind === "terminal" && s.projectId === p.id && s.id !== session.id,
+    );
+    if (stale) replaceSessionInPlace(stale.id, session.id);
   } catch (e) {
     toast(String(e), "error");
   }
@@ -3436,41 +3503,99 @@ function doctorIssues(): DoctorCheck[] {
 
 /** 工具栏按钮即体检入口：状态直接体现在按钮上 */
 function renderDoctorButton(): void {
-  const btn = req<HTMLButtonElement>("#btn-doctor");
+  const item = document.querySelector<HTMLElement>("#tools-doctor");
+  if (!item) return;
+  const detail = item.querySelector<HTMLElement>(".dm-sub");
+  if (!detail) return;
+
+  item.classList.toggle("checking", doctorBusy);
   const rep = doctorReport;
 
   if (doctorBusy) {
-    btn.className = "btn doc-btn checking";
-    btn.textContent = "⏳ 体检";
-    btn.title = "正在运行 flutter doctor…";
+    detail.textContent = "正在运行 flutter doctor…";
+    item.title = "正在运行 flutter doctor…";
     return;
   }
 
   // 没跑过：不自动触发（flutter doctor 要 20+ 秒），等用户点
   if (!rep) {
-    btn.className = "btn doc-btn";
-    btn.textContent = "体检";
-    btn.title = "点击运行 flutter doctor（约 20 秒，结果会缓存）";
+    detail.textContent = "未体检 · 点击运行（约 20 秒）";
+    item.title = "点击运行 flutter doctor（结果会缓存）";
     return;
   }
 
   if (rep.error) {
-    btn.className = "btn doc-btn error";
-    btn.textContent = "✗ 体检";
-    btn.title = `体检未能完成：${rep.error}\n点击查看详情`;
+    detail.textContent = `失败：${rep.error}`;
+    item.title = `体检未能完成：${rep.error}\n点击查看详情`;
     return;
   }
 
   const bad = doctorIssues();
   if (bad.length === 0) {
-    btn.className = "btn doc-btn ok";
-    btn.textContent = "✓ 体检";
-    btn.title = `${rep.checks.length} 项检查全部正常\n点击查看详情`;
+    detail.textContent = `${rep.checks.length} 项全部正常 · 点击查看`;
+    item.title = `${rep.checks.length} 项检查全部正常\n点击查看详情`;
   } else {
-    btn.className = "btn doc-btn warn";
-    btn.textContent = `! 体检 ${bad.length}`;
-    btn.title = `${bad.map((c) => c.name).join("、")}\n点击查看详情`;
+    detail.textContent = `${bad.length} 项异常 · 点击查看`;
+    item.title = `${bad.map((c) => c.name).join("、")}\n点击查看详情`;
   }
+}
+
+function openDoctorEntry(): void {
+  if (doctorBusy) {
+    toast("体检进行中…");
+    return;
+  }
+  if (doctorReport) openDoctorReport();
+  else void refreshDoctor(true);
+}
+
+function openToolsMenu(anchor: HTMLElement): void {
+  if (toolsMenuEl) {
+    closeAllMenus();
+    return;
+  }
+  closeAllMenus();
+
+  const rect = anchor.getBoundingClientRect();
+  const menu = document.createElement("div");
+  menu.className = "device-menu tools-menu";
+  menu.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 320))}px`;
+  menu.style.top = `${Math.min(rect.bottom + 4, window.innerHeight - 220)}px`;
+  menu.innerHTML = `
+    <div class="dm-head"><span>工具</span></div>
+    <div class="dm-body">
+      <div class="dm-item" id="tools-filing">
+        <span class="dm-name">📋 备案</span>
+        <span class="dm-sub">安卓 APK 包名 / MD5 / 公钥</span>
+      </div>
+      <div class="dm-item" id="tools-doctor">
+        <span class="dm-name">🩺 体检</span>
+        <span class="dm-sub"></span>
+      </div>
+      <div class="dm-item" id="tools-processes">
+        <span class="dm-name">🧩 进程</span>
+        <span class="dm-sub">进程与端口管理</span>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(menu);
+  projMenuEl = menu;
+  toolsMenuEl = menu;
+
+  menu.querySelector("#tools-filing")?.addEventListener("click", () => {
+    closeAllMenus();
+    void pickApkAndInspect();
+  });
+  menu.querySelector("#tools-doctor")?.addEventListener("click", () => {
+    closeAllMenus();
+    openDoctorEntry();
+  });
+  menu.querySelector("#tools-processes")?.addEventListener("click", () => {
+    closeAllMenus();
+    openProcessPanel();
+  });
+
+  renderDoctorButton();
 }
 
 /**
@@ -3869,8 +3994,11 @@ async function rerunSessionNow(s: TermSession): Promise<void> {
       toast("这个终端还没有可重跑的命令", "error");
       return;
     }
-    await invoke("write_session", { id: s.id, data: "\x03" }).catch(() => {});
-    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    // 已经停止（刚点过停止）就不用再发 Ctrl+C，直接在同一个 shell 里重跑
+    if (s.status !== "stopped") {
+      await invoke("write_session", { id: s.id, data: "\x03" }).catch(() => {});
+      await new Promise((resolve) => window.setTimeout(resolve, 250));
+    }
     await runInTerminal(project, cmd, s);
     return;
   }
@@ -3881,13 +4009,18 @@ async function rerunSessionNow(s: TermSession): Promise<void> {
       // run 会话的「重跑」= 立刻重跑：外部程序（npm run dev 等）重新起一条会话，
       // flutter run 重新走「shell + 哨兵」的执行链。
       // 以前这里走 prefill_run（只把命令敲到提示符、不回车），用户还得手动按 Enter。
-      // 新会话先挂上（失败时旧标签还在），成功后再把旧标签**替换**掉：
-      // flutter run 没有"恢复现场"这回事，留一堆死标签只会让人分不清哪个是活的。
+      // 新会话先挂上（失败时旧标签还在），成功后再把旧标签**原位替换**——
+      // 直接关旧开新会把标签追加到列表末尾，顺序全乱。
       // 用命令本身的类型判定，而不是会话记录里的 kind——
       // 老会话记录可能没有 kind 字段，会导致 run 走错分支（不替换标签）
       const replace = cmd.kind === "run" && s.kind !== "terminal" ? s.id : null;
-      const ok = await runCommand(project, cmd);
-      if (ok && replace) await closeSession(replace);
+      const fresh = await runCommand(project, cmd);
+      if (fresh && replace && fresh.id !== replace) {
+        // runCommand 通常已经按「同名停止标签」替换过了；这里兜底旧标签还在的情况
+        if (sessions.some((x) => x.id === replace)) {
+          replaceSessionInPlace(replace, fresh.id);
+        }
+      }
       return;
     }
   }
@@ -5099,10 +5232,13 @@ function closeSubMenu(): void {
   subMenuEl = null;
 }
 
+let toolsMenuEl: HTMLDivElement | null = null;
+
 function closeAllMenus(): void {
   closeSubMenu();
   projMenuEl?.remove();
   projMenuEl = null;
+  toolsMenuEl = null;
 }
 
 function renderMenuRows(parent: HTMLDivElement, rows: MenuRow[]): void {
@@ -5283,6 +5419,19 @@ function renderFolderMenu(ev: MouseEvent, p: Proj): void {
       name: "添加命令",
       detail: "新建 run / build / custom 命令",
       onClick: () => void openCommandDialog(p),
+    },
+    { kind: "sep" },
+    {
+      kind: "item",
+      name: "重命名项目…",
+      detail: "只改显示名，不动磁盘目录",
+      onClick: () => void renameProject(p),
+    },
+    {
+      kind: "item",
+      name: "移除项目…",
+      detail: "仅从项目列表移除，不影响磁盘文件",
+      onClick: () => void removeProject(p),
     },
   ];
 
@@ -5561,6 +5710,22 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     });
   }
 
+  tail.push(
+    { kind: "sep" },
+    {
+      kind: "item",
+      name: "重命名项目…",
+      detail: "只改显示名，不动磁盘目录",
+      onClick: () => void renameProject(p),
+    },
+    {
+      kind: "item",
+      name: "移除项目…",
+      detail: "仅从项目列表移除，不影响磁盘文件",
+      onClick: () => void removeProject(p),
+    },
+  );
+
   const box = document.createElement("div");
   body.appendChild(box);
   renderMenuRows(box, tail);
@@ -5643,24 +5808,26 @@ async function runPlatformAction(
   p: Proj,
   platform: string,
   a: PlatformAction,
-  /** 「重跑」时传旧会话 id：新会话挂上后再关旧的（替换而不是追加） */
+  /** 「重跑」时传旧会话 id：新会话挂上后原位替换旧的（不是追加到末尾） */
   replaceId?: string,
 ): Promise<void> {
+  const sameAction = (s: TermSession): boolean =>
+    s.projectId === p.id &&
+    s.platform === platform &&
+    s.action === a.action &&
+    (s.target ?? "") === (a.target ?? "");
+
   // 同一个平台动作已经在跑：切回已有标签，别重复起进程（重跑路径跳过这层）
   if (!replaceId) {
-    const live = liveSessionFor(
-      (s) =>
-        s.projectId === p.id &&
-        s.platform === platform &&
-        s.action === a.action &&
-        (s.target ?? "") === (a.target ?? ""),
-    );
+    const live = liveSessionFor(sameAction);
     if (live) {
       activateSession(live.id);
       toast(`该动作已在运行：${live.title}`);
       return;
     }
   }
+
+  const stale = staleSessionFor(sameAction);
 
   const key = `plat|${p.id}|${platform}|${a.action}|${a.target ?? ""}`;
   if (markLaunching(key)) return;
@@ -5674,7 +5841,7 @@ async function runPlatformAction(
       rows: 30,
       cols: 100,
     });
-    mountSession(
+    const session = mountSession(
       res,
       a.action === "build" ? "build" : "run",
       a.action === "profile" ? "profile" : "debug",
@@ -5685,7 +5852,8 @@ async function runPlatformAction(
         target: a.target ?? undefined,
       },
     );
-    if (replaceId) await closeSession(replaceId);
+    const oldId = replaceId ?? stale?.id;
+    if (oldId && oldId !== session.id) replaceSessionInPlace(oldId, session.id);
   } catch (e) {
     toast(String(e), "error");
   } finally {
@@ -8047,12 +8215,10 @@ async function boot(): Promise<void> {
         <div class="tb-menu">
           <button class="btn menu-btn" id="btn-import-menu">导入 ▾</button>
           <button class="btn menu-btn" id="btn-custom-menu">自定义命令 ▾</button>
+          <button class="btn menu-btn" id="btn-tools-menu">工具 ▾</button>
         </div>
         <div class="tb-center"></div>
         <div class="tb-right">
-          <button class="btn" id="btn-filing" title="安卓备案信息：选择 APK 查看包名 / MD5 / 公钥">📋 备案</button>
-          <button class="btn doc-btn checking" id="btn-doctor" title="flutter doctor 体检">⏳ 体检</button>
-          <button class="btn" id="btn-processes" title="进程与端口：排查端口占用、结束残留的 flutter/dart/java 进程">🧩 进程</button>
           <button class="btn" id="btn-emulators" title="可启动的模拟器">📱 模拟器</button>
           <button class="btn icon" id="btn-settings" title="设置">⚙</button>
         </div>
@@ -8176,25 +8342,18 @@ async function boot(): Promise<void> {
     e.stopPropagation();
     openCustomCommandMenu();
   });
+  req<HTMLButtonElement>("#btn-tools-menu").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openToolsMenu(e.currentTarget as HTMLElement);
+  });
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
     if (s) void rerunSession(s);
   });
-  req<HTMLButtonElement>("#btn-filing").addEventListener("click", () => void pickApkAndInspect());
-
-  req<HTMLButtonElement>("#btn-doctor").addEventListener("click", () => {
-    if (doctorBusy) {
-      toast("体检进行中…");
-      return;
-    }
-    if (doctorReport) openDoctorReport();
-    else void refreshDoctor(true);
-  });
   req<HTMLButtonElement>("#btn-emulators").addEventListener("click", (e) =>
     openEmulatorMenu(e.currentTarget as HTMLElement),
   );
-  req<HTMLButtonElement>("#btn-processes").addEventListener("click", () => openProcessPanel());
   req<HTMLButtonElement>("#btn-reload").addEventListener("click", () => sendKey("r"));
   req<HTMLButtonElement>("#btn-restart").addEventListener("click", () => sendKey("R"));
   req<HTMLButtonElement>("#btn-stop").addEventListener("click", () => void stopActive());
