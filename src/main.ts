@@ -160,6 +160,17 @@ async function editFile(path: string): Promise<void> {
   }
 }
 
+/** 在资源管理器中打开一个文件夹（直接进入该目录，而不是在父目录里选中它）。
+ *  走 `open_path_default` 而不是 opener 插件的 `openPath`：后者需要路径 scope，
+ *  项目目录可能在任意盘符，运行时会被拒（Not allowed to open path）。 */
+async function openInFileExplorer(path: string): Promise<void> {
+  try {
+    await invoke("open_path_default", { path });
+  } catch (e) {
+    toast(`打开文件管理器失败：${String(e)}`, "error");
+  }
+}
+
 /** 用默认编辑器打开本会话的项目目录（整目录当工作区打开） */
 async function openProjectFolder(): Promise<void> {
   const s = activeSession();
@@ -5396,6 +5407,12 @@ function renderFolderMenu(ev: MouseEvent, p: Proj): void {
       detail: "用默认编辑器打开该文件夹",
       onClick: () => void editFile(p.path),
     },
+    {
+      kind: "item",
+      name: "在文件管理器中打开",
+      detail: "用资源管理器打开该文件夹",
+      onClick: () => void openInFileExplorer(p.path),
+    },
     gitReady
       ? {
           kind: "item",
@@ -5590,6 +5607,13 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     name: "用编辑器打开目录",
     detail: "用默认编辑器打开项目文件夹（整个目录当工作区）",
     onClick: () => void editFile(p.path),
+  });
+
+  tail.push({
+    kind: "item",
+    name: "在文件管理器中打开",
+    detail: "用资源管理器打开项目文件夹",
+    onClick: () => void openInFileExplorer(p.path),
   });
 
   // 只有真正的 Android 工程才有「数据库」可看（工作区/命令集没有 applicationId）

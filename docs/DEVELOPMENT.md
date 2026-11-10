@@ -52,13 +52,29 @@
 **刻意没接 Prettier 自动格式化**：`src/main.ts` 有 5000+ 行，全量重排会让真实改动
 淹没在"整文件重写"的 diff 里；格式化应该单独做一次、单独提交。
 
+## 构建与本地安装
+
+```bash
+npm run release           # 只编译 NSIS 安装包（不安装）
+npm run release:install   # 编译 + 静默安装 + 重新启动
+```
+
+`release:install` = `tauri build --bundles nsis` + `scripts/install-local.ps1`：
+
+- 安装前先结束正在运行的 `app-deck.exe`（安装程序自己也会强制关闭，
+  提前关能避免 exe 占用、让会话干净落盘）
+- 安装包按 `bundle/nsis/*-setup.exe` 里最新的一份取，不写死版本号
+- 装到 `%LOCALAPPDATA%\AppDeck`，最后自动重新打开
+- 脚本存为 **UTF-8 with BOM**：Windows PowerShell 5.1 按 ANSI 读无 BOM 的脚本，
+  中文注释会变乱码；控制台输出统一用英文，避免 OEM 代码页下的乱码
+
 ## 测试
 
 ```bash
 cd src-tauri && cargo test
 ```
 
-151 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、文件夹导入（任意目录 / 导入后为空 / 不套用模板）、项目重命名（清洗 / 校验 / 失败不破坏原名）、编辑器分派（VS Code / Zed / Sublime Text / Notepad++，含旧 `vscodePath` 设置迁移）、进程与端口快照（ToolHelp + GetExtendedTcpTable、真实监听端口归属、系统目录判定、自保护）、进程面板偏好（自动刷新默认值 / 隐藏规则往返）、rename CLI 输出解析（ANSI / box 清理、引号/分号、平台过滤）、自定义命令参数解析（引号 / 空格 / 空参数）、SharedPreferences 路径校验、网址文本不被当成磁盘路径、Qt / CMake 预设解析（inherits / 工具链定位 / Ninja 注入）、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化、adb 设备输出 / Gradle 包名 / find 输出解析、SQLite 只读查询与分页。
+152 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、文件夹导入（任意目录 / 导入后为空 / 不套用模板）、项目重命名（清洗 / 校验 / 失败不破坏原名）、编辑器分派（VS Code / Zed / Sublime Text / Notepad++，含旧 `vscodePath` 设置迁移）、进程与端口快照（ToolHelp + GetExtendedTcpTable、真实监听端口归属、系统目录判定、自保护）、进程面板偏好（自动刷新默认值 / 隐藏规则往返）、rename CLI 输出解析（ANSI / box 清理、引号/分号、平台过滤）、自定义命令参数解析（引号 / 空格 / 空参数）、SharedPreferences 路径校验、网址文本不被当成磁盘路径、Qt / CMake 预设解析（inherits / 工具链定位 / Ninja 注入）、哪些会话才等整棵进程树（PowerShell 启动器 vs flutter/npm）、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化、adb 设备输出 / Gradle 包名 / find 输出解析、SQLite 只读查询与分页。
 
 诊断工具：
 ```bash

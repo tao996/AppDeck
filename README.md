@@ -61,6 +61,13 @@ npm run tauri dev
 npm run tauri build
 ```
 
+装到本机（开发时改完直接生效）：
+
+```bash
+npm run release           # 只编译 NSIS 安装包
+npm run release:install   # 编译 + 静默安装 + 重新启动 AppDeck
+```
+
 产物在 `src-tauri/target/release/bundle/`：
 
 | 产物 | 说明 |
