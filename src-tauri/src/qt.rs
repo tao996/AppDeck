@@ -514,6 +514,9 @@ pub fn merge_into(project: &mut Project, fresh: Vec<Command>) -> MergeOutcome {
                 // qt 命令的执行方式也由导入器定义（例如「运行」是独立 run 会话），
                 // 一起同步，否则升级后老项目还按 custom 在共享终端里跑
                 existing.kind = c.kind.clone();
+                // 执行方式还看 source（qt → 外部程序，直接跑 run.ps1）；前端「编辑命令」
+                // 曾把它覆盖成 manual，让「运行」掉进 flutter run 分支，重新导入时修回来
+                existing.source = c.source.clone();
                 existing.stale = false;
                 if existing.name.trim().is_empty() {
                     existing.name = c.name.clone();
@@ -734,6 +737,51 @@ mod tests {
         let second = merge_into(&mut project, renamed);
         assert_eq!(second.added, vec!["配置 · clang"]);
         assert!(second.stale.iter().any(|n| n == "运行"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merge_restores_qt_source_after_edit() {
+        // 前端「编辑命令」改名字时曾把 source 写成 manual，导致「运行」
+        // 被后端当成 flutter run（No pubspec.yaml）。重新读取 Qt / CMake 要能修回来。
+        let dir = temp_dir("merge-source");
+        let mut info = QtInfo {
+            cmake_lists: true,
+            ..Default::default()
+        };
+        info.presets.configure = vec![ConfigurePreset {
+            name: "mingw".into(),
+            generator: None,
+        }];
+        info.run_script = Some(dir.join("run.ps1"));
+
+        let mut project = Project {
+            id: "p".into(),
+            name: "p".into(),
+            path: dir.display().to_string(),
+            kind: "workspace".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+        merge_into(&mut project, commands_for(&info));
+
+        let run = project.commands.iter_mut().find(|c| c.name == "运行").unwrap();
+        assert_eq!(run.kind, "run", "运行仍是独立 run 会话");
+        assert_eq!(run.source.as_deref(), Some("qt"), "Qt 导入带 qt 归属");
+        // 模拟老版本保存后的样子：名字改了、source 丢了
+        run.name = "运行 ps1.run".into();
+        run.source = Some("manual".into());
+
+        merge_into(&mut project, commands_for(&info));
+        let run = project
+            .commands
+            .iter()
+            .find(|c| c.name == "运行 ps1.run")
+            .unwrap();
+        assert_eq!(run.source.as_deref(), Some("qt"), "重新导入应恢复 qt 归属");
+        assert_eq!(run.kind, "run");
 
         let _ = fs::remove_dir_all(&dir);
     }

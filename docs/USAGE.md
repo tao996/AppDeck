@@ -311,6 +311,12 @@ tauri info             custom  npm run tauri -- info
 运行           D:\demo\code\qtProjects\mediaCutQt\run.ps1
 ```
 
+「运行」在编辑框里按 **custom（自定义命令）** 显示：它直接执行 `run.ps1`，不是 `flutter run`；
+落盘的 `kind=run` 只表示独立运行会话（停止时结束进程树、状态能准确标红）。修改名称 / 参数
+不会改变执行方式——`source=qt` 会保留，重新读取 Qt / CMake 时也会把被改坏的归属修回来。
+老版本改坏的命令（`source` 已丢）按「`kind=run` 且 `program` 不是 `.dart` 入口」兜底，
+仍会执行 `run.ps1`；点一次「重新读取 Qt / CMake」可彻底修回归属。
+
 ## 普通命令共用项目终端
 
 `docker compose up -d` 跑完就退出。如果每条命令占一个标签，标签立刻变死、越堆越多，
@@ -365,7 +371,9 @@ tauri info             custom  npm run tauri -- info
 - **批处理提示自动应答**：`cmd /d /c` 跑 `.cmd`（npm / pnpm / yarn）时，`Ctrl+C` 会问
   「终止批处理操作吗(Y/N)?」。没人回答，包装进程就永远不退、状态卡在运行中，
   所以 AppDeck 检测到该提示会替用户回 `Y`（一次提示只答一次）
-- **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 发 `q`；项目终端发 `Ctrl+C`；
+- **控制按钮**：热重载 `r`、热重启 `R`、停止（flutter run 运行中发 `q`、5 秒不退再结束进程；
+  **启动中**（还没出现 `Flutter run key commands.`）直接结束进程树——这时 flutter 还没读键盘，
+  发 `q` 只会被吞掉，以前 5 秒后强关标签看起来就像"终端崩了"；项目终端发 `Ctrl+C`；
   外部程序 / 构建直接结束进程）、重跑（项目终端在同一个 shell 里重发；run 会话新开一个后**原位替换**旧标签）、
   DevTools（从输出解析 URL 打开）
 - **命令拼装**：`.bat` 经 `cmd.exe /d /c`（**不加 `/s`**），路径与参数逐项传参，避免引号被二次转义

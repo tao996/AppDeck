@@ -801,13 +801,20 @@ pub fn prefill_plan(
 /// **不能用 kind 判断**：kind=run 现在表示"开发阶段（长时间运行）"，
 /// flutter run 和 `npm run dev` / `docker compose logs -f` / Qt 的 `run.ps1` 都是 run，
 /// 但后者必须直接执行 program，不能拼成 `flutter run -f ...`。
+///
+/// 归属（source）是首选判据；`kind=run` 且 `program` 不是 `.dart` 入口时同样按外部程序
+/// 处理——旧版本「编辑命令」会把 source 覆盖成 manual，不兜底就会退化成
+/// `flutter run -t run.ps1`，Qt 工程报 "No pubspec.yaml file found"。
 fn external_program(command: &Command) -> Option<(String, Vec<String>)> {
     let src = command.source.as_deref().unwrap_or("");
-    if !matches!(src, "npm" | "docker" | "qt") {
-        return None;
-    }
     let prog = command.program.as_deref().unwrap_or("").trim();
     if prog.is_empty() {
+        return None;
+    }
+    let is_dart_entry = prog.to_ascii_lowercase().ends_with(".dart");
+    let external = matches!(src, "npm" | "docker" | "qt")
+        || (command.kind == "run" && !is_dart_entry);
+    if !external {
         return None;
     }
     Some((
@@ -1540,6 +1547,62 @@ mod tests {
             );
             assert_eq!(plan.args, vec!["run", "dev"]);
         }
+
+        // Qt 的「运行」是 run.ps1：kind=run + source=qt，必须交给 PowerShell 直接执行，
+        // 不能被拼成 flutter run（否则 Qt 工程会报 No pubspec.yaml）
+        let script = root.join("run.ps1");
+        std::fs::write(&script, "Write-Host hi").unwrap();
+        let qt = Command {
+            id: "q1".into(),
+            name: "运行".into(),
+            kind: "run".into(),
+            program: Some(script.display().to_string()),
+            cwd: None,
+            flutter_mode: Some("debug".into()),
+            args: vec![],
+            env: Default::default(),
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("qt".into()),
+            scope: Some("project".into()),
+            stale: false,
+            group: None,
+            role: None,
+            category: Some("qt".into()),
+        };
+        let plan = build_plan_for(&state, &project, &qt, None).unwrap();
+        let joined = plan.args.join(" ");
+        let prog = plan.program.to_ascii_lowercase();
+        assert!(
+            !prog.contains("flutter") && !joined.to_ascii_lowercase().contains("flutter run"),
+            "Qt 的运行不该走 flutter：{} {}",
+            plan.program,
+            joined
+        );
+        assert!(
+            prog.contains("powershell") || prog.contains("pwsh"),
+            "ps1 应交给 PowerShell，实际: {}",
+            plan.program
+        );
+        assert!(
+            joined.contains("run.ps1"),
+            "应以 -File 执行 run.ps1，实际: {joined}"
+        );
+
+        // 旧版本「编辑命令」保存后 source 会变成 manual：兜底判据（program 不是 .dart）
+        // 仍要按外部程序执行，否则改个名字就退化成 flutter run
+        let mut legacy = qt.clone();
+        legacy.source = Some("manual".into());
+        let plan = build_plan_for(&state, &project, &legacy, None).unwrap();
+        let joined = plan.args.join(" ");
+        assert!(
+            !plan.program.to_ascii_lowercase().contains("flutter") && joined.contains("run.ps1"),
+            "编辑过的旧命令也要按外部程序执行：{} {}",
+            plan.program,
+            joined
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

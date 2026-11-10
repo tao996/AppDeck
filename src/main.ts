@@ -414,6 +414,8 @@ interface TermSession {
   scan: string;
   /** 命令来源（npm / docker / launch-json…）：区分「外部程序 run」和 flutter run */
   source?: string;
+  /** 按外部程序执行的 run 会话（含 source 被旧版本写坏的命令），见 isExternalCommand */
+  external?: boolean;
   /** 检测 cmd 批处理提示用的滚动尾巴（跨数据块拼接提示文本） */
   promptTail?: string;
   /** 恢复自磁盘（进程未运行，禁止写 PTY） */
@@ -1546,8 +1548,19 @@ function isExternalSource(source: string | undefined): boolean {
   return source === "npm" || source === "docker" || source === "qt";
 }
 
+/** 命令是否按外部程序执行（与后端 `ops::external_program` 同一套判据）。
+ *
+ *  source 是首选；`kind=run` 但 program 不是 `.dart` 入口的也按外部程序算：
+ *  旧版本「编辑命令」会把 source 覆盖成 manual，不兜底就会退化成
+ *  `flutter run -t run.ps1`（Qt 工程报 No pubspec.yaml）。 */
+function isExternalCommand(c: Cmd): boolean {
+  if (isExternalSource(c.source ?? undefined)) return true;
+  const prog = (c.program ?? "").trim();
+  return c.kind === "run" && prog !== "" && !prog.toLowerCase().endsWith(".dart");
+}
+
 function isExternalRunSession(s: TermSession): boolean {
-  return s.kind === "run" && isExternalSource(s.source);
+  return s.kind === "run" && (s.external === true || isExternalSource(s.source));
 }
 
 function mountSession(
@@ -1563,9 +1576,11 @@ function mountSession(
     action?: string;
     target?: string;
     source?: string;
+    external?: boolean;
   },
 ): TermSession {
-  const externalRun = kind === "run" && isExternalSource(origin?.source);
+  const external = origin?.external ?? isExternalSource(origin?.source);
+  const externalRun = kind === "run" && external;
   const session: TermSession = {
     id: res.id,
     title: res.title,
@@ -1580,6 +1595,7 @@ function mountSession(
     status: kind === "run" && !externalRun ? "starting" : "running",
     scan: "",
     source: origin?.source,
+    external,
     projectId: origin?.projectId,
     commandId: origin?.commandId,
     templateId: origin?.templateId,
@@ -1701,6 +1717,7 @@ async function runCommand(p: Proj, c: Cmd, deviceId?: string): Promise<TermSessi
       projectId: p.id,
       commandId: c.id,
       source: c.source ?? undefined,
+      external: isExternalCommand(c),
     });
     if (stale && stale.id !== session.id) replaceSessionInPlace(stale.id, session.id);
     return session;
@@ -1826,6 +1843,7 @@ async function runTemplate(p: Proj, t: Cmd, deviceId?: string): Promise<void> {
       projectId: p.id,
       templateId: t.id,
       source: t.source ?? undefined,
+      external: isExternalCommand(t),
     });
     if (stale && stale.id !== session.id) replaceSessionInPlace(stale.id, session.id);
   } catch (e) {
@@ -1874,11 +1892,20 @@ async function stopActive(): Promise<void> {
     return;
   }
 
-  // flutter run：q 是 flutter 自己的退出键，先礼后兵
+  // flutter run：q 是 flutter 自己的退出键，先礼后兵。
+  // 但「启动中」时 flutter 还没开始读键盘（通常还在跑 gradle），q 会被吞掉或在
+  // 命令结束后落到 shell 里，5 秒后强关标签看起来就像"终端崩了"。
+  // 启动阶段直接结束进程树：退出事件会把标签标成已停止，历史保留。
+  if (s.status === "starting") {
+    await invoke("kill_session", { id: s.id }).catch(() => {});
+    return;
+  }
+
   sendKey("q");
   window.setTimeout(() => {
     const still = sessions.find((x) => x.id === s.id && x.status !== "stopped");
-    if (still) void closeSession(s.id);
+    // 兜底同样只结束进程、不关标签：谁也不希望点个停止标签就没了
+    if (still) void invoke("kill_session", { id: s.id }).catch(() => {});
   }, 5000);
 }
 
@@ -3875,6 +3902,7 @@ async function restoreSessions(): Promise<void> {
     const referenced = state.projects
       .find((p) => p.id === log.projectId)
       ?.commands.find((c) => c.id === log.commandId);
+    const referencedTemplate = state.commandTemplates.find((t) => t.id === log.templateId);
     const inferredKind = log.kind || (log.platform ? "run" : (referenced?.kind ?? "run"));
 
     const s: TermSession = {
@@ -3894,6 +3922,11 @@ async function restoreSessions(): Promise<void> {
         referenced?.source ??
         state.commandTemplates.find((t) => t.id === log.templateId)?.source ??
         undefined,
+      external: referenced
+        ? isExternalCommand(referenced)
+        : referencedTemplate
+          ? isExternalCommand(referencedTemplate)
+          : undefined,
       projectId: log.projectId ?? undefined,
       commandId: log.commandId ?? undefined,
       templateId: log.templateId ?? undefined,
@@ -4786,15 +4819,21 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
   }
 
   const inferredShell = shellTypeOf(existing);
-  const initialType: CmdType =
-    inferredShell ??
-    (existing
-      ? existing.kind === "run" || existing.kind === "build"
-        ? existing.kind
-        : "custom"
-      : p?.kind === "folder"
-        ? "custom"
-        : "run");
+  // npm / Docker / Qt 的命令按「程序 + 参数」直接执行（见 isExternalCommand），
+  // 类型上是自定义命令；它们的 kind=run 只是会话生命周期，不是 flutter run。
+  const isExternal = existing ? isExternalCommand(existing) : false;
+  let initialType: CmdType;
+  if (inferredShell) {
+    initialType = inferredShell;
+  } else if (!existing) {
+    initialType = p?.kind === "folder" ? "custom" : "run";
+  } else if (isExternal) {
+    // 编辑外部命令时显示 custom：不能再把它当 flutter 调试运行展示
+    initialType = "custom";
+  } else {
+    initialType =
+      existing.kind === "run" || existing.kind === "build" ? existing.kind : "custom";
+  }
 
   const draft = {
     name: existing?.name ?? "",
@@ -4875,6 +4914,13 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         void build();
       });
       cell.appendChild(sel);
+      if (isExternal) {
+        const note = document.createElement("div");
+        note.className = "set-note";
+        note.textContent =
+          "外部程序（npm / Docker / Qt）：按「程序 + 参数」直接执行，不是 flutter run。";
+        cell.appendChild(note);
+      }
     }
 
     if (draft.type === "custom") {
@@ -5165,6 +5211,9 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         return;
       }
 
+      // 编辑外部命令（npm / Docker / Qt）时保留原 kind：下拉框显示的是 custom，
+      // 但执行方式由 source（及 program 是否为 .dart 入口）决定，改名字不该把它变成 flutter run。
+      const externalExisting = isExternal && !shellSpec;
       const args = shellSpec ? shellSpec.wrap(draft.script.trim()) : splitArgs(draft.args);
       if (draft.type === "build" && draft.flavor.trim()) {
         args.unshift("--flavor", draft.flavor.trim());
@@ -5174,7 +5223,7 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         id: existing?.id ?? "",
         name: draft.name.trim(),
         // Shell 类型落盘仍是 custom，避免后端为每种 shell 再加一套分支
-        kind: shellSpec ? "custom" : draft.type,
+        kind: shellSpec ? "custom" : externalExisting ? (existing?.kind ?? draft.type) : draft.type,
         program: shellSpec
           ? shellSpec.exe
           : draft.type === "custom" || draft.type === "run"
@@ -5195,9 +5244,10 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
         deviceId: existing?.deviceId ?? null,
         emulatorId: existing?.emulatorId ?? null,
         buildType: draft.type === "build" ? draft.target : null,
-        source: isTemplate ? "template" : "manual",
+        source: isTemplate ? "template" : (existing?.source ?? "manual"),
         scope: isTemplate ? draft.scope : "project",
-        // 编辑已有命令时保留来源归属，否则 docker 服务节点会被打散
+        // 编辑已有命令时保留来源归属：npm / docker / qt 的执行方式与节点折叠都读 source，
+        // 写成 manual 会让「运行」掉进 flutter run 分支
         stale: existing?.stale ?? false,
         group: existing?.group ?? null,
         role: existing?.role ?? null,

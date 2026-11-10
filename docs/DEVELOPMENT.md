@@ -74,7 +74,7 @@ npm run release:install   # 编译 + 静默安装 + 重新启动
 cd src-tauri && cargo test
 ```
 
-152 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`、模板分类推断、文件夹导入（任意目录 / 导入后为空 / 不套用模板）、项目重命名（清洗 / 校验 / 失败不破坏原名）、编辑器分派（VS Code / Zed / Sublime Text / Notepad++，含旧 `vscodePath` 设置迁移）、进程与端口快照（ToolHelp + GetExtendedTcpTable、真实监听端口归属、系统目录判定、自保护）、进程面板偏好（自动刷新默认值 / 隐藏规则往返）、rename CLI 输出解析（ANSI / box 清理、引号/分号、平台过滤）、自定义命令参数解析（引号 / 空格 / 空参数）、SharedPreferences 路径校验、网址文本不被当成磁盘路径、Qt / CMake 预设解析（inherits / 工具链定位 / Ninja 注入）、哪些会话才等整棵进程树（PowerShell 启动器 vs flutter/npm）、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化、adb 设备输出 / Gradle 包名 / find 输出解析、SQLite 只读查询与分页。
+153 个测试：JSONC 解析、真实 monorepo 导入、Flutter 探测、状态往返、损坏恢复、UTF-8 跨块解码、DSR 过滤、命令拼装、真实 daemon 查询设备与模拟器、工具链自动检测、模板导入与去重、自定义命令与环境变量、会话日志预算与损坏备份、doctor 输出解析（含 Windows 符号替换）、Android AVD 目录解析、APK 签名块解析（MD5 与 apksigner 交叉验证）、npm 包管理器探测与脚本分类、compose 解析与服务命令生成、可执行文件解析（`docker` → `docker.exe`）、外部程序不被当成 `flutter run`（npm / Docker / Qt）、Qt 运行命令的 source 归属恢复、模板分类推断、文件夹导入（任意目录 / 导入后为空 / 不套用模板）、项目重命名（清洗 / 校验 / 失败不破坏原名）、编辑器分派（VS Code / Zed / Sublime Text / Notepad++，含旧 `vscodePath` 设置迁移）、进程与端口快照（ToolHelp + GetExtendedTcpTable、真实监听端口归属、系统目录判定、自保护）、进程面板偏好（自动刷新默认值 / 隐藏规则往返）、rename CLI 输出解析（ANSI / box 清理、引号/分号、平台过滤）、自定义命令参数解析（引号 / 空格 / 空参数）、SharedPreferences 路径校验、网址文本不被当成磁盘路径、Qt / CMake 预设解析（inherits / 工具链定位 / Ninja 注入）、哪些会话才等整棵进程树（PowerShell 启动器 vs flutter/npm）、原子落盘（覆盖写不留临时文件 / 并发写不产生半个 JSON）、窗口关闭行为默认值与序列化、adb 设备输出 / Gradle 包名 / find 输出解析、SQLite 只读查询与分页。
 
 诊断工具：
 ```bash
