@@ -138,7 +138,7 @@ struct ShortcutInfoRaw {
 /// 参数拆分：空格分隔，双引号内的空格保留，引号本身去掉。
 /// 这样快捷方式里的 `-server="host:port"` 会变成目标程序期望的 `-server=host:port`，
 /// 而不是把引号原样传给 `npc.exe`。
-fn parse_args(raw: &str) -> Result<Vec<String>, String> {
+pub(crate) fn parse_args(raw: &str) -> Result<Vec<String>, String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Ok(Vec::new());

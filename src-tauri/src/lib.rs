@@ -7,6 +7,7 @@ mod editor;
 mod project_files;
 mod tauri_cli;
 mod cache;
+mod cron_spec;
 mod custom_cmd;
 mod daemon;
 mod docker;
@@ -26,6 +27,7 @@ mod ops;
 mod pty;
 mod qt;
 mod rename_tool;
+mod schedule;
 mod store;
 mod sysmon;
 mod terminal;
@@ -2195,6 +2197,10 @@ fn quit_app(app: &AppHandle) {
             map.clear(); // JobGuard 掉光 → KILL_ON_JOB_CLOSE
         }
     }
+    // 循环任务：先结束正在跑的后台进程，再退出（同样靠 Job 整棵树回收）
+    if let Some(scheduler) = app.try_state::<schedule::Scheduler>() {
+        scheduler.shutdown();
+    }
     if let Some(daemons) = app.try_state::<daemon::Daemons>() {
         daemons.invalidate_all();
     }
@@ -2268,6 +2274,11 @@ pub fn run() {
             if let Err(e) = install_tray(app.handle()) {
                 eprintln!("[tray] 创建系统托盘失败，关闭按钮按「退出程序」处理：{e}");
             }
+
+            // 循环任务：常驻调度线程。必须在托盘之后启动：
+            // 关闭按钮选「最小化到托盘」时进程继续活着，调度也会继续。
+            let scheduler = schedule::Scheduler::start(app.handle());
+            app.manage(scheduler);
             Ok(())
         })
         // 关闭按钮的行为是设置项：每次关窗都从磁盘读最新值，
@@ -2380,7 +2391,19 @@ pub fn run() {
             custom_cmd::resolve_shortcut,
             custom_cmd::upsert_custom_command,
             custom_cmd::remove_custom_command,
-            custom_cmd::start_custom_command
+            custom_cmd::start_custom_command,
+            schedule::list_scheduled_tasks,
+            schedule::preview_cron,
+            schedule::upsert_scheduled_task,
+            schedule::remove_scheduled_task,
+            schedule::set_scheduled_task_enabled,
+            schedule::run_scheduled_task_now,
+            schedule::stop_scheduled_task,
+            schedule::list_scheduled_runs,
+            schedule::read_scheduled_log,
+            schedule::scheduled_log_path,
+            schedule::read_task_log,
+            schedule::scheduled_task_log_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

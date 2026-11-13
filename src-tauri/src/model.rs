@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 /// 内置命令模板：新项目会自动套用，也可在设置里增删改
 /// 内置命令模板。
@@ -316,6 +316,77 @@ pub struct CustomCommand {
     pub cwd: Option<String>,
 }
 
+/// 循环任务要执行的「自定义命令」：程序 + 参数 + 工作目录。
+///
+/// 刻意不复用 `CustomCommand`：后者是工具栏的全局启动项（可存 .lnk、没有 .bat），
+/// 而循环任务需要能跑 .bat / .cmd / .ps1，并且不应因为工具栏条目被删就失效。
+/// 编辑器里可以从工具栏自定义命令「带入」字段，但保存的是快照。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScheduledCommand {
+    /// 可执行文件 / 脚本路径，或 PATH 里的裸命令名
+    pub program: String,
+    /// 命令行参数原文：空格分隔，双引号内的空格保留（与工具栏自定义命令同规则）
+    pub args: String,
+    /// 工作目录；为空时用程序所在目录
+    pub cwd: Option<String>,
+}
+
+fn default_notify() -> String {
+    "onFailure".to_string()
+}
+
+fn default_overlap() -> String {
+    "skip".to_string()
+}
+
+fn default_catch_up() -> String {
+    "skip".to_string()
+}
+
+fn default_cron() -> String {
+    "0 3 * * *".to_string()
+}
+
+/// 一条循环任务（crontab 的一行 + 目标命令）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub name: String,
+    pub enabled: bool,
+    /// 5 段 cron：分 时 日 月 周（本地时间）
+    pub cron: String,
+    pub command: ScheduledCommand,
+    /// always | onFailure | never
+    pub notify: String,
+    /// skip | queue | kill —— 上次还没跑完时怎么办
+    pub overlap: String,
+    /// skip | once —— 应用关闭/休眠期间错过的槽位怎么办
+    pub catch_up: String,
+    /// 超时秒数；0 = 不限
+    pub timeout_secs: u64,
+    pub created_at: u64,
+}
+
+impl Default for ScheduledTask {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            // 新任务默认启用；从旧 state.json 反序列化时不会走到这里
+            enabled: true,
+            cron: default_cron(),
+            command: ScheduledCommand::default(),
+            notify: default_notify(),
+            overlap: default_overlap(),
+            catch_up: default_catch_up(),
+            timeout_secs: 0,
+            created_at: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
     #[serde(rename = "schemaVersion")]
@@ -330,6 +401,9 @@ pub struct State {
     /// 工具栏自定义命令（全局）
     #[serde(rename = "customCommands", default)]
     pub custom_commands: Vec<CustomCommand>,
+    /// 循环任务（工具 → 循环任务）
+    #[serde(rename = "scheduledTasks", default)]
+    pub scheduled_tasks: Vec<ScheduledTask>,
     /// 纯界面状态（与业务无关，丢了不影响功能）
     #[serde(default)]
     pub ui: UiState,
@@ -376,6 +450,7 @@ impl Default for State {
             projects: Vec::new(),
             command_templates: default_templates(),
             custom_commands: Vec::new(),
+            scheduled_tasks: Vec::new(),
             ui: UiState::default(),
         }
     }

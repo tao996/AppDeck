@@ -141,6 +141,14 @@ impl JobGuard {
         }
     }
 
+    /// 结束整棵树。给循环任务的「停止 / 超时」用：
+    /// Job 句柄可能还被退出线程持有一份副本，只靠 Drop 不能立刻生效。
+    pub(crate) fn terminate(&self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::JobObjects::TerminateJobObject(self.0, 1);
+        }
+    }
+
     /// 复制一份 Job 句柄，给退出线程等「整棵进程树」结束用。
     ///
     /// 场景：`run.ps1` 这类启动器本身很快退出，但拉起的 GUI 程序还在跑；
@@ -236,6 +244,8 @@ impl JobGuard {
     pub(crate) fn assign(_pid: u32) -> Option<Self> {
         None
     }
+
+    pub(crate) fn terminate(&self) {}
 }
 
 /* ---------------- DSR 过滤 ---------------- */

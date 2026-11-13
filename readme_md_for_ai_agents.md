@@ -450,7 +450,7 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
 
 ```jsonc
 {
-  "schemaVersion": 3,
+  "schemaVersion": 7,
   "settings": {
     "flutterTool": { "mode": "auto", "customPath": null },   // auto | custom | fvm
     "window": { "closeBehavior": "quit" },                   // quit | tray（关闭按钮：退出 / 最小化到托盘）
@@ -532,6 +532,36 @@ cmd.exe /d /c "<flutter.bat 绝对路径>" <args...>
 | — | `env` / `flutterMode` / `toolArgs` / `deviceId` / `emulatorId` / `noDebug` | launch.json 真实字段 |
 | — | `schemaVersion` | 支持后续迁移 |
 
+### 11.1 循环任务（schemaVersion 7）
+
+`state.json` 增加 `scheduledTasks`；运行态**不进** `state.json`。
+
+```jsonc
+"scheduledTasks": [
+  {
+    "id": "task-8f3a1c2d",
+    "name": "每晚打安卓包",
+    "enabled": true,
+    "cron": "0 3 * * *",                 // 5 段：分 时 日 月 周（本地时间）
+    "command": {                         // 任务自己的「自定义命令」快照
+      "program": "D:\\apps\\flutter\\bin\\flutter.bat",
+      "args": "build apk --release",
+      "cwd": "D:\\projects\\my_app"
+    },
+    "notify": "onFailure",               // always | onFailure | never
+    "overlap": "skip",                   // skip | queue | kill
+    "catchUp": "skip",                   // skip | once
+    "timeoutSecs": 0,                    // 0 = 不限
+    "createdAt": 1763000000000
+  }
+]
+```
+
+- `command` 是**任务内自定义命令**，不是项目命令引用；编辑器可从工具栏「自定义命令」带入字段（保存为快照）。
+- 运行态（`nextAt` / `lastSlot` / 运行历史）写在 `%APPDATA%\cn.gu19.appdev\task-runtime.json`，
+  调度线程**不得写 `state.json`**（避免与前端读改写互相覆盖）。
+- 循环任务只接受可直接结束的程序 / 脚本；**禁止把 `flutter run` 这类常驻命令挂上去**。
+
 ---
 
 ## 12. `launch.json` 导入
@@ -595,6 +625,56 @@ per-project semaphore
 - 序列化结果含 ANSI 与控制序列，**按原始字节保存**，不要试图转纯文本。
 - 恢复的 tab 在**用户点击「重跑」前**不得写入任何 PTY，以免误触发构建。
 - 状态文件损坏时：备份为 `sessions.corrupt.json` 后重建，不静默丢弃。
+
+---
+
+## 13.5 循环任务（模拟 crontab）
+
+### 13.5.1 生命周期
+
+- **只在 AppDeck 运行期间触发**；应用退出后全部停止（这是与系统 crontab / Windows 计划任务的根本区别）。
+- 设置 `window.closeBehavior = "tray"` 时窗口隐藏、进程继续，调度继续。
+- 应用退出 / 强杀时，正在跑的后台进程靠 Job Object（§5.3）整棵树回收；下次启动把未收尾的运行标为 `interrupted`。
+
+### 13.5.2 执行模型
+
+- **后台静默**，不创建终端 tab：`stdin = null`，`stdout` / `stderr` 合并写入日志文件。
+- 程序以 argv 数组启动；`.bat` / `.cmd` 走 `cmd /d /c`，`.ps1` 走 PowerShell（与 §6.4 一致）。
+- **不要复用 `ops::build_plan_for` 的 `kind = run` 分支**：它对 run 用 `terminal::wrap_run` 包了
+  `pwsh -NoExit` / `cmd /k`，进程永远不会自己退出。循环任务的命令是**内联自定义命令**
+  （程序 + 参数 + 工作目录），只接受可直接结束的程序 / 脚本；`flutter run` 这类常驻命令
+  必须在编辑器和后端都被拒绝。
+- **每个任务一份固定日志**：`%APPDATA%\cn.gu19.appdev\task-logs\<taskId>\task.log`。
+  每次运行在文件末尾追加运行分隔头；面板持续 tail 同一文件，跨多次运行连续可看。
+  到 10 MB 轮转为 `task.log.1`（下次运行重建 `task.log`）；所有任务日志总量超过 200 MB 时
+  优先删旧的 `task.log.1`，**绝不删正在写的 `task.log`**。
+- **UI 是 tabstrip 里的一个独立 tab**（与终端 tab 平级）：左侧任务列表，右侧所选任务的实时日志
+  （1 秒刷新、默认跟随最新、支持关键字搜索与高亮）；关闭 tab 只关视图，不停止任务。
+  入口是工具栏一级按钮「🔁 循环任务」，**不在「工具」下拉里**。任务列表每行右侧的复选框
+  就是总开关：勾上 = 参与调度（左侧圆点绿色），取消 = 停用并结束当前运行（圆点灰色）；
+  没有单独的「运行 / 停止」按钮。
+
+### 13.5.3 cron 语义
+
+- 5 段：`分 时 日 月 周`，本地时间，最小粒度 1 分钟；支持 `*`、`a`、`a-b`、`*/n`、`a-b/n`、逗号列表、
+  月份/星期三字母名，以及 `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly`。
+- 日与星期都受限时取**或**；任一字段以 `*` 开头时只看另一个（Vixie cron 语义）。
+- 星期 `0` 和 `7` 都是周日。
+- `next_after` 严格晚于当前时间；同一槽位只触发一次。`preview_cron` 返回未来 5 次，编辑器只调它，
+  **不允许前端另写一套解析**。
+
+### 13.5.4 策略
+
+| 字段 | 取值 | 默认 | 行为 |
+|---|---|---|---|
+| `overlap` | skip / queue / kill | skip | 上次未结束：跳过 / 排队一次 / 终止上次 |
+| `catchUp` | skip / once | skip | 应用关闭或休眠错过的槽位：跳过 / 补跑一次 |
+| `timeoutSecs` | 0 或秒 | 0 | 超时终止整棵进程树，状态记 `timeout` |
+| `notify` | always / onFailure / never | onFailure | 运行结束是否发系统通知 |
+
+- 第一次 tick（刚启动）或 tick 间隔 > 2 分钟（休眠/时钟跳变）按「错过」处理，且**一次最多补一次**。
+- 运行态单独落盘（`task-runtime.json`）：调度线程只写它，**不写 `state.json`**；
+  `state.json` 的增删改由前端命令负责。两者物理隔离，避免读改写竞态。
 
 ---
 
@@ -689,7 +769,7 @@ per-project semaphore
 | A15 | 终端中文与英文混排对齐（CJK 宽字符） | 目视无错位 |
 | A16 | v1 中不存在搜索框、分屏、同步输入入口 | 与 §3.1 一致 |
 | A17 | 导入 monorepo 工作区（根目录**无** `pubspec.yaml`） | 9 条命令全部导入、`cwd` 解析正确、零告警 |
-| A18 | 状态持久化往返 | 重启后项目与命令完整保留，`state.json` 的 `schemaVersion = 2` |
+| A18 | 状态持久化往返 | 重启后项目与命令完整保留，`state.json` 的 `schemaVersion = 7` |
 | A19 | 重复添加同一目录 | 被拒绝，提示"该项目已在列表中" |
 | A20 | 状态文件损坏 | 备份为 `state.corrupt.json` 并重置，不静默丢失 |
 | A21 | 点 `▶` 后终端出现真实 `flutter run` 输出 | 有 ANSI 颜色、可滚动、状态灯转 🟢、DevTools 可点 |
@@ -722,6 +802,15 @@ per-project semaphore
 | A50 | 鸿蒙环境变量 | 仅注入有 `ohos/` 的工程；优先级 全局 < `.fvmrc` < 项目 < 命令；改设置后 daemon 必须失效重建 |
 | A45 | 导入判定 | 目录有 `pubspec.yaml` → 普通项目（命令为自定义命令）；否则 → 命令集（无平台/全局命令） |
 | A42 | MD5 口径 | MD5 = 证书 DER 的 MD5，大写冒号分隔，与 apksigner 输出一致 |
+| A51 | 循环任务入口 | 工具栏一级按钮「🔁 循环任务」打开 tabstrip 中的独立面板；左侧任务列表、右侧实时日志（支持搜索/高亮）；新建/编辑/删除可用；行内复选框 = 启停（取消勾选结束当前运行），圆点绿/灰对应勾选状态 |
+| A52 | 后台执行与日志 | 每条任务在后台静默执行，不创建终端 tab；日志持续追加到该任务的 `task.log`；失败可按策略通知 |
+| A53 | 不重复触发 | 同一分钟只触发一次；在该分钟内重启应用不重复触发；`nextAt` 严格晚于当前时间 |
+| A54 | 策略 | `overlap=skip/queue/kill`、`catchUp=skip/once`、`timeoutSecs` 行为与 §13.5.4 一致；停用任务会终止当前运行 |
+| A55 | 生命周期 | 退出应用后不再触发；托盘模式下继续；退出时正在跑的任务被回收，下次启动标 `interrupted` |
+| A56 | 运行态隔离 | 调度线程只写 `task-runtime.json`；损坏时备份 `task-runtime.corrupt.json` 后重建 |
+| A57 | 日志预算 | 每任务一个 `task.log`，10 MB 轮转为 `task.log.1`；总量 > 200 MB 时删旧轮转文件，不动活跃文件 |
+| A58 | 目标校验 | `.lnk` 与常驻 `flutter run` 被拒绝并给出原因；命令以 argv 数组启动，无 shell 拼接 |
+| A59 | cron 边界 | `0 0 29 2 *` 能算到闰日；`0 0 31 4 *` 报「永不触发」；`0/7` 星期、列表/范围/步长/别名正确 |
 
 ---
 

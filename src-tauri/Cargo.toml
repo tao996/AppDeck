@@ -34,6 +34,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 循环任务：按本地时间计算 cron 的下一次触发（chrono 已在 tauri 的依赖树里）
+chrono = "0.4"
 portable-pty = "0.9"
 serde_yaml = "0.9"
 rusqlite = { version = "0.41.1", features = ["bundled"] }

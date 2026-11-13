@@ -135,8 +135,10 @@ cd src-tauri && cargo run --bin pty_probe   # ConPTY 原始分块
 │   ├── src/android_db.rs       Android SQLite 只读快照（adb run-as / WAL / 只读 SQL）
 │   ├── src/apksig.rs           APK 签名块解析（备案公钥 / MD5）
 │   ├── src/doctor.rs           flutter doctor 体检
+│   ├── src/cron_spec.rs        5 段 cron 解析与下一次触发（纯函数 + 单测）
+│   ├── src/schedule.rs         循环任务调度线程 / 后台执行 / 日志 / 运行态
 │   ├── src/bin/pty_probe.rs    ConPTY 诊断探针
-│   ├── src/model.rs            数据模型（schemaVersion 6）
+│   ├── src/model.rs            数据模型（schemaVersion 7）
 │   ├── tauri.conf.json         窗口与应用配置
 │   └── Cargo.toml
 ├── docs/

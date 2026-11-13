@@ -592,7 +592,7 @@ fn is_batch(path: &str) -> bool {
 
 /// `.bat` / `.cmd` 不能直接 CreateProcess，用 `cmd.exe /d /c` 包一层。
 /// **不能加 `/s`**：实测会剥掉引号，含空格路径会被截断。
-fn wrap_batch(program: String, args: Vec<String>) -> (String, Vec<String>) {
+pub(crate) fn wrap_batch(program: String, args: Vec<String>) -> (String, Vec<String>) {
     if !is_batch(&program) {
         return (program, args);
     }
