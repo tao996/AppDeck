@@ -3462,4 +3462,14 @@ select.set-input {
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-all;
+  /* body 默认 user-select:none，日志必须允许选中复制 */
+  -webkit-user-select: text;
+  user-select: text;
+  cursor: text;
+}
+
+.sched-pane-log *,
+.sched-pane-log mark {
+  -webkit-user-select: text;
+  user-select: text;
 }

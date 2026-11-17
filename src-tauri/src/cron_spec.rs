@@ -1,8 +1,11 @@
-//! Linux crontab 风格的 **5 段** cron 解析与「下一次触发」计算。
+//! cron 解析与「下一次触发」计算。
 //!
-//! 语法：`分 时 日 月 周`（本地时间），最小粒度 1 分钟。
+//! 支持两种写法：
+//! - **5 段**：`分 时 日 月 周`（Linux crontab，秒固定为 0，最小粒度 1 分钟）；
+//! - **6 段**：`秒 分 时 日 月 周`（Quartz 风格，开发环境可用秒级）。
+//!
 //! 支持 `*`、`a`、`a-b`、`*/n`、`a-b/n`、逗号列表，以及月份/星期的三字母英文名；
-//! 另外支持 `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly` 别名。
+//! 另外支持 `@hourly` / `@daily` / `@weekly` / `@monthly` / `@yearly` 别名（等价 5 段）。
 //!
 //! 两条容易写错的语义（这里按 Vixie cron 实现）：
 //! 1. **日与星期**：两者都受限时取「或」；任一以 `*` 开头时只看另一个。
@@ -40,6 +43,7 @@ const DOW_NAMES: [(&str, u32); 7] = [
 /// 解析后的 cron。字段用 bitset 存，匹配时只看对应位。
 #[derive(Debug, Clone)]
 pub struct CronSpec {
+    seconds: u64,
     minutes: u64,
     hours: u64,
     days: u64,
@@ -58,7 +62,7 @@ impl CronSpec {
             return Err("cron 表达式不能为空".to_string());
         }
 
-        // 别名先展开，后面的解析只认 5 段
+        // 别名先展开，后面的解析只认 5 / 6 段
         if raw.starts_with('@') {
             let expanded = expand_alias(raw).ok_or_else(|| {
                 format!(
@@ -69,18 +73,25 @@ impl CronSpec {
         }
 
         let parts: Vec<&str> = raw.split_whitespace().collect();
-        if parts.len() != 5 {
-            return Err(format!(
-                "cron 需要 5 段（分 时 日 月 周），当前是 {} 段：{raw}",
-                parts.len()
-            ));
-        }
+        let (seconds_part, minutes_part, hours_part, days_part, months_part, weekdays_part) =
+            match parts.len() {
+                // 5 段：分 时 日 月 周，秒固定 0
+                5 => ("0", parts[0], parts[1], parts[2], parts[3], parts[4]),
+                // 6 段：秒 分 时 日 月 周
+                6 => (parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]),
+                n => {
+                    return Err(format!(
+                        "cron 需要 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周），当前是 {n} 段：{raw}"
+                    ));
+                }
+            };
 
-        let minutes = parse_field(parts[0], 0, 59, None, "分钟")?;
-        let hours = parse_field(parts[1], 0, 23, None, "小时")?;
-        let days = parse_field(parts[2], 1, 31, None, "日")?;
-        let months = parse_field(parts[3], 1, 12, Some(&MONTH_NAMES), "月份")?;
-        let mut weekdays = parse_field(parts[4], 0, 7, Some(&DOW_NAMES), "星期")?;
+        let seconds = parse_field(seconds_part, 0, 59, None, "秒")?;
+        let minutes = parse_field(minutes_part, 0, 59, None, "分钟")?;
+        let hours = parse_field(hours_part, 0, 23, None, "小时")?;
+        let days = parse_field(days_part, 1, 31, None, "日")?;
+        let months = parse_field(months_part, 1, 12, Some(&MONTH_NAMES), "月份")?;
+        let mut weekdays = parse_field(weekdays_part, 0, 7, Some(&DOW_NAMES), "星期")?;
 
         // 7 也是周日：并到 0 上，避免匹配时两套判断
         if weekdays & (1u64 << 7) != 0 {
@@ -88,13 +99,14 @@ impl CronSpec {
         }
 
         Ok(Self {
+            seconds,
             minutes,
             hours,
             days,
             months,
             weekdays,
-            dom_star: parts[2].starts_with('*'),
-            dow_star: parts[4].starts_with('*'),
+            dom_star: days_part.starts_with('*'),
+            dow_star: weekdays_part.starts_with('*'),
         })
     }
 
@@ -115,15 +127,20 @@ impl CronSpec {
                         if self.minutes & (1u64 << minute) == 0 {
                             continue;
                         }
-                        let Some(naive) = date.and_hms_opt(hour, minute, 0) else {
-                            continue;
-                        };
-                        // 同一分钟不重复触发；now 的秒必须被排除
-                        if naive <= start {
-                            continue;
-                        }
-                        if let Some(dt) = resolve_local(naive, now) {
-                            return Some(dt);
+                        for second in 0..60u32 {
+                            if self.seconds & (1u64 << second) == 0 {
+                                continue;
+                            }
+                            let Some(naive) = date.and_hms_opt(hour, minute, second) else {
+                                continue;
+                            };
+                            // 严格晚于 now：同一秒不重复触发
+                            if naive <= start {
+                                continue;
+                            }
+                            if let Some(dt) = resolve_local(naive, now) {
+                                return Some(dt);
+                            }
                         }
                     }
                 }
@@ -299,12 +316,27 @@ mod tests {
             .expect("构造本地时间失败")
     }
 
+    fn at_sec(y: i32, mo: u32, d: u32, h: u32, mi: u32, s: u32) -> DateTime<Local> {
+        Local
+            .with_ymd_and_hms(y, mo, d, h, mi, s)
+            .earliest()
+            .expect("构造本地时间失败")
+    }
+
     fn stamp(dt: DateTime<Local>) -> String {
         dt.format("%Y-%m-%d %H:%M").to_string()
     }
 
+    fn stamp_sec(dt: DateTime<Local>) -> String {
+        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    }
+
     fn next(expr: &str, from: DateTime<Local>) -> String {
         stamp(CronSpec::parse(expr).unwrap().next_after(from).unwrap())
+    }
+
+    fn next_sec(expr: &str, from: DateTime<Local>) -> String {
+        stamp_sec(CronSpec::parse(expr).unwrap().next_after(from).unwrap())
     }
 
     #[test]
@@ -439,7 +471,7 @@ mod tests {
         for expr in [
             "",
             "* * * *",
-            "* * * * * *",
+            "* * * * * * *",
             "60 * * * *",
             "* 24 * * *",
             "* * 32 * *",
@@ -449,6 +481,8 @@ mod tests {
             "0 0 32 * *",
             "@reboot",
             "MON * * * *",
+            "60 * * * * *",
+            "*/0 * * * * *",
         ] {
             assert!(CronSpec::parse(expr).is_err(), "应拒绝非法表达式：{expr:?}");
         }
@@ -461,5 +495,48 @@ mod tests {
             .earliest()
             .unwrap();
         assert_eq!(next("* * * * *", now), "2026-11-12 21:31");
+    }
+
+    #[test]
+    fn six_field_every_ten_seconds() {
+        assert_eq!(
+            next_sec("*/10 * * * * *", at_sec(2026, 11, 12, 21, 30, 41)),
+            "2026-11-12 21:30:50"
+        );
+        // 正好命中整十秒时，下一次必须是下一个整十秒，不能原地重复
+        assert_eq!(
+            next_sec("*/10 * * * * *", at_sec(2026, 11, 12, 21, 30, 50)),
+            "2026-11-12 21:31:00"
+        );
+    }
+
+    #[test]
+    fn six_field_daily_with_seconds() {
+        assert_eq!(
+            next_sec("15 0 3 * * *", at_sec(2026, 11, 12, 21, 30, 0)),
+            "2026-11-13 03:00:15"
+        );
+    }
+
+    #[test]
+    fn six_field_every_second_is_strict() {
+        let now = at_sec(2026, 11, 12, 21, 30, 45) + chrono::Duration::milliseconds(500);
+        assert_eq!(next_sec("* * * * * *", now), "2026-11-12 21:30:46");
+    }
+
+    #[test]
+    fn five_field_still_fires_at_second_zero() {
+        assert_eq!(
+            next_sec("* * * * *", at_sec(2026, 11, 12, 21, 30, 45)),
+            "2026-11-12 21:31:00"
+        );
+    }
+
+    #[test]
+    fn six_field_seconds_list() {
+        assert_eq!(
+            next_sec("0,30 * * * * *", at_sec(2026, 11, 12, 21, 30, 15)),
+            "2026-11-12 21:30:30"
+        );
     }
 }

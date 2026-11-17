@@ -180,7 +180,15 @@ pub fn resolve_executable(program: &str) -> String {
 
     // 裸名：自己查 PATH（.exe 优先于 .cmd/.bat）
     if let Some(paths) = std::env::var_os("PATH") {
+        // 带扩展名时先按原样找（cmd.exe / python.exe），否则会拼成 cmd.exe.exe
+        let has_ext = p.extension().is_some();
         for dir in std::env::split_paths(&paths) {
+            if has_ext {
+                let direct = dir.join(raw);
+                if direct.is_file() {
+                    return direct.display().to_string();
+                }
+            }
             for ext in ["exe", "cmd", "bat"] {
                 let cand = dir.join(format!("{raw}.{ext}"));
                 if cand.is_file() {
@@ -261,9 +269,69 @@ pub fn command_line(shell: &Path, program: &str, args: &[String]) -> String {
     ps_command_line(program, args)
 }
 
+/// 把环境变量拼成"在交互式 shell 里先设好再跑命令"的前缀。
+///
+/// 共用项目终端是复用的长驻 shell，直接 spawn 时注入 env 对已存在的 shell 无效，
+/// 所以命令自带的 env（`set "K=v"` / `$env:K='v'`）要拼在命令行前面。
+/// 非法的 KEY（含空格/符号）跳过，避免拼出语法错误。
+pub fn env_prefix(shell: &Path, env: &[(String, String)]) -> String {
+    if env.is_empty() {
+        return String::new();
+    }
+
+    let valid_key = |k: &str| {
+        !k.is_empty()
+            && k.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    };
+
+    if shell_name(shell) == "cmd" {
+        let mut out = String::new();
+        for (k, v) in env {
+            if !valid_key(k) {
+                continue;
+            }
+            out.push_str(&format!("set \"{}={}\" & ", k, v.replace('"', "\"\"")));
+        }
+        out
+    } else {
+        let mut out = String::new();
+        for (k, v) in env {
+            if !valid_key(k) {
+                continue;
+            }
+            out.push_str(&format!("$env:{}={}; ", k, ps_quote(v)));
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_prefix_uses_shell_syntax() {
+        use super::env_prefix;
+
+        let env = vec![("PYTHONUTF8".to_string(), "1".to_string())];
+        let ps = env_prefix(std::path::Path::new("pwsh.exe"), &env);
+        assert_eq!(ps, "$env:PYTHONUTF8='1'; ");
+
+        let cmd = env_prefix(std::path::Path::new("cmd.exe"), &env);
+        assert_eq!(cmd, "set \"PYTHONUTF8=1\" & ");
+
+        // 非法 KEY 跳过，值为空也要能拼
+        let weird = vec![
+            ("BAD KEY".to_string(), "x".to_string()),
+            ("OK".to_string(), String::new()),
+        ];
+        assert_eq!(
+            env_prefix(std::path::Path::new("pwsh.exe"), &weird),
+            "$env:OK=''; "
+        );
+        assert_eq!(env_prefix(std::path::Path::new("cmd.exe"), &[]), "");
+    }
 
     #[test]
     fn detects_at_least_one_terminal() {
@@ -291,6 +359,16 @@ mod tests {
     }
 
 #[test]
+    fn bare_program_with_extension_resolves_in_path() {
+        // `cmd.exe` 已经是带扩展名的裸名：不能拼成 cmd.exe.exe
+        let r = resolve_executable("cmd.exe");
+        assert!(
+            r.to_ascii_lowercase().ends_with("\\cmd.exe"),
+            "应解析到完整路径，实际: {r}"
+        );
+    }
+
+    #[test]
     fn bare_program_resolves_to_real_executable() {
         // 这台机器的 Docker bin 里同时有 "docker"（脚本）和 "docker.exe"，
         // 解析必须挑 .exe，否则 CreateProcess 报 os error 193

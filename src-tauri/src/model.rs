@@ -314,6 +314,9 @@ pub struct CustomCommand {
     pub args: String,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// 启动时注入的环境变量（原样注入，不展开 %VAR%）
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// 循环任务要执行的「自定义命令」：程序 + 参数 + 工作目录。
@@ -355,7 +358,7 @@ pub struct ScheduledTask {
     pub id: String,
     pub name: String,
     pub enabled: bool,
-    /// 5 段 cron：分 时 日 月 周（本地时间）
+    /// 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）cron，本地时间
     pub cron: String,
     pub command: ScheduledCommand,
     /// always | onFailure | never

@@ -5,6 +5,7 @@ mod atomic;
 mod locate;
 mod editor;
 mod project_files;
+mod script;
 mod tauri_cli;
 mod cache;
 mod cron_spec;
@@ -2002,6 +2003,33 @@ fn detect_git_desktop_path() -> Option<String> {
     gitdesk::detect().map(|p| p.display().to_string())
 }
 
+/// 「从脚本导入命令」：挑一个 .ps1 / .sh / .py …，返回填表单要用的
+/// program / args / cwd（工作目录固定为脚本所在目录）。
+#[tauri::command(async)]
+fn preview_script_command(
+    app: AppHandle,
+    path: String,
+    project_id: Option<String>,
+    mode: Option<String>,
+) -> Result<script::ScriptCommand, String> {
+    let state = store::load(&app).ok();
+
+    let root = project_id.as_deref().and_then(|id| {
+        state
+            .as_ref()?
+            .projects
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| PathBuf::from(&p.path))
+    });
+
+    let ps = state
+        .as_ref()
+        .map(|s| crate::terminal::powershell_for(s.settings.terminal.path.as_deref()));
+
+    script::preview(&path, root.as_deref(), mode.as_deref(), ps.as_deref())
+}
+
 /// 用系统默认程序打开文件（图片 / 日志 / 其他非源码）。
 /// 不走 opener 插件的 open_path：那个要 scope 授权，运行时会被拒。
 #[tauri::command(async)]
@@ -2383,6 +2411,7 @@ pub fn run() {
             android_prefs_read,
             open_in_git_desktop,
             detect_git_desktop_path,
+            preview_script_command,
             rename_tool::rename_status,
             rename_tool::rename_refresh,
             rename_tool::rename_activate,
@@ -2403,7 +2432,8 @@ pub fn run() {
             schedule::read_scheduled_log,
             schedule::scheduled_log_path,
             schedule::read_task_log,
-            schedule::scheduled_task_log_path
+            schedule::scheduled_task_log_path,
+            schedule::clear_task_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

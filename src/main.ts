@@ -288,6 +288,8 @@ interface CustomCommand {
   /** 原始命令行参数（快捷方式参数也在这里） */
   args: string;
   cwd: string | null;
+  /** 启动时注入的环境变量（原样注入，不展开 %VAR%） */
+  env?: Record<string, string>;
 }
 
 /** 循环任务的目标命令：程序 + 参数 + 工作目录 */
@@ -303,7 +305,7 @@ interface ScheduledTask {
   id: string;
   name: string;
   enabled: boolean;
-  /** 5 段 cron：分 时 日 月 周 */
+  /** 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）cron */
   cron: string;
   command: ScheduledCommand;
   /** always | onFailure | never */
@@ -496,6 +498,22 @@ interface BuildTarget {
   name: string;
   description: string;
   supportsFlavor: boolean;
+}
+
+/** 后端 preview_script_command 的返回：导入脚本时填表单用 */
+interface ScriptPreview {
+  name: string;
+  kind: string;
+  program: string;
+  args: string[];
+  /** 脚本所在目录（项目内是相对路径，项目外是绝对路径） */
+  cwd: string | null;
+  /** 用了哪个解释器 / 虚拟环境 */
+  note: string;
+  /** 识别到的 venv 根目录（仅 .py） */
+  venv: string | null;
+  /** 可选的 venv 列表（给下拉用） */
+  venvs: Array<{ label: string; dir: string; python: string }>;
 }
 
 let state: State = {
@@ -1599,8 +1617,11 @@ function renderTree(): void {
       const addCmd = document.createElement("div");
       addCmd.className = "cmd add";
       addCmd.innerHTML = `<span class="cico">＋</span><span class="cname">添加命令</span>`;
-      addCmd.title = "添加运行命令或发布构建命令";
-      addCmd.addEventListener("click", () => void openCommandDialog(p));
+      addCmd.title =
+        p.kind === "single"
+          ? "添加运行 / 构建命令"
+          : "添加自定义命令（程序 / 参数 / 工作目录 / 环境变量）";
+      addCmd.addEventListener("click", () => openAddCommand(p));
       list.appendChild(addCmd);
 
       const tplImport = document.createElement("div");
@@ -2930,13 +2951,33 @@ async function deleteCustomCommand(c: CustomCommand): Promise<void> {
   }
 }
 
-async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> {
+/**
+ * 「添加命令」入口分流：
+ * - Flutter 单应用（kind=single，有 pubspec）→ 命令面板（run / build / custom / shell）
+ * - 其它项目（文件夹 / 命令集 / npm / docker / Qt）→ 通用「自定义命令」面板，
+ *   保存成该项目的 `kind=custom` 命令（那个面板的 run/build 对它们没有意义）
+ */
+function openAddCommand(p: Proj): void {
+  if (p.kind === "single") void openCommandDialog(p);
+  else void openCustomCommandDialog(undefined, p);
+}
+
+/**
+ * 「自定义命令」面板：程序 / 快捷方式 + 参数 + 工作目录 + 环境变量。
+ *
+ * - 从工具栏「自定义命令」打开：保存成全局命令（`state.customCommands`），
+ *   运行时新开一个会话直接启动程序。
+ * - 从非 Flutter 项目的「添加命令」打开（传 `project`）：同样的表单，
+ *   保存成**该项目的命令**（`kind=custom`），输出进项目终端。
+ */
+async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj): Promise<void> {
   const draft = {
     name: existing?.name ?? "",
     program: existing?.program ?? "",
     target: existing?.target ?? "",
     args: existing?.args ?? "",
     cwd: existing?.cwd ?? "",
+    envPairs: Object.entries(existing?.env ?? {}) as Array<[string, string]>,
   };
 
   const overlay = document.createElement("div");
@@ -2977,14 +3018,25 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
           </div>
         </div>
         <div class="set-desc">
-          直接启动目标程序（.lnk 会先解析成 exe），不经过 ShellExecute，
-          因此不会弹出系统控制台，也不会在任务栏多一个窗口。
+          ${project
+            ? `保存为项目「${esc(project.name)}」的命令：在下面的工作目录里直接启动程序，输出进入项目终端。`
+            : "直接启动目标程序（.lnk 会先解析成 exe），不经过 ShellExecute，因此不会弹出系统控制台，也不会在任务栏多一个窗口。"}
         </div>
         <div class="set-desc" id="cc-hint"></div>
+        <div class="set-row" id="cc-venv-row" hidden>
+          <label>Python 虚拟环境</label>
+          <div class="set-cell">
+            <select class="set-input" id="cc-venv"></select>
+          </div>
+        </div>
+
+        <div class="set-title" style="margin-top:12px">环境变量</div>
+        <div class="env-list" id="cc-env"></div>
       </div>
       <div class="modal-foot">
         <span class="modal-hint">快捷方式参数里的引号会自动去掉再传给目标</span>
         <span class="flex1"></span>
+        <button class="btn" id="cc-import-script">从脚本导入…</button>
         <button class="btn" id="cc-cancel">取消</button>
         <button class="btn primary" id="cc-save">保存</button>
       </div>
@@ -2999,6 +3051,69 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
   const targetEl = overlay.querySelector("#cc-target") as HTMLDivElement;
   const hint = overlay.querySelector("#cc-hint") as HTMLDivElement;
   const saveBtn = overlay.querySelector("#cc-save") as HTMLButtonElement;
+  const venvRow = overlay.querySelector("#cc-venv-row") as HTMLDivElement;
+  const venvSel = overlay.querySelector("#cc-venv") as HTMLSelectElement;
+  const envBox = overlay.querySelector("#cc-env") as HTMLDivElement;
+
+  /** 导入 .py 时识别到的虚拟环境（全局命令没有项目上下文，用脚本目录向上找） */
+  let pyVenvs: ScriptPreview["venvs"] = [];
+
+  /** 环境变量行：KEY=value 列表，空 KEY 保存时忽略 */
+  const renderEnv = (): void => {
+    envBox.innerHTML = "";
+
+    draft.envPairs.forEach((pair, idx) => {
+      const row = document.createElement("div");
+      row.className = "env-row";
+
+      const kEl = document.createElement("input");
+      kEl.className = "set-input env-key";
+      kEl.value = pair[0];
+      kEl.placeholder = "KEY";
+      kEl.spellcheck = false;
+      kEl.addEventListener("input", () => {
+        draft.envPairs[idx][0] = kEl.value;
+      });
+
+      const vEl = document.createElement("input");
+      vEl.className = "set-input";
+      vEl.value = pair[1];
+      vEl.placeholder = "value（原样注入，不展开 %VAR%）";
+      vEl.spellcheck = false;
+      vEl.addEventListener("input", () => {
+        draft.envPairs[idx][1] = vEl.value;
+      });
+
+      const del = document.createElement("button");
+      del.className = "btn";
+      del.textContent = "×";
+      del.title = "删除该变量";
+      del.addEventListener("click", () => {
+        draft.envPairs.splice(idx, 1);
+        renderEnv();
+      });
+
+      row.append(kEl, vEl, del);
+      envBox.appendChild(row);
+    });
+
+    if (draft.envPairs.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "set-desc";
+      empty.textContent = "（暂无，可点下方添加；例如 PYTHONUTF8=1）";
+      envBox.appendChild(empty);
+    }
+
+    const add = document.createElement("button");
+    add.className = "btn";
+    add.textContent = "＋ 添加变量";
+    add.addEventListener("click", () => {
+      draft.envPairs.push(["", ""]);
+      renderEnv();
+    });
+    envBox.appendChild(add);
+  };
+  renderEnv();
 
   nameEl.value = draft.name;
   programEl.value = draft.program;
@@ -3121,6 +3236,83 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
     void resolve();
   });
 
+  const renderVenvs = (selected: string | null): void => {
+    venvSel.innerHTML = "";
+    const none = document.createElement("option");
+    none.value = "";
+    none.textContent = "不使用（PATH 里的 python）";
+    venvSel.appendChild(none);
+    for (const v of pyVenvs) {
+      const o = document.createElement("option");
+      o.value = v.dir;
+      o.textContent = `${v.label} — ${v.dir}`;
+      venvSel.appendChild(o);
+    }
+    venvSel.value = selected ?? "";
+    venvRow.hidden = pyVenvs.length === 0;
+  };
+
+  venvSel.addEventListener("change", () => {
+    const v = pyVenvs.find((x) => x.dir === venvSel.value);
+    if (v) {
+      programEl.value = v.python;
+      draft.program = v.python;
+      hint.textContent = `使用虚拟环境 ${v.dir} 里的 python.exe（等价于先 activate，再跑脚本）`;
+    } else {
+      programEl.value = "python";
+      draft.program = "python";
+      hint.textContent = "使用 PATH 里的 python（依赖要装在这个解释器里）";
+    }
+    renderTarget();
+  });
+
+  // 「从脚本导入…」：全局命令直接 CreateProcess，所以 .ps1 要显式套 PowerShell
+  (overlay.querySelector("#cc-import-script") as HTMLButtonElement).addEventListener("click", () => {
+    void (async () => {
+      try {
+        const scriptPath = await pickScriptFile();
+        if (!scriptPath) return;
+
+        const info = await invoke<ScriptPreview>("preview_script_command", {
+          path: scriptPath,
+          projectId: null,
+          mode: "global",
+        });
+
+        if (!nameEl.value.trim()) {
+          const taken = new Set((state.customCommands ?? []).map((c) => c.name));
+          let name = info.name;
+          for (let i = 2; taken.has(name) && i < 100; i++) name = `${info.name} ${i}`;
+          nameEl.value = name;
+          draft.name = name;
+        }
+
+        programEl.value = info.program;
+        draft.program = info.program;
+        draft.target = "";
+        argsEl.value = joinArgs(info.args);
+        draft.args = argsEl.value;
+        if (info.cwd) {
+          cwdEl.value = info.cwd;
+          draft.cwd = info.cwd;
+        }
+
+        pyVenvs = info.venvs;
+        renderVenvs(info.venv);
+
+        hint.textContent = info.note;
+        renderTarget();
+        toast(
+          info.venv
+            ? `已导入脚本「${info.name}」，使用虚拟环境 ${info.venv}`
+            : `已导入脚本「${info.name}」，工作目录已设为脚本所在目录`,
+        );
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
   saveBtn.addEventListener("click", () => {
     void (async () => {
       const name = nameEl.value.trim();
@@ -3134,17 +3326,58 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
         return;
       }
       const lower = program.toLowerCase();
-      if (lower.endsWith(".bat") || lower.endsWith(".cmd")) {
+      // 只有全局自定义命令受这个限制（项目命令由 shell 执行，.bat/.cmd 没问题）
+      if (!project && (lower.endsWith(".bat") || lower.endsWith(".cmd"))) {
         hint.textContent = "暂不支持直接运行 .bat/.cmd，请选择 .lnk 或 .exe";
         return;
       }
-      if (program.toLowerCase().endsWith(".lnk") && !draft.target) {
+      if (lower.endsWith(".lnk") && !draft.target) {
         if (!(await resolve())) return;
+      }
+
+      const env: Record<string, string> = {};
+      for (const [k, v] of draft.envPairs) {
+        const key = k.trim();
+        if (key !== "") env[key] = v;
       }
 
       saveBtn.disabled = true;
       saveBtn.textContent = "保存中…";
       try {
+        if (project) {
+          // 非 Flutter 项目：同一个面板，存成项目命令（kind=custom），输出进项目终端。
+          // .lnk 项目命令不支持直接启动，解析成真实 exe/参数/目录再存。
+          const isLnk = program.toLowerCase().endsWith(".lnk");
+          const prog = isLnk ? draft.target.trim() : program;
+          const command: Cmd = {
+            id: "",
+            name,
+            kind: "custom",
+            program: prog,
+            cwd: cwdEl.value.trim() || null,
+            flutterMode: null,
+            args: splitArgs(argsEl.value.trim()),
+            env,
+            toolArgs: [],
+            deviceId: null,
+            emulatorId: null,
+            buildType: null,
+            source: "manual",
+            scope: "project",
+            stale: false,
+            group: null,
+            role: null,
+          };
+          state = await invoke<State>("upsert_command", {
+            projectId: project.id,
+            command,
+          });
+          close();
+          render();
+          toast(`命令已添加到「${project.name}」`);
+          return;
+        }
+
         const command: CustomCommand = {
           id: existing?.id ?? "",
           name,
@@ -3152,6 +3385,7 @@ async function openCustomCommandDialog(existing?: CustomCommand): Promise<void> 
           target: draft.target.trim() || null,
           args: argsEl.value.trim(),
           cwd: cwdEl.value.trim() || null,
+          env,
         };
         state = await invoke<State>("upsert_custom_command", { command });
         close();
@@ -3757,41 +3991,53 @@ function openToolsMenu(anchor: HTMLElement): void {
   renderDoctorButton();
 }
 
-/* ---------------- 循环任务（工具 → 循环任务） ---------------- */
+/* ---------------- 循环任务（工具栏一级入口） ---------------- */
 
 /** 面板打开时的刷新函数；运行事件到达时用它更新列表 */
 let scheduleRefresh: (() => void) | null = null;
 
+/**
+ * cron 预设统一用 6 段（秒 分 时 日 月 周），方便开发环境做秒级任务。
+ * 5 段（分 时 日 月 周）仍兼容，秒按 0 处理。
+ */
 const SCHEDULE_CRON_PRESETS: { label: string; cron: string }[] = [
-  { label: "每分钟", cron: "* * * * *" },
-  { label: "每 5 分钟", cron: "*/5 * * * *" },
-  { label: "每小时", cron: "0 * * * *" },
-  { label: "每天 03:00", cron: "0 3 * * *" },
-  { label: "每周一 09:00", cron: "0 9 * * 1" },
-  { label: "每月 1 号", cron: "0 0 1 * *" },
+  { label: "每 5 秒", cron: "*/5 * * * * *" },
+  { label: "每 10 秒", cron: "*/10 * * * * *" },
+  { label: "每 30 秒", cron: "*/30 * * * * *" },
+  { label: "每分钟", cron: "0 * * * * *" },
+  { label: "每 5 分钟", cron: "0 */5 * * * *" },
+  { label: "每小时", cron: "0 0 * * * *" },
+  { label: "每天 03:00", cron: "0 0 3 * * *" },
+  { label: "每周一 09:00", cron: "0 0 9 * * 1" },
+  { label: "每月 1 号", cron: "0 0 0 1 * *" },
 ];
 
 function cronLabel(cron: string): string {
   const raw = cron.trim();
-  const hit = SCHEDULE_CRON_PRESETS.find((p) => p.cron === raw);
+  // 老任务可能是 5 段：补一个秒字段再查预设，显示仍然用原始表达式
+  const lookup = raw.split(/\s+/).length === 5 ? `0 ${raw}` : raw;
+  const hit = SCHEDULE_CRON_PRESETS.find((p) => p.cron === lookup);
   return hit ? `${hit.label}（${raw}）` : raw;
 }
 
-/** 本地时间：今天 / 明天 / 月-日 时:分 */
+/** 本地时间：今天 / 明天 / 月-日 时:分:秒 */
 function scheduleWhen(ms: number): string {
   if (!ms) return "—";
   const d = new Date(ms);
   const now = new Date();
-  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  if (d.toDateString() === now.toDateString()) return `今天 ${hm}`;
+  const hms = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(
+    2,
+    "0",
+  )}:${String(d.getSeconds()).padStart(2, "0")}`;
+  if (d.toDateString() === now.toDateString()) return `今天 ${hms}`;
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-  if (d.toDateString() === tomorrow.toDateString()) return `明天 ${hm}`;
+  if (d.toDateString() === tomorrow.toDateString()) return `明天 ${hms}`;
   if (d.getFullYear() !== now.getFullYear()) {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
       d.getDate(),
-    ).padStart(2, "0")} ${hm}`;
+    ).padStart(2, "0")} ${hms}`;
   }
-  return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${hm}`;
+  return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${hms}`;
 }
 
 function scheduleIn(ms: number): string {
@@ -3920,6 +4166,7 @@ function ensureSchedulePane(): void {
   const listEl = req<HTMLDivElement>("#sched-pane-list");
   const newBtn = req<HTMLButtonElement>("#sched-pane-new");
   const findBtn = req<HTMLButtonElement>("#sched-pane-find");
+  const clearBtn = req<HTMLButtonElement>("#sched-pane-clear");
   const editBtn = req<HTMLButtonElement>("#sched-pane-edit");
   const revealBtn = req<HTMLButtonElement>("#sched-pane-reveal");
   const searchInput = req<HTMLInputElement>("#sched-log-search-input");
@@ -3960,6 +4207,7 @@ function ensureSchedulePane(): void {
     if (bar && !bar.hidden) closeScheduleLogSearch();
     else openScheduleLogSearch();
   });
+  clearBtn.addEventListener("click", () => void clearScheduleLog());
   searchInput.addEventListener("input", () => updateScheduleLogSearch());
   searchInput.addEventListener("keydown", (e) => {
     // 搜索框里的按键不能漏给全局 Esc / 菜单
@@ -4090,6 +4338,7 @@ function updateSchedulePaneHead(): void {
   const title = document.querySelector<HTMLSpanElement>("#sched-pane-title");
   const sub = document.querySelector<HTMLSpanElement>("#sched-pane-sub");
   const find = document.querySelector<HTMLButtonElement>("#sched-pane-find");
+  const clear = document.querySelector<HTMLButtonElement>("#sched-pane-clear");
   const edit = document.querySelector<HTMLButtonElement>("#sched-pane-edit");
   const reveal = document.querySelector<HTMLButtonElement>("#sched-pane-reveal");
 
@@ -4111,6 +4360,7 @@ function updateSchedulePaneHead(): void {
   }
 
   if (find) find.disabled = !task;
+  if (clear) clear.disabled = !task;
   if (edit) edit.disabled = !task;
   if (reveal) reveal.disabled = !task;
 }
@@ -4233,7 +4483,7 @@ function renderScheduleLogView(jump: boolean, follow: boolean): void {
   const scrollTop = el.scrollTop;
 
   if (!scheduleLogQuery) {
-    el.textContent = raw || "选择左侧任务查看日志";
+    el.textContent = raw || (scheduleSelectedId ? "" : "选择左侧任务查看日志");
     updateScheduleLogSearchCount();
     if (follow) el.scrollTop = el.scrollHeight;
     else el.scrollTop = scrollTop;
@@ -4265,6 +4515,23 @@ function renderScheduleLogView(jump: boolean, follow: boolean): void {
   updateScheduleLogSearchCount();
   if (jump) scrollToCurrentScheduleHit(el);
   else el.scrollTop = scrollTop;
+}
+
+async function clearScheduleLog(): Promise<void> {
+  const task = selectedScheduleTask();
+  if (!task) return;
+  try {
+    await invoke("clear_task_log", { taskId: task.id });
+    schedulePaneLogText = "";
+    scheduleLogMatches = [];
+    scheduleLogMatchIndex = -1;
+    scheduleLogHitsCapped = false;
+    scheduleLogJumpNext = false;
+    renderScheduleLogView(false, false);
+    toast("日志已清空");
+  } catch (e) {
+    toast(String(e), "error");
+  }
 }
 
 async function loadScheduleLog(): Promise<void> {
@@ -4411,7 +4678,7 @@ async function openScheduleEditor(
         <div class="set-row">
           <label>计划</label>
           <div class="set-cell">
-            <input class="set-input" id="sched-cron" placeholder="分 时 日 月 周，如 0 3 * * *" spellcheck="false" autocomplete="off" />
+            <input class="set-input" id="sched-cron" placeholder="6 段：秒 分 时 日 月 周，如 */10 * * * * *；5 段仍兼容" spellcheck="false" autocomplete="off" />
           </div>
         </div>
         <div class="sched-presets" id="sched-presets"></div>
@@ -4464,7 +4731,7 @@ async function openScheduleEditor(
           </div>
         </details>
         <div class="set-desc" id="sched-editor-hint">
-          cron 最小粒度 1 分钟，按本地时间计算；参数不做 shell 解析（不支持管道 / 重定向），复杂逻辑请写 .bat / .ps1。
+          cron 支持 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）；6 段最小粒度 1 秒（开发环境用），按本地时间计算。参数不做 shell 解析（不支持管道 / 重定向），复杂逻辑请写 .bat / .ps1。
         </div>
       </div>
       <div class="modal-foot">
@@ -5604,6 +5871,43 @@ function splitArgs(text: string): string[] {
   return out;
 }
 
+/** splitArgs 的反向：含空格的参数加引号，保证对话框里"改一下再保存"不会把路径拆开 */
+function joinArgs(args: string[]): string {
+  return args
+    .map((a) => (a === "" || /[\s"']/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a))
+    .join(" ");
+}
+
+/**
+ * 「从脚本导入」的文件选择。
+ * 开发期可用 `FLA_IMPORT_SCRIPT=<路径>` 直接指定，方便自动化验证（不弹原生文件框）。
+ */
+async function pickScriptFile(): Promise<string | null> {
+  try {
+    const hook = await invoke<string | null>("dev_env", { name: "FLA_IMPORT_SCRIPT" });
+    if (hook && hook.trim()) return hook.trim();
+  } catch {
+    // 非 Tauri 环境（纯浏览器预览）忽略
+  }
+
+  const picked = await open({
+    multiple: false,
+    title: "选择要导入的脚本（.ps1 / .sh / .py …）",
+    filters: [
+      {
+        name: "脚本",
+        extensions: [
+          "ps1", "bat", "cmd", "sh", "bash", "zsh",
+          "py", "js", "mjs", "cjs", "rb", "pl", "php",
+        ],
+      },
+      { name: "全部文件", extensions: ["*"] },
+    ],
+  });
+  if (!picked) return null;
+  return Array.isArray(picked) ? picked[0] : picked;
+}
+
 /** 常用配置示例：新用户不知道占位符和脚本怎么写，给一份可照抄的清单 */
 function showUsageExamples(
   apply: (ex: { program: string; args: string; cwd: string; scope: string }) => void,
@@ -5857,6 +6161,7 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       <div class="modal-foot">
         <span class="modal-hint" id="cmd-hint"></span>
         <span class="flex1"></span>
+        ${existing ? "" : '<button class="btn" id="cmd-import-script">从脚本导入…</button>'}
         <button class="btn" id="cmd-examples">使用示例</button>
         ${existing ? '<button class="btn" id="cmd-del">删除</button>' : ""}
         <button class="btn" id="cmd-cancel">取消</button>
@@ -5908,9 +6213,32 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
     script: inferredShell && existing ? shellScriptOf(existing, inferredShell) : "",
     envPairs: Object.entries(existing?.env ?? {}) as Array<[string, string]>,
     scope: existing?.scope === "global" ? "global" : "project",
+    /** 「从脚本导入」时后端给的说明（用了哪个解释器 / 虚拟环境） */
+    scriptNote: "",
+    /** 导入的脚本路径（只用于展示与 venv 下拉） */
+    pyScript: "",
+    /** 当前选中的 venv 根目录（仅 .py） */
+    pyVenv: null as string | null,
+    /** 可选的 venv 列表（仅 .py） */
+    pyVenvs: [] as ScriptPreview["venvs"],
   };
 
   let targets: BuildTarget[] | null = null;
+
+  /** 导入脚本时的命令名：与已有命令/模板重名就加序号 */
+  const uniqueCommandName = (base: string): string => {
+    const taken = new Set<string>(
+      isTemplate
+        ? state.commandTemplates.map((t) => t.name)
+        : (p?.commands ?? []).map((c) => c.name),
+    );
+    if (!taken.has(base)) return base;
+    for (let i = 2; i < 100; i++) {
+      const cand = `${base} ${i}`;
+      if (!taken.has(cand)) return cand;
+    }
+    return base;
+  };
 
   const row = (label: string): [HTMLDivElement, HTMLElement] => {
     const r = document.createElement("div");
@@ -6020,6 +6348,47 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
       input(c2, draft.cwd, "可空（相对项目根，支持 %PROJECT%）", (v) => {
         draft.cwd = v;
       });
+
+      // .py：导入时识别到的虚拟环境可以在这里切换（不用手改 python.exe 路径）
+      if (draft.pyScript && draft.pyVenvs.length > 0) {
+        const [, cv] = row("Python 虚拟环境");
+        const sel = document.createElement("select");
+        sel.className = "set-input";
+        const none = document.createElement("option");
+        none.value = "";
+        none.textContent = "不使用（PATH 里的 python）";
+        sel.appendChild(none);
+        for (const v of draft.pyVenvs) {
+          const o = document.createElement("option");
+          o.value = v.dir;
+          o.textContent = `${v.label} — ${v.dir}`;
+          sel.appendChild(o);
+        }
+        sel.value = draft.pyVenv ?? "";
+        sel.addEventListener("change", () => {
+          const v = draft.pyVenvs.find((x) => x.dir === sel.value);
+          if (v) {
+            draft.pyVenv = v.dir;
+            draft.program = v.python;
+            draft.scriptNote = `使用虚拟环境 ${v.dir} 里的 python.exe（等价于先 activate，再跑脚本）`;
+          } else {
+            draft.pyVenv = null;
+            draft.program = "python";
+            draft.scriptNote =
+              "使用 PATH 里的 python（依赖要装在这个解释器里）；有 venv 时建议选上面的虚拟环境";
+          }
+          void build();
+        });
+        cv.appendChild(sel);
+      }
+
+      if (draft.scriptNote) {
+        const imported = document.createElement("div");
+        imported.className = "set-note";
+        imported.textContent = draft.scriptNote;
+        body.appendChild(imported);
+      }
+
       const note = document.createElement("div");
       note.className = "set-desc";
       note.textContent =
@@ -6219,6 +6588,43 @@ async function openCommandDialog(p: Proj | null, existing?: Cmd): Promise<void> 
 
   (overlay.querySelector(".modal-x") as HTMLButtonElement).addEventListener("click", close);
   (overlay.querySelector("#cmd-cancel") as HTMLButtonElement).addEventListener("click", close);
+
+  // 「从脚本导入…」：选一个 .ps1 / .sh / .py …，自动填好程序、参数和工作目录
+  overlay.querySelector("#cmd-import-script")?.addEventListener("click", () => {
+    void (async () => {
+      try {
+        const scriptPath = await pickScriptFile();
+        if (!scriptPath) return;
+
+        const info = await invoke<ScriptPreview>("preview_script_command", {
+          path: scriptPath,
+          projectId: p?.id ?? null,
+          mode: "project",
+        });
+
+        draft.type = "custom";
+        draft.name = uniqueCommandName(info.name);
+        draft.program = info.program;
+        draft.args = joinArgs(info.args);
+        draft.cwd = info.cwd ?? "";
+        draft.scriptNote = info.note;
+        draft.pyScript = scriptPath;
+        draft.pyVenv = info.venv;
+        draft.pyVenvs = info.venvs;
+        hint.textContent = "";
+
+        await build();
+        toast(
+          info.venv
+            ? `已导入脚本「${info.name}」，使用虚拟环境 ${info.venv}`
+            : `已导入脚本「${info.name}」，工作目录已设为脚本所在目录`,
+        );
+      } catch (e) {
+        hint.textContent = String(e);
+      }
+    })();
+  });
+
   (overlay.querySelector("#cmd-examples") as HTMLButtonElement).addEventListener("click", () =>
     showUsageExamples((ex) => {
       // 示例都是 custom 的写法；新建时切过去，编辑已有命令时不偷偷改类型
@@ -6545,8 +6951,8 @@ function renderFolderMenu(ev: MouseEvent, p: Proj): void {
     {
       kind: "item",
       name: "添加命令",
-      detail: "新建 run / build / custom 命令",
-      onClick: () => void openCommandDialog(p),
+      detail: "程序 / 参数 / 工作目录 / 环境变量",
+      onClick: () => openAddCommand(p),
     },
     { kind: "sep" },
     {
@@ -6830,8 +7236,11 @@ function renderProjectMenu(ev: MouseEvent, p: Proj, files: ProjectFiles): void {
     {
       kind: "item",
       name: "添加命令…",
-      detail: "新建 run / build / custom 命令",
-      onClick: () => void openCommandDialog(p),
+      detail:
+        p.kind === "single"
+          ? "新建 run / build / custom 命令"
+          : "程序 / 参数 / 工作目录 / 环境变量",
+      onClick: () => openAddCommand(p),
     },
   );
 
@@ -9432,6 +9841,7 @@ async function boot(): Promise<void> {
             <span class="flex1"></span>
             <button class="btn" id="sched-pane-find" disabled title="搜索日志（输入后 Enter 下一个）">🔍 搜索</button>
             <button class="btn" id="sched-pane-edit" disabled>编辑</button>
+            <button class="btn" id="sched-pane-clear" disabled>清空日志</button>
             <button class="btn" id="sched-pane-reveal" disabled>打开日志目录</button>
           </div>
           <div class="sched-log-search" id="sched-log-search" hidden>

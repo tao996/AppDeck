@@ -181,6 +181,8 @@ struct Launch {
     program: String,
     args: Vec<String>,
     cwd: PathBuf,
+    /// 启动时注入的环境变量（来自命令设置）
+    env: Vec<(String, String)>,
 }
 
 fn launch_for(cmd: &CustomCommand) -> Result<Launch, String> {
@@ -242,6 +244,11 @@ fn launch_for(cmd: &CustomCommand) -> Result<Launch, String> {
         program: target,
         args,
         cwd,
+        env: cmd
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
     })
 }
 
@@ -268,6 +275,13 @@ pub fn upsert_custom_command(
         .target
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
+    // 环境变量：去掉空 KEY，KEY 首尾空格一并清掉
+    command.env = command
+        .env
+        .into_iter()
+        .filter(|(k, _)| !k.trim().is_empty())
+        .map(|(k, v)| (k.trim().to_string(), v))
+        .collect();
 
     if command.name.is_empty() {
         return Err("命令名称不能为空".to_string());
@@ -328,7 +342,7 @@ pub fn start_custom_command(
         &launch.program,
         &launch.args,
         launch.cwd.clone(),
-        &[],
+        &launch.env,
         rows,
         cols,
     )?;
@@ -355,6 +369,38 @@ pub fn start_custom_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn env_is_carried_into_launch() {
+        let root = std::env::temp_dir().join("fla_cc_env");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+
+        let cmd = CustomCommand {
+            id: "cc-env".into(),
+            name: "env".into(),
+            program: "cmd.exe".into(),
+            target: None,
+            args: String::new(),
+            cwd: Some(root.display().to_string()),
+            env,
+        };
+
+        let launch = launch_for(&cmd).unwrap();
+        assert!(
+            launch
+                .env
+                .iter()
+                .any(|(k, v)| k == "PYTHONUTF8" && v == "1"),
+            "环境变量应带进启动计划: {:?}",
+            launch.env
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn parses_windows_args_with_quotes() {

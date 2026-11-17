@@ -712,6 +712,14 @@ pub fn shell_line_for(
     let shell = crate::terminal::resolve(state.settings.terminal.path.as_deref());
     let line = crate::terminal::command_line(&shell, &program, &args);
 
+    // 命令自带的 env：复用终端里不会重新 spawn，必须拼在命令行前
+    let env_pairs: Vec<(String, String)> = command
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let line = format!("{}{}", crate::terminal::env_prefix(&shell, &env_pairs), line);
+
     // cwd 不在项目根时先切目录（同一个 shell 是项目级共享的）
     let same_dir = cwd
         .canonicalize()
@@ -782,6 +790,13 @@ pub fn prefill_plan(
     };
 
     let line = crate::terminal::command_line(&term, &prog, &arg_list);
+    // 预填也要带上命令自带的环境变量（只是打到提示符，不回车）
+    let env_pairs: Vec<(String, String)> = command
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let line = format!("{}{}", crate::terminal::env_prefix(&term, &env_pairs), line);
 
     Ok((
         Plan {
@@ -1899,6 +1914,55 @@ mod tests {
             plan.cwd.ends_with("sub"),
             "cwd 里的 %PROJECT% 应展开，实际: {}",
             plan.cwd.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn custom_command_env_is_prefixed_in_shell_line() {
+        let root = std::env::temp_dir().join("fla_cmd_env");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let state = State::default();
+        let project = Project {
+            id: "p-env".into(),
+            name: "demo".into(),
+            path: root.display().to_string(),
+            kind: "workspace".into(),
+            flutter_tool: None,
+            commands: vec![],
+            env: Default::default(),
+        };
+
+        let mut env: std::collections::HashMap<String, String> = Default::default();
+        env.insert("PYTHONUTF8".to_string(), "1".to_string());
+        let cmd = Command {
+            id: "c-env".into(),
+            name: "env".into(),
+            kind: "custom".into(),
+            program: Some("cmd.exe".into()),
+            cwd: None,
+            flutter_mode: None,
+            args: vec!["/c".into(), "echo".into(), "hi".into()],
+            env,
+            tool_args: vec![],
+            device_id: None,
+            emulator_id: None,
+            build_type: None,
+            source: Some("manual".into()),
+            scope: None,
+            stale: false,
+            group: None,
+            role: None,
+            category: None,
+        };
+
+        let line = shell_line_for(&state, &project, &cmd).unwrap();
+        assert!(
+            line.contains("$env:PYTHONUTF8='1'") || line.contains("set \"PYTHONUTF8=1\""),
+            "命令行里应带环境变量前缀，实际: {line}"
         );
 
         let _ = std::fs::remove_dir_all(&root);
