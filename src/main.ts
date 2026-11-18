@@ -117,6 +117,8 @@ interface SettingsModel {
   terminal: {
     /** 终端可执行文件；留空自动探测 */
     path: string | null;
+    /** 输出过滤规则（只对 Flutter 终端生效） */
+    filters: OutputFilter[];
   };
   npm: {
     /** auto | npm | pnpm | yarn */
@@ -383,7 +385,7 @@ function defaultSettings(): SettingsModel {
       sdkPath: null,
       env: {},
     },
-    terminal: { path: null },
+    terminal: { path: null, filters: [] },
     npm: { manager: null, nodePath: null },
     docker: { dockerPath: null, composeStyle: null },
     editor: { path: null },
@@ -492,6 +494,18 @@ interface TermSession {
   /** 日志搜索（Ctrl+F）；每个会话各一份，切换 tab 时只操作当前会话的 */
   search?: SearchAddon;
   pane?: HTMLDivElement;
+  /** 工具条「过滤」开关（按会话，默认关；只对新输出生效） */
+  filterEnabled?: boolean;
+  /** 跨数据块拼行的暂存尾巴（仅过滤开启时有值） */
+  filterCarry?: string;
+}
+
+/** 终端输出过滤规则（显示层，只影响写进 xterm 的新输出） */
+interface OutputFilter {
+  mode: string; // contain | prefix
+  pattern: string;
+  scope: string; // none | flutter
+  enabled: boolean;
 }
 
 interface BuildTarget {
@@ -1219,6 +1233,12 @@ function updateControls(): void {
   // 清空日志 / 搜索：只要有终端就能用（不要求进程还在跑）
   req<HTMLButtonElement>("#btn-clear").disabled = !s?.term;
   req<HTMLButtonElement>("#btn-find").disabled = !s?.term;
+  // 终端过滤开关：只在 Flutter 终端显示；恢复 / 已停止会话没有新输出，禁用
+  const flutter = isFlutterSession(s);
+  req<HTMLElement>("#filter-toggle-wrap").hidden = !flutter;
+  const filterToggle = req<HTMLInputElement>("#btn-filter-toggle");
+  filterToggle.checked = flutter && s?.filterEnabled === true;
+  filterToggle.disabled = !flutter || Boolean(s?.restored) || s?.status === "stopped";
   // 项目目录：有会话且有 cwd 才能用编辑器打开
   req<HTMLButtonElement>("#btn-open-proj").disabled = !s?.cwd;
   const rerun = req<HTMLButtonElement>("#btn-rerun");
@@ -2970,14 +2990,22 @@ function openAddCommand(p: Proj): void {
  * - 从非 Flutter 项目的「添加命令」打开（传 `project`）：同样的表单，
  *   保存成**该项目的命令**（`kind=custom`），输出进项目终端。
  */
-async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj): Promise<void> {
+async function openCustomCommandDialog(
+  existing?: CustomCommand,
+  project?: Proj,
+  asTemplate = false,
+  existingTemplate?: Cmd,
+): Promise<void> {
+  const tpl = existingTemplate;
+  const editingTemplate = asTemplate && !!tpl;
   const draft = {
-    name: existing?.name ?? "",
-    program: existing?.program ?? "",
+    name: existing?.name ?? tpl?.name ?? "",
+    program: existing?.program ?? tpl?.program ?? "",
     target: existing?.target ?? "",
-    args: existing?.args ?? "",
-    cwd: existing?.cwd ?? "",
-    envPairs: Object.entries(existing?.env ?? {}) as Array<[string, string]>,
+    // 模板的 args 是数组，回填成命令行文本
+    args: tpl ? joinArgs(tpl.args ?? []) : (existing?.args ?? ""),
+    cwd: existing?.cwd ?? tpl?.cwd ?? "",
+    envPairs: Object.entries(existing?.env ?? tpl?.env ?? {}) as Array<[string, string]>,
   };
 
   const overlay = document.createElement("div");
@@ -2985,7 +3013,7 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
   overlay.innerHTML = `
     <div class="modal" style="width: 700px">
       <div class="modal-head">
-        <span>${existing ? "编辑自定义命令" : "添加自定义命令"}</span>
+        <span>${existing || editingTemplate ? "编辑自定义命令" : "添加自定义命令"}</span>
         <button class="modal-x" title="关闭">×</button>
       </div>
       <div class="modal-body">
@@ -2996,13 +3024,14 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
           </div>
         </div>
         <div class="set-row">
-          <label>程序 / 快捷方式</label>
+          <label>程序/命令</label>
           <div class="set-cell">
-            <input class="set-input" id="cc-program" placeholder="选择 .lnk / .exe，或直接填路径" spellcheck="false" autocomplete="off" autocapitalize="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
+            <input class="set-input" id="cc-program" placeholder="选 .lnk/.exe，或直接粘贴整条命令" spellcheck="false" autocomplete="off" autocapitalize="off" data-lpignore="true" data-1p-ignore="true" data-bwignore="true" />
             <button class="btn" id="cc-browse">浏览…</button>
-            <button class="btn" id="cc-resolve">解析快捷方式</button>
+            <button class="btn" id="cc-resolve">解析</button>
           </div>
         </div>
+        <div class="set-desc">直接粘贴整条命令会自动拆分到「程序」和「参数」；路径含空格请加引号，如 <code>"C:\Program Files\App\app.exe" --flag</code>。</div>
         <div class="set-desc" id="cc-target"></div>
         <div class="set-row">
           <label>参数</label>
@@ -3018,9 +3047,13 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
           </div>
         </div>
         <div class="set-desc">
-          ${project
-            ? `保存为项目「${esc(project.name)}」的命令：在下面的工作目录里直接启动程序，输出进入项目终端。`
-            : "直接启动目标程序（.lnk 会先解析成 exe），不经过 ShellExecute，因此不会弹出系统控制台，也不会在任务栏多一个窗口。"}
+          ${asTemplate
+            ? editingTemplate
+              ? "编辑全局命令模板：这里只改程序 / 参数 / 目录 / 环境变量；类型、构建模式等未展示的字段保持不变。"
+              : "保存为全局命令模板：新建「单应用」项目时自动套用，也可在项目树里按需导入。"
+            : project
+              ? `保存为项目「${esc(project.name)}」的命令：在下面的工作目录里直接启动程序，输出进入项目终端。`
+              : "直接启动目标程序（.lnk 会先解析成 exe），不经过 ShellExecute，因此不会弹出系统控制台，也不会在任务栏多一个窗口。"}
         </div>
         <div class="set-desc" id="cc-hint"></div>
         <div class="set-row" id="cc-venv-row" hidden>
@@ -3034,7 +3067,7 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
         <div class="env-list" id="cc-env"></div>
       </div>
       <div class="modal-foot">
-        <span class="modal-hint">快捷方式参数里的引号会自动去掉再传给目标</span>
+        <span class="modal-hint"></span>
         <span class="flex1"></span>
         <button class="btn" id="cc-import-script">从脚本导入…</button>
         <button class="btn" id="cc-cancel">取消</button>
@@ -3139,6 +3172,23 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
     }
   };
   renderTarget();
+
+  /** 直接粘贴整条命令（如 flutter build apk --release）时，自动拆到「程序」和「参数」。
+   *  含空格的路径需用户自己加引号，splitArgs 按引号分词，拆错了也能在两个输入框里改。 */
+  programEl.addEventListener("paste", (e) => {
+    const text = (e.clipboardData?.getData("text") ?? "").trim();
+    if (!/\s/.test(text)) return; // 单个 token，走默认粘贴
+    const parts = splitArgs(text);
+    if (parts.length < 2) return;
+    e.preventDefault();
+    programEl.value = parts[0];
+    argsEl.value = parts.slice(1).join(" ");
+    draft.program = parts[0];
+    draft.args = argsEl.value;
+    draft.target = "";
+    renderTarget();
+    hint.textContent = `已自动拆分：程序 = ${parts[0]}；参数 = ${parts.slice(1).join(" ")}`;
+  });
 
   const resolve = async (): Promise<boolean> => {
     const program = programEl.value.trim();
@@ -3321,13 +3371,14 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
         hint.textContent = "请填写名称";
         return;
       }
-      if (!program) {
+      // 模板允许程序为空（如 build 类模板本来就没有 program），原样保留
+      if (!program && !asTemplate) {
         hint.textContent = "请选择程序或快捷方式";
         return;
       }
       const lower = program.toLowerCase();
-      // 只有全局自定义命令受这个限制（项目命令由 shell 执行，.bat/.cmd 没问题）
-      if (!project && (lower.endsWith(".bat") || lower.endsWith(".cmd"))) {
+      // 只有全局自定义命令受这个限制（项目命令、模板由 shell 执行，.bat/.cmd 没问题）
+      if (!project && !asTemplate && (lower.endsWith(".bat") || lower.endsWith(".cmd"))) {
         hint.textContent = "暂不支持直接运行 .bat/.cmd，请选择 .lnk 或 .exe";
         return;
       }
@@ -3375,6 +3426,48 @@ async function openCustomCommandDialog(existing?: CustomCommand, project?: Proj)
           close();
           render();
           toast(`命令已添加到「${project.name}」`);
+          return;
+        }
+
+        if (asTemplate) {
+          // 模板库的新建/编辑都复用本面板，落盘为 commandTemplates 里的 Cmd。
+          // .lnk 先解析成真实 exe，保证模板在任何机器上都能直接复用。
+          const isLnk = program.toLowerCase().endsWith(".lnk");
+          const resolvedProgram = program
+            ? isLnk
+              ? draft.target.trim() || program
+              : program
+            : (tpl?.program ?? null);
+          const common = {
+            name,
+            program: resolvedProgram,
+            cwd: cwdEl.value.trim() || null,
+            args: splitArgs(argsEl.value.trim()),
+            env,
+            source: "template",
+            scope: tpl?.scope ?? "global",
+          };
+          // 编辑时保留 kind / 构建模式 / 分类等本面板未展示的字段
+          const template: Cmd = tpl
+            ? { ...tpl, ...common }
+            : {
+                id: "",
+                kind: "custom",
+                flutterMode: null,
+                toolArgs: [],
+                deviceId: null,
+                emulatorId: null,
+                buildType: null,
+                stale: false,
+                group: null,
+                role: null,
+                ...common,
+              };
+          state = await invoke<State>("upsert_template", { template });
+          close();
+          render();
+          templateListRefresh?.();
+          toast(editingTemplate ? "模板已更新" : "模板已保存");
           return;
         }
 
@@ -3466,6 +3559,12 @@ function openCustomCommandMenu(): void {
       name: "＋ 添加命令…",
       detail: "快捷方式 / exe，可填参数与工作目录",
       onClick: () => void openCustomCommandDialog(),
+    },
+    {
+      kind: "item",
+      name: "命令模板管理…",
+      detail: `管理全局命令模板（当前 ${state.commandTemplates.length} 条）`,
+      onClick: () => openTemplateManager(),
     },
   );
 
@@ -5429,19 +5528,248 @@ async function rerunSessionNow(s: TermSession): Promise<void> {
   toast("找不到原命令（可能已被删除），请重新选择", "error");
 }
 
+/* ---------------- 终端输出过滤 ---------------- */
+
+/** 只有 flutter run 会话（含平台动作）算「Flutter 终端」；
+ *  build / 普通终端 / 自定义命令 / npm / docker / qt 都不算。 */
+function isFlutterSession(s: TermSession | undefined): boolean {
+  return !!s && s.kind === "run" && !isExternalRunSession(s);
+}
+
+/** 剥离 ANSI 转义序列；只用于匹配，写回终端的始终是原始字节。 */
+function stripAnsi(s: string): string {
+  return s
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)/g, "") // OSC
+    .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "") // CSI（SGR / 光标控制）
+    .replace(/\u001b[@-_]/g, ""); // 单字符 ESC
+}
+
+/** 这一整行是否命中任一启用的规则。大小写敏感。 */
+function lineMatchesFilter(rawLine: string): boolean {
+  const rules = state.settings.terminal?.filters ?? [];
+  if (rules.length === 0) return false;
+  const plain = stripAnsi(rawLine);
+  const trimmed = plain.replace(/^\s+/, "");
+  for (const r of rules) {
+    if (!r.enabled || r.scope !== "flutter") continue;
+    const p = r.pattern ?? "";
+    if (p === "") continue;
+    if (r.mode === "prefix" && trimmed.startsWith(p)) return true;
+    if (r.mode === "contain" && plain.includes(p)) return true;
+  }
+  return false;
+}
+
+/** 把 data 按显示层过滤后返回可写出的文本。
+ *  - 按 \r\n / \r / \n 切分（\r 是 Flutter 的原地重绘边界），逐段决策；
+ *    未结束的尾段暂存在 s.filterCarry 等下一块
+ *  - 纯控制序列块（无可见文本、无换行）立即透传，避免光标控制被卡住
+ *  - carry 超过 4096 字符强制 flush，防止无换行的长段无限堆积 */
+function applyOutputFilter(s: TermSession, data: string): string {
+  const noVisible = stripAnsi(data).replace(/[\r\n]/g, "").length === 0;
+  if (!/[\r\n]/.test(data) && noVisible && !(s.filterCarry ?? "")) return data;
+
+  const combined = (s.filterCarry ?? "") + data;
+  const parts = combined.split(/(\r\n|\r|\n)/); // 保留分隔符，奇数下标是分隔符
+  let out = "";
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i] ?? "";
+    const sep = parts[i + 1];
+    if (sep === undefined) {
+      s.filterCarry = line;
+      break;
+    }
+    if (!lineMatchesFilter(line)) out += line + sep;
+  }
+  if ((s.filterCarry ?? "").length > 4096) {
+    const carry = s.filterCarry ?? "";
+    s.filterCarry = "";
+    if (!lineMatchesFilter(carry)) out += carry;
+  }
+  return out;
+}
+
+/** 切换会话的过滤开关；关闭时把暂存的半行原样写回，避免丢字。 */
+function setSessionFilter(s: TermSession, on: boolean): void {
+  if (s.filterEnabled === on) return;
+  if (!on && s.filterCarry) {
+    if (s.term) s.term.write(s.filterCarry);
+    else {
+      const buf = pendingOutput.get(s.id) ?? [];
+      buf.push(s.filterCarry);
+      pendingOutput.set(s.id, buf);
+    }
+    s.filterCarry = "";
+  }
+  s.filterEnabled = on;
+}
+
+/** 顶部菜单：终端过滤器设置面板。 */
+function openFilterPanel(): void {
+  const rules: OutputFilter[] = (state.settings.terminal?.filters ?? []).map((f) => ({ ...f }));
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal filter-modal">
+      <div class="modal-head">
+        <span>终端过滤器</span>
+        <button class="modal-x" title="关闭">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="set-desc">
+          只对 <b>Flutter 终端</b> 的<b>新输出</b>生效：还需打开终端工具条上的「过滤」开关。
+          匹配<b>大小写敏感</b>；contain = 包含，prefix = 行首前缀（自动忽略行首颜色码与空白）。
+          不勾「生效」的规则只保留、不生效。
+        </div>
+        <table class="filter-table">
+          <thead><tr><th>规则</th><th>内容</th><th>作用域</th><th>生效</th><th></th></tr></thead>
+          <tbody id="filter-rows"></tbody>
+        </table>
+        <button class="btn" id="filter-add" style="margin-top:8px">＋ 添加规则</button>
+      </div>
+      <div class="modal-foot">
+        <span class="flex1"></span>
+        <button class="btn" id="filter-cancel">取消</button>
+        <button class="btn primary" id="filter-save">保存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const $ = <T extends Element>(sel: string): T => overlay.querySelector(sel) as T;
+  const rows = $<HTMLTableSectionElement>("#filter-rows");
+  const close = (): void => overlay.remove();
+
+  overlay.querySelector(".modal-x")?.addEventListener("click", close);
+  $<HTMLButtonElement>("#filter-cancel").addEventListener("click", close);
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      close();
+    }
+  });
+
+  const selectOf = (options: Array<[string, string]>, value: string): HTMLSelectElement => {
+    const sel = document.createElement("select");
+    sel.className = "set-input";
+    for (const [v, label] of options) {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = label;
+      sel.appendChild(o);
+    }
+    sel.value = value;
+    return sel;
+  };
+
+  const renderRows = (): void => {
+    rows.innerHTML = "";
+    rules.forEach((r, idx) => {
+      const tr = document.createElement("tr");
+
+      const modeTd = document.createElement("td");
+      const mode = selectOf(
+        [
+          ["contain", "contain"],
+          ["prefix", "prefix"],
+        ],
+        r.mode === "prefix" ? "prefix" : "contain",
+      );
+      mode.addEventListener("change", () => (r.mode = mode.value));
+      modeTd.appendChild(mode);
+
+      const contentTd = document.createElement("td");
+      const input = document.createElement("input");
+      input.className = "set-input";
+      input.type = "text";
+      input.spellcheck = false;
+      input.placeholder = "要匹配的文本";
+      input.value = r.pattern ?? "";
+      input.addEventListener("input", () => (r.pattern = input.value));
+      contentTd.appendChild(input);
+
+      const scopeTd = document.createElement("td");
+      const scope = selectOf(
+        [
+          ["none", "none"],
+          ["flutter", "flutter"],
+        ],
+        r.scope === "none" ? "none" : "flutter",
+      );
+      scope.addEventListener("change", () => (r.scope = scope.value));
+      scopeTd.appendChild(scope);
+
+      const enabledTd = document.createElement("td");
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = r.enabled === true;
+      cb.addEventListener("change", () => (r.enabled = cb.checked));
+      enabledTd.appendChild(cb);
+
+      const delTd = document.createElement("td");
+      const del = document.createElement("button");
+      del.className = "btn";
+      del.textContent = "×";
+      del.title = "删除该规则";
+      del.addEventListener("click", () => {
+        rules.splice(idx, 1);
+        renderRows();
+      });
+      delTd.appendChild(del);
+
+      tr.append(modeTd, contentTd, scopeTd, enabledTd, delTd);
+      rows.appendChild(tr);
+    });
+  };
+  renderRows();
+
+  $<HTMLButtonElement>("#filter-add").addEventListener("click", () => {
+    rules.push({ mode: "contain", pattern: "", scope: "flutter", enabled: true });
+    renderRows();
+  });
+
+  $<HTMLButtonElement>("#filter-save").addEventListener("click", () => {
+    void (async () => {
+      try {
+        const settings: SettingsModel = JSON.parse(
+          JSON.stringify(state.settings ?? defaultSettings()),
+        ) as SettingsModel;
+        settings.terminal = {
+          path: settings.terminal?.path ?? null,
+          // 空内容的规则没有意义，保存时丢弃
+          filters: rules.filter((r) => (r.pattern ?? "").trim() !== ""),
+        };
+        state = await invoke<State>("save_settings", { settings });
+        close();
+        render();
+        toast("终端过滤器已保存");
+      } catch (e) {
+        toast(String(e), "error");
+      }
+    })();
+  });
+
+  $<HTMLInputElement>(".filter-table input[type=text]")?.focus();
+}
+
 function handleOutput(id: string, data: string): void {
   const s = sessions.find((x) => x.id === id);
   if (!s) return;
 
-  if (!s.term) {
-    const buf = pendingOutput.get(id) ?? [];
-    buf.push(data);
-    pendingOutput.set(id, buf);
-  } else {
-    s.term.write(data);
+  // 显示层过滤：只改写入 xterm 的内容；下面的锚点扫描始终用原始 data
+  const display = s.filterEnabled && isFlutterSession(s) ? applyOutputFilter(s, data) : data;
+  if (display) {
+    if (!s.term) {
+      const buf = pendingOutput.get(id) ?? [];
+      buf.push(display);
+      pendingOutput.set(id, buf);
+    } else {
+      s.term.write(display);
+    }
   }
 
-  // 锚点可能被切块，用滚动窗口匹配
+  // 锚点可能被切块，用滚动窗口匹配（始终用原始流）
   s.scan = (s.scan + data).slice(-4000);
 
   // 构建产物：flutter 输出形如 "✓ Built build\app\outputs\flutter-apk\app-release.apk"
@@ -7411,7 +7739,7 @@ function openTemplateManager(): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
-    <div class="modal" style="width: 740px">
+    <div class="modal" style="width: 960px">
       <div class="modal-head">
         <span>命令模板库</span>
         <button class="modal-x" title="关闭">×</button>
@@ -7420,7 +7748,7 @@ function openTemplateManager(): void {
       <div class="modal-foot">
         <span class="modal-hint">新建「单应用」项目时会自动套用这些模板</span>
         <span class="flex1"></span>
-        <button class="btn" id="tpl-new">＋ 新建模板</button>
+        <button class="btn" id="tpl-new">添加</button>
         <button class="btn primary" id="tpl-close">关闭</button>
       </div>
     </div>
@@ -7433,12 +7761,18 @@ function openTemplateManager(): void {
   };
 
   const renderList = (): void => {
-    body.innerHTML = "";
+    body.innerHTML = `
+      <table class="tpl-table">
+        <thead><tr><th>名称</th><th>类型</th><th>程序</th><th>参数</th><th>分类</th><th>操作</th></tr></thead>
+        <tbody id="tpl-rows"></tbody>
+      </table>
+    `;
+    const rowsEl = body.querySelector("#tpl-rows") as HTMLTableSectionElement;
+
     if (state.commandTemplates.length === 0) {
-      const e = document.createElement("div");
-      e.className = "set-desc";
-      e.textContent = "模板库为空，点「＋ 新建模板」添加。";
-      body.appendChild(e);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td colspan="6" class="tpl-empty">模板库为空，点「＋ 添加自定义命令」添加。</td>`;
+      rowsEl.appendChild(tr);
       return;
     }
 
@@ -7455,51 +7789,31 @@ function openTemplateManager(): void {
       const cat = templateCategory(t);
       if (cat !== lastCategory) {
         lastCategory = cat;
-        const head = document.createElement("div");
-        head.className = "tpl-group";
-        head.textContent = CATEGORY_LABEL[cat] ?? cat;
-        body.appendChild(head);
+        const head = document.createElement("tr");
+        head.className = "tpl-group-row";
+        head.innerHTML = `<td colspan="6">${esc(CATEGORY_LABEL[cat] ?? cat)}</td>`;
+        rowsEl.appendChild(head);
       }
 
-      const row = document.createElement("div");
+      const row = document.createElement("tr");
       row.className = "tpl-row";
 
-      const main = document.createElement("div");
-      main.className = "tpl-main";
-      main.innerHTML = `
-        <span class="tpl-name">${esc(t.name)}</span>
-        <span class="chip ${t.kind === "build" ? "src-custom" : "src-fvm"}">${esc(t.kind)}</span>
-        ${t.buildType ? `<span class="fver">${esc(t.buildType)}</span>` : ""}
-        ${t.flutterMode ? `<span class="fver">${esc(t.flutterMode)}</span>` : ""}
-        <span class="tpl-args">${esc(t.args.join(" "))}</span>
-      `;
+      const nameTd = document.createElement("td");
+      nameTd.innerHTML = `<span class="tpl-name">${esc(t.name)}</span>`;
 
-      const edit = document.createElement("button");
-      edit.className = "btn";
-      edit.textContent = "编辑";
-      edit.addEventListener("click", () => void openCommandDialog(null, t));
+      const typeTd = document.createElement("td");
+      typeTd.innerHTML = `<span class="chip ${t.kind === "build" ? "src-custom" : "src-fvm"}">${esc(t.kind)}</span>${t.buildType ? ` <span class="fver">${esc(t.buildType)}</span>` : ""}${t.flutterMode ? ` <span class="fver">${esc(t.flutterMode)}</span>` : ""}`;
 
-      const del = document.createElement("button");
-      del.className = "btn danger";
-      del.textContent = "删除";
-      del.addEventListener("click", () => {
-        void (async () => {
-          const ok = await confirm(`删除模板「${t.name}」？`, {
-            title: "删除模板",
-            kind: "warning",
-          });
-          if (!ok) return;
-          try {
-            state = await invoke<State>("remove_template", { id: t.id });
-            renderList();
-            render();
-            toast("模板已删除");
-          } catch (e) {
-            toast(String(e), "error");
-          }
-        })();
-      });
+      // 程序和参数用 textContent，避免路径里的特殊字符被当成 HTML
+      const progTd = document.createElement("td");
+      progTd.className = "tpl-code-cell";
+      progTd.textContent = t.program ?? "—";
 
+      const argsTd = document.createElement("td");
+      argsTd.className = "tpl-code-cell";
+      argsTd.textContent = joinArgs(t.args ?? []);
+
+      const catTd = document.createElement("td");
       // 分类可直接改（改了就落盘，用于纠正自动推断）
       const catSel = document.createElement("select");
       catSel.className = "set-input tpl-cat";
@@ -7524,9 +7838,39 @@ function openTemplateManager(): void {
           }
         })();
       });
+      catTd.appendChild(catSel);
 
-      row.append(main, catSel, edit, del);
-      body.appendChild(row);
+      const actTd = document.createElement("td");
+      actTd.className = "tpl-actions";
+      const edit = document.createElement("button");
+      edit.className = "btn";
+      edit.textContent = "编辑";
+      edit.addEventListener("click", () => void openCustomCommandDialog(undefined, undefined, true, t));
+
+      const del = document.createElement("button");
+      del.className = "btn danger";
+      del.textContent = "删除";
+      del.addEventListener("click", () => {
+        void (async () => {
+          const ok = await confirm(`删除模板「${t.name}」？`, {
+            title: "删除模板",
+            kind: "warning",
+          });
+          if (!ok) return;
+          try {
+            state = await invoke<State>("remove_template", { id: t.id });
+            renderList();
+            render();
+            toast("模板已删除");
+          } catch (e) {
+            toast(String(e), "error");
+          }
+        })();
+      });
+      actTd.append(edit, del);
+
+      row.append(nameTd, typeTd, progTd, argsTd, catTd, actTd);
+      rowsEl.appendChild(row);
     }
   };
 
@@ -7541,7 +7885,7 @@ function openTemplateManager(): void {
   });
 
   (overlay.querySelector("#tpl-new") as HTMLButtonElement).addEventListener("click", () => {
-    void openCommandDialog(null);
+    void openCustomCommandDialog(undefined, undefined, true);
   });
 }
 
@@ -9217,27 +9561,6 @@ function openSettings(): void {
       void refreshRename();
     }
 
-    // 命令模板
-    {
-      const s = section(
-        "命令模板",
-        `共 ${state.commandTemplates.length} 条；新建「单应用」项目会自动套用，也可在项目树里按需导入`,
-      );
-      const row = document.createElement("div");
-      row.className = "set-row";
-      const lab = document.createElement("label");
-      lab.textContent = "模板库";
-      const btn = document.createElement("button");
-      btn.className = "btn";
-      btn.textContent = "管理命令模板…";
-      btn.addEventListener("click", () => {
-        // 不关闭设置面板：模板库叠在上面，关掉后还能继续改设置
-        openTemplateManager();
-      });
-      row.append(lab, btn);
-      s.appendChild(row);
-    }
-
     // 会话恢复
     {
       const s = section("会话恢复", "重启后恢复 tab 与历史输出，但不自动拉起进程");
@@ -9411,7 +9734,7 @@ function openSettings(): void {
         draft.terminal?.path ?? "",
         (v) => {
           const t = (v ?? "").trim();
-          draft.terminal = { path: t === "" ? null : t };
+          draft.terminal = { ...(draft.terminal ?? { path: null, filters: [] }), path: t === "" ? null : t };
         },
         { browse: "none" }, // 下面有带 exe 过滤的「浏览 exe…」
       );
@@ -9433,7 +9756,7 @@ function openSettings(): void {
               toast("没有检测到可用终端", "error");
               return;
             }
-            draft.terminal = { path: list[0].path };
+            draft.terminal = { ...(draft.terminal ?? { path: null, filters: [] }), path: list[0].path };
             const more = list.slice(1).map((x) => x.name).join("、");
             toast(`已选择 ${list[0].name}${more ? `；系统还检测到：${more}` : ""}`);
             build();
@@ -9457,7 +9780,7 @@ function openSettings(): void {
             });
             if (!picked) return;
             const p = Array.isArray(picked) ? picked[0] : picked;
-            draft.terminal = { path: p };
+            draft.terminal = { ...(draft.terminal ?? { path: null, filters: [] }), path: p };
             build();
           } catch (e) {
             toast(String(e), "error");
@@ -9761,6 +10084,7 @@ async function boot(): Promise<void> {
           <button class="btn menu-btn" id="btn-custom-menu">自定义命令 ▾</button>
           <button class="btn menu-btn" id="btn-tools-menu">工具 ▾</button>
           <button class="btn menu-btn" id="btn-schedule">🔁 循环任务</button>
+          <button class="btn menu-btn" id="btn-filter">🚫 终端过滤器</button>
         </div>
         <div class="tb-center"></div>
         <div class="tb-right">
@@ -9783,6 +10107,9 @@ async function boot(): Promise<void> {
               <button class="cbtn danger" id="btn-stop" disabled><i class="hi">⏹</i>停止</button>
               <button class="cbtn" id="btn-rerun" disabled><i class="hi">⟳</i>重跑</button>
               <button class="cbtn" id="btn-find" disabled title="搜索日志（Ctrl+F）"><i class="hi">🔍</i>搜索</button>
+              <label class="cbtn filter-toggle" id="filter-toggle-wrap" hidden title="只对新输出生效；仅 Flutter 终端可用">
+                <input type="checkbox" id="btn-filter-toggle" />过滤
+              </label>
               <button class="cbtn" id="btn-clear" disabled title="清空当前会话的日志（含回滚区；不影响进程）"><i class="hi">🧹</i>清空</button>
               <button class="cbtn" id="btn-open-proj" disabled title="用编辑器打开本会话的项目目录"><i class="hi">📂</i>项目</button>
             </span>
@@ -9942,6 +10269,7 @@ async function boot(): Promise<void> {
     openToolsMenu(e.currentTarget as HTMLElement);
   });
   req<HTMLButtonElement>("#btn-schedule").addEventListener("click", () => openScheduleTab());
+  req<HTMLButtonElement>("#btn-filter").addEventListener("click", () => openFilterPanel());
   req<HTMLButtonElement>("#btn-settings").addEventListener("click", () => openSettings());
   req<HTMLButtonElement>("#btn-rerun").addEventListener("click", () => {
     const s = activeSession();
@@ -9958,8 +10286,12 @@ async function boot(): Promise<void> {
     if (url) void openUrl(url).catch((e) => toast(String(e), "error"));
   });
 
-  // 日志搜索 / 清空
+  // 日志搜索 / 过滤 / 清空
   req<HTMLButtonElement>("#btn-find").addEventListener("click", () => openSearch());
+  req<HTMLInputElement>("#btn-filter-toggle").addEventListener("change", (e) => {
+    const s = activeSession();
+    if (s) setSessionFilter(s, (e.currentTarget as HTMLInputElement).checked);
+  });
   req<HTMLButtonElement>("#btn-clear").addEventListener("click", () => void clearActiveLog());
   req<HTMLButtonElement>("#term-search-next").addEventListener("click", () => runSearch(true));
   req<HTMLButtonElement>("#term-search-prev").addEventListener("click", () => runSearch(false));

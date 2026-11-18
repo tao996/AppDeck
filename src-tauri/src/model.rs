@@ -181,12 +181,29 @@ pub struct DockerSettings {
     pub compose_style: Option<String>,
 }
 
+/// 终端输出过滤规则（显示层过滤：只影响写进 xterm 的内容，不改变程序实际输出）
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct OutputFilter {
+    /// contain | prefix
+    pub mode: String,
+    /// 匹配内容，大小写敏感
+    pub pattern: String,
+    /// none | flutter（其余作用域暂未开放）
+    pub scope: String,
+    /// 是否启用；未启用时规则保留但不生效
+    pub enabled: bool,
+}
+
 /// 默认终端（项目右键「在终端中打开」使用）
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TerminalSettings {
     /// 终端可执行文件路径；留空则自动探测（pwsh > wt > powershell > cmd > bash）
     #[serde(default)]
     pub path: Option<String>,
+    /// 输出过滤规则；只对 flutter 终端的新输出生效
+    #[serde(default)]
+    pub filters: Vec<OutputFilter>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -529,5 +546,38 @@ mod tests {
         assert_eq!(back.process_hide_rules.len(), 2);
         assert!(!back.process_hide_rules_enabled);
         assert!(!back.process_auto_refresh);
+    }
+
+    /// 老 state.json 没有 terminal.filters 时，必须补成空数组。
+    #[test]
+    fn terminal_filters_default_empty_and_roundtrip() {
+        let old: Settings = serde_json::from_str(r#"{"terminal":{"path":null}}"#).unwrap();
+        assert!(old.terminal.filters.is_empty());
+
+        let state = State {
+            settings: Settings {
+                terminal: TerminalSettings {
+                    filters: vec![OutputFilter {
+                        mode: "contain".into(),
+                        pattern: "Failed to update ui::AXTree".into(),
+                        scope: "flutter".into(),
+                        enabled: true,
+                    }],
+                    ..TerminalSettings::default()
+                },
+                ..Settings::default()
+            },
+            ..State::default()
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("\"filters\""), "{json}");
+        assert!(
+            json.contains("\"pattern\":\"Failed to update ui::AXTree\""),
+            "{json}"
+        );
+
+        let back: State = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.settings.terminal.filters.len(), 1);
+        assert!(back.settings.terminal.filters[0].enabled);
     }
 }

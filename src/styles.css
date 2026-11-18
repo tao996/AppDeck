@@ -1490,20 +1490,38 @@ select.set-input {
 
 /* ---------------- 命令模板库 ---------------- */
 
-.tpl-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 4px;
-  border-bottom: 1px solid var(--line);
+.tpl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
 }
 
-.tpl-main {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
+.tpl-table th,
+.tpl-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: middle;
+}
+
+.tpl-table th {
+  color: #8b95a5;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.tpl-group-row td {
+  background: var(--bg-2);
+  color: var(--fg-faint);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+.tpl-row:hover td {
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .tpl-name {
@@ -1512,13 +1530,29 @@ select.set-input {
   white-space: nowrap;
 }
 
-.tpl-args {
+.tpl-code-cell {
+  font-family: var(--mono);
   font-size: 10.5px;
   color: var(--fg-faint);
-  font-family: var(--mono);
+  max-width: 240px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.tpl-actions {
+  white-space: nowrap;
+}
+
+.tpl-actions .btn {
+  padding: 0 8px;
+  margin-left: 6px;
+}
+
+.tpl-empty {
+  padding: 24px 8px;
+  text-align: center;
+  color: var(--fg-faint);
 }
 
 .imp-row {
@@ -3472,4 +3506,60 @@ select.set-input {
 .sched-pane-log mark {
   -webkit-user-select: text;
   user-select: text;
+}
+
+/* ---------------- 终端输出过滤器 ---------------- */
+
+.cbtn.filter-toggle {
+  gap: 5px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cbtn.filter-toggle input[type="checkbox"] {
+  margin: 0;
+  accent-color: #4a9eff;
+}
+
+.filter-modal {
+  width: 760px;
+  max-width: 94vw;
+}
+
+.filter-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 10px 0 4px;
+}
+
+.filter-table th,
+.filter-table td {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  font-size: 12px;
+}
+
+.filter-table th {
+  color: #8b95a5;
+  font-weight: 500;
+}
+
+.filter-table td .set-input {
+  width: 100%;
+}
+
+.filter-table td:nth-child(1),
+.filter-table td:nth-child(3) {
+  width: 110px;
+}
+
+.filter-table td:nth-child(4) {
+  width: 56px;
+  text-align: center;
+}
+
+.filter-table td:nth-child(5) {
+  width: 40px;
+  text-align: center;
 }
