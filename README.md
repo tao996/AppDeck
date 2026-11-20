@@ -110,7 +110,7 @@ npm run release:install   # 编译 + 静默安装 + 重新启动 AppDeck
 ## 项目结构
 
 ```
-src/                        前端（main.ts / styles.css）
+src/                        前端（入口 main.ts + 按功能拆分的模块 + styles.css）
 src-tauri/src/              Rust 后端（项目 / 导入 / 终端 / 设备 / 构建 / 备案）
 src-tauri/app-icon.svg      图标母版
 docs/                       截图与详细文档
@@ -125,6 +125,21 @@ docs/                       截图与详细文档
 | [ARCHITECTURE_V2.md](ARCHITECTURE_V2.md) | 架构决策与源码级证据 |
 | [readme_md_for_ai_agents.md](readme_md_for_ai_agents.md) | 权威规格（AI 助手必读） |
 | [PROJECT_ANALYSIS.md](PROJECT_ANALYSIS.md) | v1 需求评估（历史文档） |
+
+### 前端模块划分
+
+`src/main.ts` 只保留应用入口（`boot()` 与 `DOMContentLoaded`），其余按功能拆分：
+
+| 模块 | 职责 |
+|---|---|
+| `core.ts` | 全局类型、常量、可变状态与通用工具；跨模块状态写入器 |
+| `terminal.ts` / `tree.ts` | 终端会话/标签页/日志搜索、项目树渲染 |
+| `launcher.ts` / `projects.ts` | 会话挂载与命令启动、项目增删/导入/改名 |
+| `commands.ts` / `command-dialog.ts` / `project-menu.ts` | 自定义命令、命令编辑弹窗、项目右键菜单与模板管理 |
+| `schedule.ts` | 循环任务面板与任务编辑 |
+| `output.ts` / `persistence.ts` | 输出过滤与退出处理、会话日志持久化与恢复 |
+| `menus.ts` / `emulator.ts` / `database.ts` | 通用菜单、模拟器菜单、数据库查看器 |
+| `panels.ts` / `doctor.ts` / `settings.ts` | 环境/备案弹窗、环境体检、设置页 |
 
 ## 开发
 
