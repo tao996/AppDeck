@@ -1530,14 +1530,22 @@ select.set-input {
   white-space: nowrap;
 }
 
-.tpl-code-cell {
+.tpl-cmd-cell {
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--fg-faint);
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 320px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.tpl-cmd-prog {
+  color: var(--fg);
+}
+
+.tpl-cmd-args {
+  color: var(--fg-faint);
 }
 
 .tpl-actions {

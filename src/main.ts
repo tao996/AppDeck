@@ -7763,7 +7763,7 @@ function openTemplateManager(): void {
   const renderList = (): void => {
     body.innerHTML = `
       <table class="tpl-table">
-        <thead><tr><th>名称</th><th>类型</th><th>程序</th><th>参数</th><th>分类</th><th>操作</th></tr></thead>
+        <thead><tr><th>名称</th><th>命令（程序 + 参数）</th><th>分类</th><th>操作</th></tr></thead>
         <tbody id="tpl-rows"></tbody>
       </table>
     `;
@@ -7771,7 +7771,7 @@ function openTemplateManager(): void {
 
     if (state.commandTemplates.length === 0) {
       const tr = document.createElement("tr");
-      tr.innerHTML = `<td colspan="6" class="tpl-empty">模板库为空，点「＋ 添加自定义命令」添加。</td>`;
+      tr.innerHTML = `<td colspan="4" class="tpl-empty">模板库为空，点「＋ 添加自定义命令」添加。</td>`;
       rowsEl.appendChild(tr);
       return;
     }
@@ -7791,7 +7791,7 @@ function openTemplateManager(): void {
         lastCategory = cat;
         const head = document.createElement("tr");
         head.className = "tpl-group-row";
-        head.innerHTML = `<td colspan="6">${esc(CATEGORY_LABEL[cat] ?? cat)}</td>`;
+        head.innerHTML = `<td colspan="4">${esc(CATEGORY_LABEL[cat] ?? cat)}</td>`;
         rowsEl.appendChild(head);
       }
 
@@ -7801,17 +7801,25 @@ function openTemplateManager(): void {
       const nameTd = document.createElement("td");
       nameTd.innerHTML = `<span class="tpl-name">${esc(t.name)}</span>`;
 
-      const typeTd = document.createElement("td");
-      typeTd.innerHTML = `<span class="chip ${t.kind === "build" ? "src-custom" : "src-fvm"}">${esc(t.kind)}</span>${t.buildType ? ` <span class="fver">${esc(t.buildType)}</span>` : ""}${t.flutterMode ? ` <span class="fver">${esc(t.flutterMode)}</span>` : ""}`;
-
-      // 程序和参数用 textContent，避免路径里的特殊字符被当成 HTML
-      const progTd = document.createElement("td");
-      progTd.className = "tpl-code-cell";
-      progTd.textContent = t.program ?? "—";
-
-      const argsTd = document.createElement("td");
-      argsTd.className = "tpl-code-cell";
-      argsTd.textContent = joinArgs(t.args ?? []);
+      // 程序 + 参数合成一列，允许换行；用 textContent 避免路径里的特殊字符被当成 HTML
+      const cmdTd = document.createElement("td");
+      cmdTd.className = "tpl-cmd-cell";
+      const prog = (t.program ?? "").trim();
+      const argText = joinArgs(t.args ?? []);
+      if (prog) {
+        const p = document.createElement("code");
+        p.className = "tpl-cmd-prog";
+        p.textContent = prog;
+        cmdTd.appendChild(p);
+      }
+      if (argText) {
+        if (prog) cmdTd.appendChild(document.createTextNode(" "));
+        const a = document.createElement("code");
+        a.className = "tpl-cmd-args";
+        a.textContent = argText;
+        cmdTd.appendChild(a);
+      }
+      if (!prog && !argText) cmdTd.textContent = "—";
 
       const catTd = document.createElement("td");
       // 分类可直接改（改了就落盘，用于纠正自动推断）
@@ -7869,7 +7877,7 @@ function openTemplateManager(): void {
       });
       actTd.append(edit, del);
 
-      row.append(nameTd, typeTd, progTd, argsTd, catTd, actTd);
+      row.append(nameTd, cmdTd, catTd, actTd);
       rowsEl.appendChild(row);
     }
   };
