@@ -265,12 +265,22 @@ export async function pickApkAndInspect(): Promise<void> {
   }
 }
 
-export function filingField(label: string, value: string | null | undefined, big = false): string {
+export function filingField(
+  label: string,
+  value: string | null | undefined,
+  big = false,
+  smartCopy = false,
+): string {
   const v = value?.trim() || "";
   return `
     <div class="fl-row${big ? " big" : ""}">
       <span class="fl-label">${esc(label)}</span>
       <code class="fl-value">${v ? esc(v) : '<span class="fl-empty">—</span>'}</code>
+      ${
+        v && smartCopy
+          ? `<button class="btn fl-smart-copy" title="去掉:号，全部转小写" data-smart-copy="${esc(v)}">智能复制</button>`
+          : ""
+      }
       ${v ? `<button class="btn fl-copy" data-copy="${esc(v)}">复制</button>` : ""}
     </div>`;
 }
@@ -335,7 +345,7 @@ export async function showFilingInfo(apk: string): Promise<void> {
     <div class="fl-section">备案三要素</div>
     ${filingField("应用名称", info.appLabel, true)}
     ${filingField("应用包名", info.package, true)}
-    ${filingField("应用 MD5", info.md5, true)}
+    ${filingField("应用 MD5(签名)", info.md5, true, true)}
     ${
       info.publicKey
         ? filingField("应用公钥", info.publicKey, true)
@@ -350,8 +360,8 @@ export async function showFilingInfo(apk: string): Promise<void> {
     ${filingField("SDK", [info.minSdk ? `min ${info.minSdk}` : "", info.targetSdk ? `target ${info.targetSdk}` : ""].filter(Boolean).join(" · "))}
     ${filingField("签名方案", info.scheme ? `V${info.scheme}` : null)}
     ${filingField("证书 DN", info.dn)}
-    ${filingField("SHA-1", info.sha1)}
-    ${filingField("SHA-256", info.sha256)}
+    ${filingField("SHA-1", info.sha1, false, true)}
+    ${filingField("SHA-256", info.sha256, false, true)}
 
     ${
       info.warnings.length
@@ -367,6 +377,16 @@ export async function showFilingInfo(apk: string): Promise<void> {
       void navigator.clipboard
         .writeText(b.dataset.copy ?? "")
         .then(() => toast("已复制"))
+        .catch((e) => toast(String(e), "error"));
+    });
+  });
+
+  body.querySelectorAll<HTMLButtonElement>(".fl-smart-copy").forEach((b) => {
+    b.addEventListener("click", () => {
+      const cleaned = (b.dataset.smartCopy ?? "").replace(/[：:]/g, "").toLowerCase();
+      void navigator.clipboard
+        .writeText(cleaned)
+        .then(() => toast("已智能复制"))
         .catch((e) => toast(String(e), "error"));
     });
   });
