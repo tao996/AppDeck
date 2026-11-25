@@ -152,15 +152,29 @@ export async function revealLocation(cwd: string, raw: string): Promise<void> {
     toast(`无法解析路径：${raw}`, "error");
     return;
   }
-  if (!loc.exists) {
-    toast(`文件不存在：${loc.path}`, "error");
+  if (loc.exists) {
+    try {
+      await revealItemInDir(loc.path);
+    } catch (e) {
+      toast(String(e), "error");
+    }
     return;
   }
+
+  // 文件可能只是还没生成：日志里打印的路径、SharedPreferences 还没落盘、
+  // 构建产物被清理过……「打开所在目录」要的是目录，别因为文件不在就报错。
+  const dir = parentDir(loc.path);
   try {
-    await revealItemInDir(loc.path);
-  } catch (e) {
-    toast(String(e), "error");
+    await invoke("open_path_default", { path: dir });
+  } catch {
+    toast(`文件与所在目录都不存在：${loc.path}`, "error");
   }
+}
+
+/** 去掉最后一段（文件名），得到所在目录；没有分隔符时原样返回 */
+function parentDir(path: string): string {
+  const idx = Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/"));
+  return idx > 0 ? path.slice(0, idx) : path;
 }
 
 /** 网址走系统浏览器；其余仍按磁盘位置处理 */
@@ -284,7 +298,7 @@ export function showLinkMenu(ev: MouseEvent, cwd: string, raw: string): void {
   }
 
   item("用编辑器打开", "用默认编辑器，定位到对应行", () => void openLocation(cwd, raw));
-  item("在资源管理器中定位", "选中该文件", () => void revealLocation(cwd, raw));
+  item("打开所在目录", "在资源管理器中选中该文件", () => void revealLocation(cwd, raw));
   item("复制路径", "", () => {
     void copyPlainText(raw)
       .then(() => toast("已复制"))
