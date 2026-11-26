@@ -370,9 +370,25 @@ export async function pickScriptFile(): Promise<string | null> {
   return Array.isArray(picked) ? picked[0] : picked;
 }
 
-/** 常用配置示例：新用户不知道占位符和脚本怎么写，给一份可照抄的清单 */
+export interface UsageExample {
+  title: string;
+  desc: string;
+  program: string;
+  args: string;
+  cwd: string;
+  scope: string;
+}
+
+/**
+ * 常用配置示例：新用户不知道占位符和脚本怎么写，给一份可照抄的清单。
+ *
+ * 同一个面板既服务 flutter 命令面板，也服务「自定义命令」面板
+ * （工具栏全局命令 / 非 Flutter 项目命令 / 全局模板），
+ * 调用方可用 `note` 补充本作用域特有的限制。
+ */
 export function showUsageExamples(
-  apply: (ex: { program: string; args: string; cwd: string; scope: string }) => void,
+  apply: (ex: UsageExample) => void,
+  opts?: { note?: string },
 ): void {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -404,14 +420,16 @@ export function showUsageExamples(
     + " program / args / cwd 里都能用。";
   body.appendChild(note);
 
-  const examples: Array<{
-    title: string;
-    desc: string;
-    program: string;
-    args: string;
-    cwd: string;
-    scope: string;
-  }> = [
+  if (opts?.note) {
+    const extra = document.createElement("div");
+    extra.className = "set-note";
+    // 示例卡片紧跟其后；.set-note 原本是给 flex 行内用的，这里补一点与卡片的间距
+    extra.style.marginBottom = "8px";
+    extra.textContent = opts.note;
+    body.appendChild(extra);
+  }
+
+  const examples: UsageExample[] = [
     {
       title: "跑项目里的 PowerShell 脚本",
       desc: "自动用 PowerShell 执行（含 -ExecutionPolicy Bypass），以项目根为工作目录",
@@ -438,9 +456,19 @@ export function showUsageExamples(
     },
     {
       title: "用项目自己的 flutter",
-      desc: "鸿蒙工程会自动指向鸿蒙分支；配合 args 可执行任意 flutter 子命令",
+      desc: "鸿蒙工程会自动指向鸿蒙分支；参数要写完整的 flutter 子命令（pub get / run …），不是只写模式",
       program: "%FLUTTER%",
       args: "pub get",
+      cwd: "",
+      scope: "全局",
+    },
+    {
+      title: "国内渠道 Debug（用项目自己的 flutter）",
+      desc:
+        "flutter run 直接带 --dart-define；debug 是 run 的默认构建模式，不用写成位置参数"
+        + "（写成 debug 会被当成入口文件，报 Target file \"debug\" not found）",
+      program: "%FLUTTER%",
+      args: "run --dart-define=APP_CHANNEL=cn --dart-define=PAYMENT_PROVIDER=wechat",
       cwd: "",
       scope: "全局",
     },
@@ -481,7 +509,7 @@ export function showUsageExamples(
     fill.className = "btn";
     fill.textContent = "填入";
     fill.addEventListener("click", () => {
-      apply({ program: ex.program, args: ex.args, cwd: ex.cwd, scope: ex.scope });
+      apply(ex);
       close();
       toast("已填入表单（记得点保存）");
     });

@@ -579,9 +579,6 @@ export function updateControls(): void {
       : s.kind === "custom"
         ? "结束当前进程并重新启动这条自定义命令"
         : "重新执行原命令（自动运行）";
-  const info = req<HTMLSpanElement>("#ctx-info");
-  info.textContent = s ? `${s.title}  ·  ${s.device}  ·  ${STATUS_TEXT[s.status]}` : "等待会话";
-
   // 构建产物
   const bar = req<HTMLSpanElement>("#artifact-bar");
   bar.innerHTML = "";

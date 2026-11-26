@@ -512,12 +512,6 @@ body.dragging .term-pane {
   background: rgba(255, 255, 255, 0.08);
   color: var(--fg);
 }
-.ctx-info {
-  font-size: 11px;
-  color: var(--fg-faint);
-  font-family: var(--mono);
-}
-
 .term-holder {
   flex: 1;
   position: relative;

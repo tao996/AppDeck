@@ -4,7 +4,7 @@
 import { openCommandDialog } from "./command-dialog";
 import { esc, req, setState, state, toast } from "./core";
 import { launchingKeys, liveSessionFor, markLaunching, mountSession, replaceSessionInPlace, staleSessionFor } from "./launcher";
-import { joinArgs, pickScriptFile, splitArgs, templateListRefresh } from "./menus";
+import { joinArgs, pickScriptFile, showUsageExamples, splitArgs, templateListRefresh } from "./menus";
 import { closeAllMenus, openTemplateManager, renderMenuRows, setProjMenuEl } from "./project-menu";
 import { activateSession } from "./terminal";
 import { render } from "./tree";
@@ -174,6 +174,7 @@ export async function openCustomCommandDialog(
         <span class="modal-hint"></span>
         <span class="flex1"></span>
         <button class="btn" id="cc-import-script">从脚本导入…</button>
+        <button class="btn" id="cc-examples">使用示例</button>
         <button class="btn" id="cc-cancel">取消</button>
         <button class="btn primary" id="cc-save">保存</button>
       </div>
@@ -465,6 +466,42 @@ export async function openCustomCommandDialog(
         hint.textContent = String(e);
       }
     })();
+  });
+
+  // 「使用示例」：与 flutter 命令面板共用同一份示例清单（menus.showUsageExamples）。
+  // 工具栏的全局命令按「程序 + 参数」原样启动，不展开占位符，所以这里额外提示一句，
+  // 避免把 %FLUTTER% 示例填进去后运行时才失败。
+  (overlay.querySelector("#cc-examples") as HTMLButtonElement).addEventListener("click", () => {
+    const isToolbar = !project && !asTemplate;
+    showUsageExamples(
+      (ex) => {
+        draft.program = ex.program;
+        draft.args = ex.args;
+        draft.cwd = ex.cwd;
+        draft.target = "";
+        programEl.value = ex.program;
+        argsEl.value = ex.args;
+        cwdEl.value = ex.cwd;
+        renderTarget();
+
+        if (isToolbar && /%[A-Za-z_]+%/.test(`${ex.program} ${ex.args} ${ex.cwd}`)) {
+          hint.textContent =
+            "工具栏自定义命令不展开 %FLUTTER% / %PROJECT% / %CWD%；要用占位符请存成项目命令或全局模板。";
+        } else if (isToolbar && /\.(bat|cmd)$/i.test(ex.program)) {
+          hint.textContent = "工具栏不支持直接运行 .bat/.cmd；请改成 .exe 或 .lnk。";
+        } else {
+          hint.textContent = "";
+        }
+        toast("已填入表单，记得点「保存」");
+      },
+      isToolbar
+        ? {
+            note:
+              "注意：工具栏的全局自定义命令按「程序 + 参数」原样启动，不展开 %FLUTTER% / %PROJECT% / %CWD%；"
+              + "带占位符的示例适用于项目命令与全局模板。",
+          }
+        : undefined,
+    );
   });
 
   saveBtn.addEventListener("click", () => {

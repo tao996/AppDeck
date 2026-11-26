@@ -68,7 +68,6 @@ export async function boot(): Promise<void> {
             </span>
             <span class="flex1"></span>
             <span class="artifact-bar" id="artifact-bar"></span>
-            <span class="ctx-info" id="ctx-info">等待会话</span>
           </div>
           <div class="term-holder" id="term-holder">
             <div class="term-search" id="term-search" hidden>

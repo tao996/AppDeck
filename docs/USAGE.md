@@ -34,6 +34,9 @@
   - `global` — **项目右键即可执行，不写入项目命令列表**
 - **自动套用**：新增「单应用」项目时自动把模板实例化为该项目的命令，不再是空树
 - **按需导入**：项目树底部「⤓ 从模板导入…」，勾选后导入（支持全选 / 全不选，按名称+类型去重）
+- **使用示例**：模板编辑面板底部「使用示例」，给可照抄的配置（含「国内渠道 Debug」：
+  `%FLUTTER%` + `run --dart-define=APP_CHANNEL=cn --dart-define=PAYMENT_PROVIDER=wechat`），
+  点卡片右侧「填入」直接写进当前表单
 - **分类**：模板带 `category`（Flutter / npm / Docker / 其他），决定模板库里的分组和导入时的筛选条；
   老模板没有这个字段时按 program/args 自动推断（`%FLUTTER%`→Flutter、npm/pnpm/yarn→npm、
   docker→docker），模板库右侧的下拉可以直接改
@@ -158,6 +161,9 @@
   `powershell -File`（全局命令不经过 shell）；`.sh` 用 `bash <脚本>`；
   `.py` 优先用脚本目录向上找到的 `.venv / venv / env` 里的 `python.exe`，
   还可以在「Python 虚拟环境」下拉里切换（详见下方「Python 脚本与虚拟环境」）
+- **使用示例**：与 flutter 命令面板共用同一份示例清单，点「填入」直接写进程序 / 参数 / 工作目录；
+  注意工具栏命令按「程序 + 参数」原样启动，**不展开** `%FLUTTER%` / `%PROJECT%` / `%CWD%`
+  占位符，带占位符的示例请存成项目命令或全局模板
 
 ![自定义命令](shot-custom-command.png)
 
